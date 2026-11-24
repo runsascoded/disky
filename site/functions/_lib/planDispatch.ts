@@ -113,10 +113,13 @@ export const PLAN_SWEEP_RUN_INSERT = `
 `
 
 /** The Batch task's script: expand the run dir's `plan.json` into a manifest (`plan-sweep manifest PLAN_PATH`, the
- *  plan positional), then execute it, pinging the site on exit (success or failure) so it reflects the run now. */
+ *  plan positional), then execute it, pinging the site on exit (success or failure) so it reflects the run now, and
+ *  every minute meanwhile, so it records the run's progress file as a sample (`mirrorProgress`) with no page open. */
 export const planSweepScript = (runMnt: string, forReal: boolean, minSoftDeleteDays: number): string => [
   'set -euo pipefail',
-  `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true' EXIT`,
+  `site_refresh() { curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true; }`,
+  `(while sleep 60; do site_refresh; done) & PINGER=$!`,
+  `trap 'kill $PINGER 2>/dev/null; site_refresh' EXIT`,
   `RUN="${runMnt}"`,
   `python -c 'from os import environ; from dt_cloud.scan_steps import r2_profile; env = dict(environ); r2_profile(env); environ.update(env); from dt_cloud.cli import main; main()' plan-sweep manifest "$RUN/plan.json" -d "$SWEEP_DATE" -o "$RUN"`,
   `dt-cloud plan-sweep execute ${forReal ? '--for-real ' : ''}-s ${minSoftDeleteDays} "$RUN"`,

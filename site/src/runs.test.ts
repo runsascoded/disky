@@ -3,7 +3,7 @@ import { planDigest, realRun, type RunRow } from '../functions/_lib/plans'
 import {
   attemptOnly, itemsDigest, reusableDryRun, totalsLowerBound,
   commonBucketPrefix, deletedBuckets, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, expectedOf, joinRuns, loggedOf, plannedOf, runControls,
-  progressEstimate, type ProgressFile, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, undoStatus, verifyRun, viewBuckets, viewState,
+  progressEstimate, type ProgressFile, progressFromSamples, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, undoStatus, verifyRun, viewBuckets, viewState,
 } from './runs'
 
 const GCS_JOB = 'gcs-sweep-real-20260928-120000z'
@@ -141,6 +141,21 @@ describe('run-dir files: planned, progress, logged', () => {
       { decided: 170, percent: null, secondsLeft: null, stale: false },
       { decided: 0, percent: 0, secondsLeft: null, stale: false },
       { decided: 170, percent: 100, secondsLeft: null, stale: false },
+    ])
+  })
+
+  it('a sampled run (no run dir to read) takes each bucket\'s newest sample, started at its first; a later threshold keeps it fresh', () => {
+    const s = (bucket: string, ts: number, deletes: number, done = 0) => ({ bucket, ts, deletes, bytes: deletes * 10, gone: 3, overwritten: 1, failed: 0, done, bytes_exact: 1 })
+    const T = Date.parse('2026-11-24T17:00:00Z') / 1000
+    const ps = progressFromSamples([s('b', T + 120, 900), s('a', T + 60, 50, 1), s('b', T, 0), s('b', T + 60, 400), s('a', T, 10)])
+    expect(ps).toEqual([
+      { roots: 0, roots_done: 0, decisions: { delete: 50, skipped_gone: 3, skipped_overwritten: 1, delete_failed: 0 }, delete_bytes: 500, started: '2026-11-24T17:00:00.000Z', updated: '2026-11-24T17:01:00.000Z', done: true },
+      { roots: 0, roots_done: 0, decisions: { delete: 900, skipped_gone: 3, skipped_overwritten: 1, delete_failed: 0 }, delete_bytes: 9000, started: '2026-11-24T17:00:00.000Z', updated: '2026-11-24T17:02:00.000Z', done: false },
+    ])
+    expect([progressFromSamples([]), progressEstimate(ps, 10000, T + 120 + 150), progressEstimate(ps, 10000, T + 120 + 150, 180)]).toEqual([
+      [],
+      { decided: 958, percent: 9.58, secondsLeft: null, stale: true },
+      { decided: 958, percent: 9.58, secondsLeft: 1201, stale: false },
     ])
   })
   it('plannedOf: the total, else the buckets\' sum', () => {

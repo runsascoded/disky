@@ -8,7 +8,9 @@ describe('plan-sweep dispatch script', () => {
   it('passes the plan positionally, then executes (dry and for real)', () => {
     expect([false, true].map(real => planSweepScript('/gcs/d/sweep/cw/runs/j', real, 3).split('\n'))).toEqual([false, true].map(real => [
       'set -euo pipefail',
-      `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true' EXIT`,
+      `site_refresh() { curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true; }`,
+      `(while sleep 60; do site_refresh; done) & PINGER=$!`,
+      `trap 'kill $PINGER 2>/dev/null; site_refresh' EXIT`,
       'RUN="/gcs/d/sweep/cw/runs/j"',
       `python -c 'from os import environ; from dt_cloud.scan_steps import r2_profile; env = dict(environ); r2_profile(env); environ.update(env); from dt_cloud.cli import main; main()' plan-sweep manifest "$RUN/plan.json" -d "$SWEEP_DATE" -o "$RUN"`,
       `dt-cloud plan-sweep execute ${real ? '--for-real ' : ''}-s 3 "$RUN"`,

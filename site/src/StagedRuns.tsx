@@ -15,7 +15,7 @@ import { UserChip } from './UserChip'
 import { TimeCell } from './PrefixTable'
 import { RunOutcome, runOutcomeLabel } from './RunOutcome'
 import { Link } from 'react-router-dom'
-import { RunProgress } from './RunProgress'
+import { RunProgress, useRunHistories } from './RunProgress'
 import { RunBucketProgress } from './RunBucketProgress'
 import { RunArtifacts, RunPlan } from './RunArtifacts'
 import { RunBands } from './RunBands'
@@ -33,7 +33,7 @@ import { ReviewPreservation } from './RunPreservation'
 import {
   ATTEMPTED, attemptOnly, LOWER_BOUND, NOT_OBSERVABLE, totalsLowerBound, UNDO_CAVEAT, UNDO_LOG_ONLY,
   type Check, commonBucketPrefix, deletedBuckets, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
-  type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
+  type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, progressFromSamples, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
   expectedOf, undoStatus, verifyRun, viewBuckets, viewLive, viewState, joinRuns,
 } from './runs'
 import { RecoveryUnavailable, RecoveryUnseen, UndoBy, UndoControl, UndoLine } from './RunUndo'
@@ -67,6 +67,9 @@ const dirOf = (v: RunView): string | null => {
   const d = v.run?.log_dir ?? v.job?.plan ?? v.job?.run
   return d ? runFilesRel(d) : null
 }
+
+/** A sampled run's (cw's) newest progress is up to a minute's refresh plus the file's 30 s old: stale past this. */
+const SAMPLED_STALE = 180
 
 export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, act, fmtBytes, refreshing, placed = false }: {
   runs: DeletionRun[]
@@ -104,6 +107,10 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const progQs = useRunFiles<ProgressFile>(progTargets.map(t => t.rel), true)
   const progress = new Map<string, ProgressFile[]>()
   progTargets.forEach((t, i) => { const p = progQs[i]?.data; if (p) progress.set(t.key, [...(progress.get(t.key) ?? []), p]) })
+  // No run dir to read (cw): the samples the site recorded of the job's progress files.
+  const sampled = CAPS.runFiles ? [] : views.filter(v => viewLive(v) && v.run)
+  const historyQs = useRunHistories(sampled.map(v => v.run!.run_id), !CAPS.runFiles)
+  sampled.forEach((v, i) => { const ss = historyQs[i]?.data?.samples; if (ss?.length) progress.set(v.key, progressFromSamples(ss)) })
 
   // The table's view is the URL's (`urlParams.ts`): filters, sort, page and size, and the open run.
   const [pageSize, setPageSize] = useUrlState('rn', runsSizeParam)
@@ -206,7 +213,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const preserved = planOf(v)?.file.total?.skipped_after_as_of
               const prog = progress.get(v.key)
               const p = prog ? sumProgress(prog) : null
-              const estimate = prog ? progressEstimate(prog, plan?.objects, now) : null
+              // A run with no plan summary to read (cw) measures against what was selected at dispatch.
+              const goal = plan ?? expected
+              const estimate = prog ? progressEstimate(prog, goal?.objects, now, CAPS.runFiles ? undefined : SAMPLED_STALE) : null
               const secs = elapsed(v, now)
               const startedTs = r?.started_ts ?? (job?.created ? Date.parse(job.created) / 1000 : null)
               const buckets = viewBuckets(v)
@@ -237,12 +246,12 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       ) : live && p ? (
                         <Tooltip content={<>
                           {mode === 'dry' && <div>Dry run only: no objects are being deleted.</div>}
-                          {plan && estimate?.percent != null && <div>{estimate.percent.toFixed(2)}% accounted for · {fmtN(estimate.decided)} of {fmtN(plan.objects)} planned objects (deletes + skips/failures)</div>}
-                          <div>{p.rate.toLocaleString('en-US')}/s {runOutcomeLabel(mode)} · {fmtN(p.roots_done)} / {fmtN(p.roots)} reported roots complete</div>
+                          {goal && estimate?.percent != null && <div>{estimate.percent.toFixed(2)}% accounted for · {fmtN(estimate.decided)} of {fmtN(goal.objects)} {plan ? 'planned' : 'expected'} objects (deletes + skips/failures)</div>}
+                          <div>{p.rate.toLocaleString('en-US')}/s {runOutcomeLabel(mode)}{p.roots > 0 && <> · {fmtN(p.roots_done)} / {fmtN(p.roots)} reported roots complete</>}</div>
                           <div>{estimate?.secondsLeft != null ? `Rough ETA: ${estimate.secondsLeft < 60 ? '<1m' : fmtDur(estimate.secondsLeft)} remaining at the active bucket's average decision rate. Other buckets may differ; not a deadline.` : estimate?.stale ? 'ETA unavailable: progress sample is stale.' : 'ETA unavailable until enough progress is reported.'}</div>
                         </>}>
-                          <RunOutcome mode={mode}><span className="prog"><progress max={plan?.objects || undefined} value={estimate?.decided ?? p.deletes} /> {fmtBytes(p.bytes)} · {fmtN(p.deletes)} · {p.rate.toLocaleString('en-US')}/s
-                            {estimate?.percent != null && <span className="prog-estimate dim">{percentOf(estimate.decided, plan?.objects ?? 0)}{estimate.secondsLeft != null ? ` · ~${estimate.secondsLeft < 60 ? '<1m' : fmtDur(estimate.secondsLeft)} left` : estimate.stale ? ' · stale' : ''}</span>}
+                          <RunOutcome mode={mode}><span className="prog"><progress max={goal?.objects || undefined} value={estimate?.decided ?? p.deletes} /> {fmtBytes(p.bytes)} · {fmtN(p.deletes)} · {p.rate.toLocaleString('en-US')}/s
+                            {estimate?.percent != null && <span className="prog-estimate dim">{percentOf(estimate.decided, goal?.objects ?? 0)}{estimate.secondsLeft != null ? ` · ~${estimate.secondsLeft < 60 ? '<1m' : fmtDur(estimate.secondsLeft)} left` : estimate.stale ? ' · stale' : ''}</span>}
                           </span></RunOutcome>
                         </Tooltip>
                       ) : live && CAPS.runFiles && !plan ? (
@@ -263,7 +272,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       {r?.undo_state === 'partial' && !ctl.undoing && <Tooltip content="Some of what this run deleted is live again, not all of it: an undo restored part, or found it live. Undo again to retry the rest."><span className="tag">partly undone</span></Tooltip>}
                       {r?.purge_state === 'done' && <span className="tag">purged</span>}
                     </td>
-                    <td>{CAPS.runFiles && r && <RunProgress id={r.run_id} live={live} compact fmtBytes={fmtBytes} lifetime={secs != null ? { objects: r.finished_ts ? r.deleted_objects : p?.deletes ?? 0, seconds: secs } : undefined} />}</td>
+                    <td>{r && <RunProgress id={r.run_id} live={live} compact fmtBytes={fmtBytes} lifetime={secs != null ? { objects: r.finished_ts ? r.deleted_objects : p?.deletes ?? 0, seconds: secs } : undefined} />}</td>
                     <td className="num"><Tooltip cell content={<>{elapsedDetails(v).map(line => <div key={line}>{line}</div>)}</>}><span>{secs == null ? <span className="dim">—</span> : fmtDur(secs)}</span></Tooltip></td>
                     <td className="num">{attempted && !r?.skipped_gone ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_gone) : p ? fmtN(p.gone) : <span className="dim">—</span>}</td>
                     <td className="num">{attempted && !r?.skipped_overwritten ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_overwritten ?? 0) : <span className="dim">—</span>}</td>
@@ -360,7 +369,7 @@ export function RunDetail({ run, live, progress, dir, planned, fmtBytes, now }: 
 
   return (
     <div className="run-detail">
-      {CAPS.runFiles && <RunProgress id={run.run_id} live={live} fmtBytes={fmtBytes} planned={planned} />}
+      <RunProgress id={run.run_id} live={live} fmtBytes={fmtBytes} planned={planned} />
       <dl className="rd-totals">
         {live ? <div><dt>live progress</dt><dd>{progress ? <>{fmtBytes(progress.bytes)} · {fmtN(progress.deletes)} {r.mode === 'dry' ? 'would delete' : attempted ? 'acknowledged' : 'deleted'}{!attempted && <> · {fmtN(progress.gone)} gone</>}</> : 'waiting for progress'}<span className="dim"> · final totals recorded when the run ends</span></dd></div>
           : <div><dt>{lower ? 'totals so far' : 'final totals'}</dt><dd>{lower && 'at least '}{fmtBytes(r.deleted_bytes)} · {fmtN(r.deleted_objects)} {r.mode === 'dry' ? 'would delete' : attempted ? 'attempted and acknowledged' : 'deleted'}{attempted ? <span className="dim"> · {NOT_OBSERVABLE}</span> : <> · {fmtN(r.skipped_gone)} already gone · {fmtN(r.skipped_overwritten ?? 0)} replaced objects preserved</>}{lower && <span className="dim"> · {LOWER_BOUND}</span>}</dd></div>}

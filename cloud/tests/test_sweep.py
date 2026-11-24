@@ -273,6 +273,20 @@ def test_execute_for_real_deletes_matched(tmp_path: Path) -> None:
                            "gone": 1, "overwritten": 1, "drift_new": 1}]
 
 
+@pytest.mark.parametrize("for_real,mode", [(True, "deleted"), (False, "would-delete")])
+def test_execute_writes_final_progress(tmp_path: Path, for_real: bool, mode: str) -> None:
+    """`progress/<bucket>.json` ends as gcs's executor's snapshot of the same decisions, `done`."""
+    run = _run_with_manifest(tmp_path)
+    execute_plan(str(run), for_real=for_real, client=_FakeStore(_LIVE, versioning="Enabled"))
+    snap = json.loads((run / "progress" / f"{BUCKET}.json").read_text())
+    assert dt.datetime.fromisoformat(snap.pop("started")) <= dt.datetime.fromisoformat(snap.pop("updated"))
+    assert snap == {
+        "bucket": BUCKET, "mode": mode, "roots": 1, "roots_done": 1,
+        "decisions": {"skipped_gone": 1, "skipped_overwritten": 1, "delete": 1},
+        "delete_bytes": 100, "done": True,
+    }
+
+
 @pytest.mark.parametrize("versioning", ["Enabled", "Suspended", None])
 def test_execute_for_real_needs_no_versioning(
     tmp_path: Path,

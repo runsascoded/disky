@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useActions } from 'use-kbd'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { intParam, stringParam, useUrlState } from 'use-prms'
 import { historyPoints, type HistoryPoint, type ProgressSample, runHref } from './runHistory'
@@ -18,17 +18,24 @@ const metricKey = { rate: 'r', objects: 'o', bytes: 'b', byteRate: 'v' }
 const isRate = (m: Metric | null) => m === 'rate' || m === 'byteRate'
 const validMetric = (s: string | undefined): Metric => metrics.includes(s as Metric) ? s as Metric : 'rate'
 
+const historyQuery = (id: string, live: boolean) => ({
+  queryKey: ['run-history', id],
+  queryFn: async (): Promise<{ samples: ProgressSample[] }> => {
+    const r = await fetch(`/api/plans/progress?id=${encodeURIComponent(id)}`, { credentials: 'include' })
+    if (!r.ok) throw new Error(`Progress history: HTTP ${r.status}`)
+    return r.json()
+  },
+  refetchInterval: live ? 30_000 : false as const,
+  staleTime: 20_000,
+})
+
 function useHistory(id: string, live: boolean) {
-  return useQuery<{ samples: ProgressSample[] }>({
-    queryKey: ['run-history', id],
-    queryFn: async () => {
-      const r = await fetch(`/api/plans/progress?id=${encodeURIComponent(id)}`, { credentials: 'include' })
-      if (!r.ok) throw new Error(`Progress history: HTTP ${r.status}`)
-      return r.json()
-    },
-    refetchInterval: live ? 30_000 : false,
-    staleTime: 20_000,
-  })
+  return useQuery(historyQuery(id, live))
+}
+
+/** Several runs' recorded samples (`deletion_progress`), each polled while live; shares `RunProgress`'s cache. */
+export function useRunHistories(ids: readonly string[], enabled: boolean) {
+  return useQueries({ queries: ids.map(id => ({ ...historyQuery(id, true), enabled })) })
 }
 
 function paths(points: HistoryPoint[], value: (p: HistoryPoint) => number | null, x: (ts: number) => number, y: (v: number) => number): string[] {

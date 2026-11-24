@@ -4,6 +4,7 @@
 // the checks a run's detail shows, and which controls a run offers under
 // the deployment's executor capabilities. Nothing here names a deployment.
 import { runHasNoUndo, runNoUndoText, UNDO_UNAVAILABLE_WHY, type UndoUnavailable, undoUnavailableText, type UndoUnseen } from './softDelete'
+import type { ProgressSample } from './runHistory'
 
 /** A deletion run as the deployment's executor records it (`deletion_runs`;
  * cw's and gcs's rows share these columns). */
@@ -309,6 +310,29 @@ export interface ProgressFile {
 
 export interface Progress { deletes: number; gone: number; bytes: number; roots: number; roots_done: number; rate: number }
 
+/** A run's progress where the page can't read its run dir (`!runFiles`: cw), from the samples the site recorded of its
+ *  progress files (`deletion_progress`): per bucket, its newest sample, `started` at its first. Roots aren't sampled. */
+export function progressFromSamples(samples: readonly ProgressSample[]): ProgressFile[] {
+  const by = new Map<string, { first: ProgressSample; last: ProgressSample }>()
+  for (const s of samples) {
+    const b = by.get(s.bucket)
+    if (!b) by.set(s.bucket, { first: s, last: s })
+    else {
+      if (s.ts < b.first.ts) b.first = s
+      if (s.ts >= b.last.ts) b.last = s
+    }
+  }
+  const iso = (ts: number) => new Date(ts * 1000).toISOString()
+  return [...by.keys()].sort().map(bucket => {
+    const { first, last } = by.get(bucket)!
+    return {
+      roots: 0, roots_done: 0,
+      decisions: { delete: last.deletes, skipped_gone: last.gone, skipped_overwritten: last.overwritten, delete_failed: last.failed },
+      delete_bytes: last.bytes, started: iso(first.ts), updated: iso(last.ts), done: !!last.done,
+    }
+  })
+}
+
 /** A live run's progress over its buckets; `rate` = deletes/s, each bucket's
  * own rate summed (they run one after another, so a finished bucket's rate
  * is excluded). */
@@ -329,10 +353,10 @@ export function sumProgress(ps: readonly ProgressFile[]): Progress {
 
 /** Decision-based completion, and an explicitly rough fleet ETA at the
  * active bucket(s)' average decision rate. Never extrapolate stale samples. */
-export function progressEstimate(ps: readonly ProgressFile[], planned: number | undefined, now: number): { decided: number; percent: number | null; secondsLeft: number | null; stale: boolean } {
+export function progressEstimate(ps: readonly ProgressFile[], planned: number | undefined, now: number, staleAfter = 90): { decided: number; percent: number | null; secondsLeft: number | null; stale: boolean } {
   const decided = ps.reduce((n, p) => n + Object.values(p.decisions).reduce((a, b) => a + b, 0), 0)
   const active = ps.filter(p => !p.done)
-  const stale = active.some(p => !p.updated || !Number.isFinite(Date.parse(p.updated)) || now - Date.parse(p.updated) / 1000 > 90)
+  const stale = active.some(p => !p.updated || !Number.isFinite(Date.parse(p.updated)) || now - Date.parse(p.updated) / 1000 > staleAfter)
   const rate = active.reduce((n, p) => {
     const seconds = p.updated ? (Date.parse(p.updated) - Date.parse(p.started)) / 1000 : 0
     return n + (seconds > 0 ? Object.values(p.decisions).reduce((a, b) => a + b, 0) / seconds : 0)

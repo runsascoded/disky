@@ -56,6 +56,38 @@ async function readSummary(cfg: BatchConfig, token: string, jobId: string, mode:
   return readRunJson<RunSummary>(cfg, token, jobId, `${dir}-summary.json`)
 }
 
+/** The part of `progress/<bucket>.json` (`sweep.execute_plan`, gcs's executor's snapshot) a sample keeps. */
+interface ProgressSnapshot {
+  decisions: Record<string, number>
+  delete_bytes: number
+  updated: string
+  done: boolean
+}
+
+const isSnapshot = (x: unknown): x is ProgressSnapshot => {
+  const p = x as Partial<ProgressSnapshot> | null
+  return !!p && typeof p.updated === 'string' && Number.isFinite(Date.parse(p.updated)) && typeof p.decisions === 'object' && p.decisions !== null && typeof p.delete_bytes === 'number'
+}
+
+/** A running run's newest progress, as one `deletion_progress` sample (the history `/api/plans/progress` serves): what
+ *  gcs's executor writes to D1 itself, from a job that has no D1 access. Each refresh adds at most one; a file unchanged
+ *  since the last adds nothing (its `updated` is the key). Progress is advisory: an unreadable file is skipped. */
+export async function mirrorProgress(cfg: BatchConfig, db: D1Database, token: string, jobId: string, bucket: string): Promise<void> {
+  let p: unknown
+  try {
+    p = await readRunJson<unknown>(cfg, token, jobId, `progress/${bucket}.json`)
+  } catch (e) {
+    console.error(`${jobId}: progress unreadable`, e)
+    return
+  }
+  if (!isSnapshot(p)) return
+  const d = p.decisions
+  await db.prepare(`
+    INSERT OR IGNORE INTO deletion_progress (run_id, bucket, ts, deletes, bytes, gone, overwritten, failed, done, bytes_exact)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+  `).bind(jobId, bucket, Date.parse(p.updated) / 1000, d.delete ?? 0, p.delete_bytes, d.skipped_gone ?? 0, d.skipped_overwritten ?? 0, d.delete_failed ?? 0, p.done ? 1 : 0).run()
+}
+
 /** `undo-summary.json`: the undo job rewrites it as it goes, so it says what a job that died had restored. */
 export interface UndoSummary {
   dry_run: boolean
@@ -131,6 +163,7 @@ export async function reflectRuns(cfg: BatchConfig, db: D1Database, token: strin
     if (!pending.has(jobId)) continue
     const mode = jobId.startsWith("cw-sweep-real-") ? "real" : "dry"
     const terminal = TERMINAL.has(j.status?.state ?? "")
+    await mirrorProgress(cfg, db, token, jobId, j.taskGroups?.[0]?.taskSpec?.environment?.variables?.SWEEP_BUCKET ?? primary)
     const summary = await readSummary(cfg, token, jobId, mode)
     if (summary && terminal) {
       await reflect(db, jobId, mode, summary, primary)

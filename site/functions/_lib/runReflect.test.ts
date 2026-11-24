@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { BatchConfig } from './batchConfig'
-import { reflectRuns, type BatchJob } from './runReflect'
+import { mirrorProgress, reflectRuns, type BatchJob } from './runReflect'
 import { RUN_DIR, sqliteD1 } from './testD1'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -86,5 +86,42 @@ describe('undo_state', () => {
   it('only the newest undo counts: an older success doesn\'t speak for a running retry', async () => {
     const older = undoJob('cw-undo-1', 'SUCCEEDED', '2026-11-04T00:00:00Z')
     expect(await settled([undoJob('cw-undo-2', 'RUNNING'), older], summary(2), 'partial')).toBe('partial')
+  })
+})
+
+describe('mirrorProgress', () => {
+  const RUN = 'cw-sweep-real-test'
+  const snap = (updated: string, deletes: number, done = false) => ({
+    bucket: 'b', mode: 'deleted', roots: 2, roots_done: 2, started: '2026-11-24T16:08:00+00:00', updated, done,
+    decisions: { delete: deletes, skipped_gone: 3, skipped_overwritten: 1, delete_failed: 0 }, delete_bytes: deletes * 10,
+  })
+  async function samples(bodies: (object | null)[]): Promise<{ urls: string[]; rows: unknown[] }> {
+    const { db, raw } = await sqliteD1()
+    raw.exec(`INSERT INTO plans (id,name,created_by,created_ts) VALUES (1,'review','actor',1);
+      INSERT INTO deletion_runs (run_id,plan_id,${RUN_DIR},scan,head,exec_head,actor,mode,started_ts,log_dir,plan_digest)
+      VALUES ('${RUN}',1,'manifest','scan',0,0,'actor','real',100,'logs','review')`)
+    const urls: string[] = []
+    for (const body of bodies) {
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => { urls.push(url); return body ? new Response(JSON.stringify(body)) : new Response('', { status: 404 }) }))
+      await mirrorProgress({ dataBucket: 'data' } as BatchConfig, db, 'token', RUN, 'b')
+    }
+    return { urls, rows: raw.prepare('SELECT * FROM deletion_progress ORDER BY ts').all() }
+  }
+  const row = (ts: number, deletes: number, done = 0) => ({ run_id: RUN, bucket: 'b', ts, deletes, bytes: deletes * 10, gone: 3, overwritten: 1, failed: 0, done, bytes_exact: 1 })
+  const T0 = Date.parse('2026-11-24T17:00:00Z') / 1000
+
+  it('reads the run dir\'s progress file for the bucket', async () => {
+    expect((await samples([null])).urls).toEqual([`https://storage.googleapis.com/storage/v1/b/data/o/${encodeURIComponent(`sweep/cw/runs/${RUN}/progress/b.json`)}?alt=media`])
+  })
+  it('adds one sample per new snapshot; an unchanged one adds nothing', async () => {
+    expect((await samples([
+      snap('2026-11-24T17:00:00+00:00', 0),
+      snap('2026-11-24T17:00:00+00:00', 0),
+      snap('2026-11-24T17:01:00+00:00', 500),
+      snap('2026-11-24T17:01:30+00:00', 600, true),
+    ])).rows).toEqual([row(T0, 0), row(T0 + 60, 500), row(T0 + 90, 600, 1)])
+  })
+  it('skips what isn\'t a snapshot: no file, a summary', async () => {
+    expect((await samples([null, { mode: 'real', deleted_objects: 1 }])).rows).toEqual([])
   })
 })
