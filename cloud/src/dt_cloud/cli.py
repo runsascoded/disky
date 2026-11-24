@@ -1836,6 +1836,27 @@ def plan_sweep_purge(dry_run: bool, run_dir: str) -> None:
         raise SystemExit(1)
 
 
+@plan_sweep.command("canary")
+@option("-b", "--bucket", required=True, help="The bucket to probe (its own fresh `<prefix>/<run>/` keys only)")
+@option("-p", "--prefix", default="disky-canary/conditional-delete", help="Where the run's keys go")
+def plan_sweep_canary(bucket: str, prefix: str) -> None:
+    """Does the sweep's S3 store (`$SWEEP_S3_ENDPOINT`) enforce a delete's ETag precondition, on `DeleteObject`
+    (`If-Match`) and per item on `DeleteObjects`? Writes, overwrites and deletes only its own keys, then removes every
+    version of them (`sweep_canary.py`). Prints the JSON summary; exit 0 when both are enforced, 1 when either isn't."""
+    import json
+
+    from .sweep import s3_client
+    from .sweep_canary import conditional_delete_canary
+
+    s = conditional_delete_canary(s3_client(), bucket, prefix)
+    for p in s["probes"]:
+        err(f"{p['kind']}: stale ETag → {p['stale']} ({'object kept' if p['survived_stale'] else 'object DELETED'}); current ETag → {p['current']} · {'ENFORCED' if p['enforced'] else 'NOT ENFORCED'}")
+    err(f"cleanup: {s['cleaned']} versions removed under {s['prefix']}, {s['left']} keys left")
+    print(json.dumps(s))
+    if not all(p["enforced"] for p in s["probes"]):
+        raise SystemExit(1)
+
+
 @main.group()
 def sweep() -> None:
     """The GCS executor's phases — manifest / execute / undo (specs/done/staged-delete.md)."""
