@@ -25,7 +25,7 @@ const text = (quotas: 'runway-hue' | 'arrow-chip' | 'off') =>
 
 const WEEKS = [
   '*Weekly changes*',
-  ':arrow_deg60: [wk of 9/7]: **+15.0 TiB** · [main] +10.0 · z zone +5.0',
+  ':arrow_deg60: [wk of 9/7]: **+15.0 TiB** · [main] +10.0 · [z zone] +5.0',
   ':arrow_deg-30: [wk of 9/14] _(partial)_: **−1.5 TiB** · [main] −2.0 · new: [b] 20',
 ]
 
@@ -37,7 +37,7 @@ describe("the OP's per-pool layout", () => {
       '',
       '*Buckets* (Δ month-to-date)',
       ':runway-8: [main] 58 TiB (+8.0) · 58.0% of 100Ti (42.0 Ti free)',
-      ':runway-star-6: z zone 36 TiB (+5.5): [a] 16, [b] 20 · 35.5% of 100Ti (64.5 Ti free), +2.9 Ti/d over 7d, ≈22d to full',
+      ':runway-star-6: [z zone] 36 TiB (+5.5): [a] 16, [b] 20 · 35.5% of 100Ti (64.5 Ti free), +2.9 Ti/d over 7d, ≈22d to full',
       ':runway-diamond-8: [still] 5 TiB · 5% of 100Ti',
       '',
       ...WEEKS,
@@ -50,10 +50,17 @@ describe("the OP's per-pool layout", () => {
     ])
     expect(text('runway-hue')[4]).toEqual(':runway-8: [main] 58 TiB (+8.0) · 58.0% of 100Ti (42.0 Ti free)')
   })
-  it("links a single bucket's name in a week's line to its diff over that week; a zone's stays plain", () => {
+  it("links each pool's name to its diff: a bucket's under its path, a zone's as its bucket group (`?g=`)", () => {
     const lines = opText(rows, '2026-09', cfg, { plotUrl: null, prevUrl: null }, { ...DEFAULT_PARAMS, layout: 'pools', quotas: 'runway-hue' }).split('\n')
+    // the Buckets list: month-to-date, since the lead-in day's scan
+    expect(lines[5]).toEqual(
+      ':runway-star-6: [z zone](https://x.test/?d=0914-14d&g=z#over-time) 36 TiB (+5.5): [a](https://x.test/a?d=0914-14d#over-time) 16, ' +
+        '[b](https://x.test/b?d=0914-14d#over-time) 20 · 35.5% of 100Ti (64.5 Ti free), +2.9 Ti/d over 7d, ≈22d to full',
+    )
+    // the weeks: each over its week
     expect(lines.slice(lines.indexOf('*Weekly changes*') + 1)).toEqual([
-      ':arrow_deg60: [wk of 9/7](https://x.test/?d=0907-7d#over-time): **+15.0 TiB** · [main](https://x.test/main?d=0907-7d#over-time) +10.0 · z zone +5.0',
+      ':arrow_deg60: [wk of 9/7](https://x.test/?d=0907-7d#over-time): **+15.0 TiB** · [main](https://x.test/main?d=0907-7d#over-time) +10.0 · ' +
+        '[z zone](https://x.test/?d=0907-7d&g=z#over-time) +5.0',
       ':arrow_deg-30: [wk of 9/14](https://x.test/?d=0914-7d#over-time) _(partial)_: **−1.5 TiB** · [main](https://x.test/main?d=0914-7d#over-time) −2.0 · ' +
         'new: [b](https://x.test/b?d=0914-7d#over-time) 20',
     ])
@@ -61,7 +68,7 @@ describe("the OP's per-pool layout", () => {
   it('keeps the lines without marks when the quota marks are off', () => {
     expect(text('off').slice(4, 7)).toEqual([
       '[main] 58 TiB (+8.0) · 58.0% of 100Ti (42.0 Ti free)',
-      'z zone 36 TiB (+5.5): [a] 16, [b] 20 · 35.5% of 100Ti (64.5 Ti free), +2.9 Ti/d over 7d, ≈22d to full',
+      '[z zone] 36 TiB (+5.5): [a] 16, [b] 20 · 35.5% of 100Ti (64.5 Ti free), +2.9 Ti/d over 7d, ≈22d to full',
       '[still] 5 TiB · 5% of 100Ti',
     ])
   })
