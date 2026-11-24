@@ -3666,6 +3666,77 @@ def cw_digest(**kw) -> None:
     _digest(**kw)
 
 
+def _month_range(spec: str) -> list[dt.date]:
+    """`A..B` (inclusive `YYYY-MM`s) → each month's 1st, or a single `A`."""
+    a, sep, b = spec.partition("..")
+    lo, hi = (dt.datetime.strptime(s, "%Y-%m").date() for s in (a, b if sep else a))
+    if hi < lo:
+        raise UsageError(f"month range {spec!r}: {b} is before {a}")
+    out = [lo]
+    while out[-1] < hi:
+        out.append((out[-1].replace(day=28) + dt.timedelta(days=4)).replace(day=1))
+    return out
+
+
+@main.command("digest-relink")
+@option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)")
+@option("-C", "--config", "config_path", type=Path, help="The deployment's digest config (as `digest -C`): where the threads' states live")
+@option("-j", "--plan", "plan_path", help="With -n: also write the edits as a thrds bulk-rewrite plan (JSON) to this path or URL")
+@option("-m", "--months", "month_spec", help="Month range `A..B` (YYYY-MM, inclusive) or one month (default: every month with a thread state)")
+@option("-n", "--dry-run", is_flag=True, help="Print each OP's before/after diff; edit and record nothing")
+@option("-r", "--root", help="Snapshots root (default the config's `root`); the threads' states live beside it")
+@option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)")
+@option("-T", "--template", type=Choice(["cost", "quota", "gcs", "cw"]), default="cost", help="The digest's template + preset config, as `digest -T` (default cost; quota for a `cw-digest` deployment)")
+@option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="The threads' variant (default the config's)")
+def digest_relink(
+    channel: str | None,
+    config_path: Path | None,
+    plan_path: str | None,
+    month_spec: str | None,
+    dry_run: bool,
+    root: str | None,
+    token: str | None,
+    template: str,
+    variant: str | None,
+) -> None:
+    """Link each month's digest OP to the previous and next months' threads (`← October · December →`, a side left out
+    where that month has no OP): only that line of each OP is rewritten, in the text Slack stores, never re-rendered,
+    so past months' figures stay as posted. Each month whose OP carries its links records `prev_url` / `next_url` in
+    its thread state; a re-run reads and edits nothing. The scheduled run does the same for the previous month once a
+    new month's OP is posted; this backfills existing threads."""
+    from thrds.slack import SlackClient
+
+    from . import digest as dg
+
+    if plan_path and not dry_run:
+        raise UsageError("-j/--plan writes a dry run's edits (with -n)")
+    cfg = dg.load_config(template, config_path)
+    variant = variant or cfg.variant
+    root = root or cfg.resolve_root()
+    channel = channel or os.environ.get("SLACK_CHANNEL")
+    token = secret(token, "SLACK_BOT_TOKEN")
+    if not (channel and token):
+        raise SystemExit("digest-relink: need SLACK_BOT_TOKEN + SLACK_CHANNEL (or -t/-c)")
+    months = _month_range(month_spec) if month_spec else dg.state_months(root, cfg.state.format(channel=channel, variant=variant))
+    todo, plan, report = dg.relink(cfg, root, months, SlackClient(token, channel), channel, variant, dry_run=dry_run)
+    print(f"digest-relink {channel} ({variant}): {len(months)} month(s), {len(todo)} to relink"
+          + (f"; plan: {plan.summary()}" if todo else ""))
+    if dry_run:
+        months_of = {r.state["op_ts"]: r.month for r in todo}
+        for a in plan.actions:
+            print(f"{months_of[a.ts]:%Y-%m}  OP {a.ts}  {a.kind.value}" + (f": {a.reason}" if a.reason else ""))
+            if a.writes:
+                print(a.diff())
+        if plan_path:
+            dg.write_plan(plan_path, plan)
+            print(f"plan -> {plan_path}")
+        return
+    if report is not None:
+        print(f"applied: {report.summary()}")
+        if any(o.status.value not in ("done", "already") for o in report.outcomes) or any(a.kind.value == "blocked" for a in plan.actions):
+            raise SystemExit(1)
+
+
 
 
 @main.group("emoji")
