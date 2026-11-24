@@ -263,6 +263,9 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/scan-runs/card-url.ts': [get('/api/scan-runs/card-url', 'viewer')],
   // "Run a scan": an admin starts the deployment's scan submitter (`_lib/scanDispatch.ts`).
   'api/scan-runs/dispatch.ts': [post('/api/scan-runs/dispatch', 'admin')],
+  // The monthly admin thread's opening post (specs/admin-monthly-thread.md), for the scan job (`dt_cloud.nominal`): the
+  // runs `/api/scan-runs` serves, the meta store's series under the caller's own credential, and the card's signed URL.
+  'api/scan-runs/month-op.ts': [post('/api/scan-runs/month-op', 'viewer')],
   'api/series.ts': [get('/api/series', 'viewer'), get('/api/series?g=clear', 'viewer', GROUPS)],
   'api/session-log/[[path]].ts': [
     // The config says only whether logging is on (and purges only for a viewer); a batch is a viewer's, while it is on
@@ -427,6 +430,7 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'POST /api/prefixes': 'blocked',
   'GET /api/scan-runs': 'blocked',
   'GET /api/scan-runs/card-url': 'blocked',
+  'POST /api/scan-runs/month-op': 'blocked',
   // A hidden path is a 404; a name filter is refused (its points count hidden hits).
   'GET /api/series': 'filtered',
   // Whether logging is on; the caller's own batch.
