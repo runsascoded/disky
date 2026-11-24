@@ -45,10 +45,11 @@ export function scoped(total: number, classes: Record<string, number> | null, q:
 const quotas = (total: number, classes: Record<string, number> | null, qs: Quota[], cfg: DigestCfg): string =>
   qs.map(q => ` · ${fixed((scoped(total, classes, q) / (q.bytes / cfg.unit.bytes)) * 100, 1)}% of ${q.name}`).join('')
 
-export function bucketLink(bucket: string, r: QuotaScan, since: number | null, cfg: DigestCfg): string {
+/** `bucket`'s name (or `text`) linking its diff at `r` since `since`. */
+export function bucketLink(bucket: string, r: QuotaScan, since: number | null, cfg: DigestCfg, text?: string): string {
   const b: BucketCfg | undefined = cfg.buckets[bucket]
   const path = b === undefined || b.path === null ? bucket : b.path
-  return `[${b?.label || bucket}](${diffUrl(r.scan, dlink(r), since, cfg.site_url, path)})`
+  return `[${text ?? (b?.label || bucket)}](${diffUrl(r.scan, dlink(r), since, cfg.site_url, path)})`
 }
 
 export function dextra(cur: QuotaScan, prev: QuotaScan | null): Record<string, number | null> {
@@ -145,12 +146,14 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
     const partial = mon === lastMon && dayOf(date(end)) < addDays(mon, 6) ? ' _(partial)_' : ''
     const earlier = addDays(mon, 6) < month ? ` (${mon3(dayOf(date(end)))})` : ''
     const link = diffUrl(end.scan, dlink(end), ts(prevEnd), site)
+    // a single bucket's name links its own diff over the week; a zone's stays plain
+    const weekName = (pl: Pool): string => (pl.buckets.length > 1 ? pl.name : bucketLink(pl.buckets[0], end, ts(prevEnd), cfg, pl.name))
     const movers = rows.flatMap(({ p: pl }) => {
       const d = moved(pl.buckets, prevEnd, end, cfg)
-      return Math.abs(d) >= WEEK_MOVER ? [`${pl.name} ${tb(d)}`] : []
+      return Math.abs(d) >= WEEK_MOVER ? [`${weekName(pl)} ${tb(d)}`] : []
     })
     const first = all.filter(b => (sizeOf(b, end, cfg) ?? 0) >= WEEK_MOVER && sizeOf(b, prevEnd, cfg) === undefined)
-      .map(b => `new: ${cfg.buckets[b]?.label || b} ${grouped(sizeOf(b, end, cfg)!, 0)}`)
+      .map(b => `new: ${bucketLink(b, end, ts(prevEnd), cfg)} ${grouped(sizeOf(b, end, cfg)!, 0)}`)
     lines.push(`${code(`trend.${deg(wheld ? (wdtb / wheld) * 100 : 0)}`)} [wk of ${md(mon)}](${link})${earlier}${partial}: ${[`**${tb(wdtb)} ${u.name}**`, ...movers, ...first].join(' · ')}`)
     prevEnd = end
   }

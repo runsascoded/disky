@@ -25,8 +25,8 @@ const text = (quotas: 'runway-hue' | 'arrow-chip' | 'off') =>
 
 const WEEKS = [
   '*Weekly changes*',
-  ':arrow_deg60: [wk of 9/7]: **+15.0 TiB** · main +10.0 · z zone +5.0',
-  ':arrow_deg-30: [wk of 9/14] _(partial)_: **−1.5 TiB** · main −2.0 · new: b 20',
+  ':arrow_deg60: [wk of 9/7]: **+15.0 TiB** · [main] +10.0 · z zone +5.0',
+  ':arrow_deg-30: [wk of 9/14] _(partial)_: **−1.5 TiB** · [main] −2.0 · new: [b] 20',
 ]
 
 describe("the OP's per-pool layout", () => {
@@ -49,6 +49,14 @@ describe("the OP's per-pool layout", () => {
       '_Color: days until full. Arrow: growth rate, the fastest of the last 1, 3 and 7 days._',
     ])
     expect(text('runway-hue')[4]).toEqual(':runway-8: [main] 58 TiB (+8.0) · 58.0% of 100Ti (42.0 Ti free)')
+  })
+  it("links a single bucket's name in a week's line to its diff over that week; a zone's stays plain", () => {
+    const lines = opText(rows, '2026-09', cfg, { plotUrl: null, prevUrl: null }, { ...DEFAULT_PARAMS, layout: 'pools', quotas: 'runway-hue' }).split('\n')
+    expect(lines.slice(lines.indexOf('*Weekly changes*') + 1)).toEqual([
+      ':arrow_deg60: [wk of 9/7](https://x.test/?d=0907-7d#over-time): **+15.0 TiB** · [main](https://x.test/main?d=0907-7d#over-time) +10.0 · z zone +5.0',
+      ':arrow_deg-30: [wk of 9/14](https://x.test/?d=0914-7d#over-time) _(partial)_: **−1.5 TiB** · [main](https://x.test/main?d=0914-7d#over-time) −2.0 · ' +
+        'new: [b](https://x.test/b?d=0914-7d#over-time) 20',
+    ])
   })
   it('keeps the lines without marks when the quota marks are off', () => {
     expect(text('off').slice(4, 7)).toEqual([
