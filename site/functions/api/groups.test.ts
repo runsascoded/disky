@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
 
+import { groupDiffRows } from '../_lib/groups'
 import { A, C, unionDeployment, Z } from '../_lib/testUnion'
 import { onRequestGet as diff } from './diff'
 import { onRequestGet as groups } from './groups'
@@ -104,7 +105,19 @@ describe('D1', () => {
     expect([s.rows, sides(s), s.group]).toEqual([[], { bytes_before: zz.bytes, bytes_after: 0, objects_before: zz.objects, objects_after: 0 }, ONE])
   })
 
-  it('`/api/diff` `depth=1`: one row per member that changed, from its totals', async () => {
+  it('`groupDiffRows`: every member its depth-1 row, an unchanged one included at zero delta; a member\'s rows below it', () => {
+    const row = { depth: 1, kind: 'dir' as const, status: 'added' as const, bytes_before: 0, bytes_after: 5, objects_before: 0, objects_after: 1 }
+    expect(groupDiffRows([
+      { bucket: 'hot', total: { bytes_before: 10, bytes_after: 15, objects_before: 2, objects_after: 3 }, rows: [{ ...row, path: 'new' }] },
+      { bucket: 'still', total: { bytes_before: 7, bytes_after: 7, objects_before: 4, objects_after: 4 }, rows: [] },
+    ])).toEqual([
+      { path: 'hot', depth: 1, kind: 'dir', status: 'changed', bytes_before: 10, bytes_after: 15, objects_before: 2, objects_after: 3, expanded: true },
+      { path: 'hot/new', depth: 2, kind: 'dir', status: 'added', bytes_before: 0, bytes_after: 5, objects_before: 0, objects_after: 1 },
+      { path: 'still', depth: 1, kind: 'dir', status: 'unchanged', bytes_before: 7, bytes_after: 7, objects_before: 4, objects_after: 4 },
+    ])
+  })
+
+  it('`/api/diff` `depth=1`: one row per member a scan holds, from its totals, an unchanged one included', async () => {
     const [zzA, bkA, bkC] = await Promise.all([bucket(A, 'zz'), bucket(A, 'bk'), bucket(C, 'bk')])
     expect((await diffOf(`from=${A}&to=${C}&path=&g=one&depth=1`)).rows).toEqual([
       { path: 'zz', depth: 1, kind: 'dir', status: 'removed', bytes_before: zzA.bytes, bytes_after: 0, objects_before: zzA.objects, objects_after: 0 },
@@ -113,6 +126,21 @@ describe('D1', () => {
     expect(both.rows).toEqual([
       { path: 'zz', depth: 1, kind: 'dir', status: 'removed', bytes_before: zzA.bytes, bytes_after: 0, objects_before: zzA.objects, objects_after: 0 },
       { path: 'bk', depth: 1, kind: 'dir', status: bkA.bytes === bkC.bytes && bkA.objects === bkC.objects ? 'unchanged' : 'changed', bytes_before: bkA.bytes, bytes_after: bkC.bytes, objects_before: bkA.objects, objects_after: bkC.objects },
+    ])
+    // Z and A hold the same content: both members unchanged, each still its row, at zero delta.
+    expect((await diffOf(`from=${Z}&to=${A}&path=&g=both&depth=1`)).rows).toEqual([
+      { path: 'zz', depth: 1, kind: 'dir', status: 'unchanged', bytes_before: zzA.bytes, bytes_after: zzA.bytes, objects_before: zzA.objects, objects_after: zzA.objects },
+      { path: 'bk', depth: 1, kind: 'dir', status: 'unchanged', bytes_before: bkA.bytes, bytes_after: bkA.bytes, objects_before: bkA.objects, objects_after: bkA.objects },
+    ])
+  })
+
+  it('`/api/diff`: an unchanged member keeps its depth-1 row', async () => {
+    const [zz, bk] = await Promise.all([bucket(A, 'zz'), bucket(A, 'bk')])
+    const g = await diffOf(`from=${Z}&to=${A}&path=&g=both`)
+    const below = (b: string) => g.rows.filter(r => r.path.startsWith(`${b}/`)).length > 0 ? { expanded: true as const } : {}
+    expect(g.rows.filter(r => r.depth === 1)).toEqual([
+      { path: 'zz', depth: 1, kind: 'dir', status: 'unchanged', bytes_before: zz.bytes, bytes_after: zz.bytes, objects_before: zz.objects, objects_after: zz.objects, ...below('zz') },
+      { path: 'bk', depth: 1, kind: 'dir', status: 'unchanged', bytes_before: bk.bytes, bytes_after: bk.bytes, objects_before: bk.objects, objects_after: bk.objects, ...below('bk') },
     ])
   })
 

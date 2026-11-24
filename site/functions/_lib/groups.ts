@@ -97,13 +97,12 @@ export function sidesStatus(o: DiffSides): DiffRow['status'] {
 
 /** A group root diff's rows from its members' diffs (each a bucket's, its rows relative to the bucket): each member a
  *  depth-1 row with its totals (`expanded` when its own rows came too), and its rows below it (`<bucket>/<row>`, one
- *  level deeper). A member that drew no rows and didn't change is left out, as an unchanged bucket is at the root
- *  (the map's filler). */
+ *  level deeper). Every member given gets its row, an unchanged one included: a group is an explicit set of buckets,
+ *  and its totals count each member's bytes. */
 export function groupDiffRows(members: readonly { bucket: string; total: DiffSides; rows: readonly DiffRow[] }[]): DiffRow[] {
   const out: DiffRow[] = []
   for (const { bucket, total, rows } of members) {
     const status = sidesStatus(total)
-    if (!rows.length && status === 'unchanged') continue
     out.push({
       path: bucket, depth: 1, kind: 'dir', status,
       bytes_before: total.bytes_before, bytes_after: total.bytes_after, objects_before: total.objects_before, objects_after: total.objects_after,
