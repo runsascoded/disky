@@ -194,7 +194,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   const acts = (k: TreeNode) => !k.name.startsWith('(')
   const selectable = useMemo(() => shown.filter(acts), [shown])
   const sel = useRowSelection(selectable, uriOfKid)
-  useRowSelectionKeys(sel, 'tbl', 'Children table')
+  const tblFocus = useRowSelectionKeys(sel, 'tbl', 'Children table')
   // Selection survives paging and sort by key, but not a drill: the rows
   // picked under one path (or mode) aren't candidates for a bulk action under another.
   const clearSel = sel.clear
@@ -324,7 +324,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   // Folders nest (one listed inside another), so their bytes don't add up: no total there.
   const showTotal = mode !== 'folders'
   return (
-    <section className="children-tbl" onClick={clearOnDeadClick}>
+    <section className="children-tbl" onClick={clearOnDeadClick} {...tblFocus}>
       <div className="pager top">{modes}{pager}</div>
       {flatNote || <StickyTable className="worklist selectable">
         <thead>

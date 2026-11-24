@@ -398,7 +398,7 @@ export function StagedPage() {
     [groups, collapsed, pages, pageSize, activePrefixes], // eslint-disable-line react-hooks/exhaustive-deps
   )
   const sel = useRowSelection(visible, r => r.prefix)
-  useRowSelectionKeys(sel, 'staged', 'Staged')
+  const tblFocus = useRowSelectionKeys(sel, 'staged', 'Staged')
   const selected = activeRows.filter(it => sel.selected.has(it.prefix)).map(it => it.prefix)
   const mine = (it: StagedItem) => !!ident && it.added_by === ident.email
   const canRemove = (it: StagedItem) => admin || (canStage && mine(it))
@@ -643,7 +643,7 @@ export function StagedPage() {
             </Tooltip>
           </div>
 
-          <div className="staged-batches">
+          <div className="staged-batches" {...tblFocus}>
             <div className="staged-actions">
               {activeShownRows.length > 0 && <label className="sel-all"><KeysCheckbox sel={sel} keys={shownPrefixes} label={q.trim() ? 'select all matching' : 'select all'} /> {selected.length ? `${selected.length} selected · ${fmtBytes(selTotal.b)}` : 'select'}</label>}
               {sel.selected.size > 0 && <button type="button" onClick={sel.clear}>deselect</button>}
