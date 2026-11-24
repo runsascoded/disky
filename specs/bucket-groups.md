@@ -57,7 +57,9 @@ Branch `rw/bucket-groups`. Item 4 (digest links) is not built yet; see "Left for
   - `summary=1` answers with the totals and no rows.
   - `depth=1` answers with one row per member, built from its totals.
   - Otherwise, second pass: each member with bytes or objects on either side is diffed at `threshold · atten`.
-  - The rows come from `groupDiffRows`. Each member gets a depth-1 row with its totals, marked `expanded` when its own rows came too. Its rows follow as `<bucket>/<row>`, one level deeper, with its `(other)` becoming `<bucket>/(other)`. A member that drew no rows and didn't change is left out, as filler, the way an unchanged bucket is at the root.
+  - The rows come from `groupDiffRows`. Each member gets a depth-1 row with its totals, marked `expanded` when its own rows came too. Its rows follow as `<bucket>/<row>`, one level deeper, with its `(other)` becoming `<bucket>/(other)`.
+  - Every member a scan holds gets its depth-1 row, an unchanged one included (zero delta, drawn as any unchanged row is). A group is an explicit set of buckets and its totals count every member's bytes, so an unchanged member isn't dropped as filler the way an unchanged bucket is at the store root (cw, 2026-11-24: `rhoarnet-us-east-08a` was missing from `?g=08a&d=-7d`).
+  - A member empty on both sides isn't diffed again in the second pass; it keeps its totals and has no rows below. Under a scope (`lens`, `o`, `cl`, `q`), a member the scope leaves empty on both sides is absent, as in the group's subtree.
   - A member neither scan holds (its diff is a 404) is absent.
 - **`/api/series`** (`groupSeries`):
   - `split=roots` (what the map's root chart asks for): the store root's own `split=roots` read. Its per-bucket traces are the rows the root already reads per bucket. The members' traces are kept, and the points are their per-scan sums.

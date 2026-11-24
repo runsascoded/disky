@@ -381,8 +381,9 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
  * `g`; its own cache keys): first each member's totals (`summary=1`), which give the group's totals and one byte
  * threshold (from the larger side, as a root's); then, past a `summary=1` or `depth=1` request, each member with bytes
  * or objects on either side diffed under that threshold (`&T=`, attenuated one level: a bucket's children are the
- * group root's grandchildren), its rows below its own. A member neither scan holds is absent. The scope axes (`lens`,
- * `o`, `cl`, `q`) pass to each member. A path-restricted link is refused a group holding a hidden dir.
+ * group root's grandchildren), its rows below its own. Every member a scan holds has its depth-1 row, an unchanged one
+ * included; one neither scan holds is absent, and so, under a scope, is one the scope leaves empty. The scope axes
+ * (`lens`, `o`, `cl`, `q`) pass to each member. A path-restricted link is refused a group holding a hidden dir.
  */
 async function groupDiff(ctx0: DiffCtx, name: string): Promise<Response> {
   const ctx1 = withStore(ctx0)
@@ -426,23 +427,31 @@ async function groupDiff(ctx0: DiffCtx, name: string): Promise<Response> {
       }
       return { bodies, reads }
     }
+    const scoped = !!(q || sp.get('lens') || parseOwner(sp.get('o')) || parseClasses(sp.get('cl')))
     const first = await read(group.buckets, b => ask(b, { summary: '1' }, ['depth']))
     if (first instanceof Response) return first
     const held = group.buckets.flatMap((bucket, i) => (first.bodies[i] ? [{ bucket, body: first.bodies[i]! }] : []))
     const side = (k: keyof DiffSides) => held.reduce((n, m) => n + m.body[k], 0)
     const threshold = (Math.max(side('bytes_before'), side('bytes_after')) * minArea) / (w * h)
-    let members = held
+    const nonEmpty = ({ body: b }: { body: DiffSides }) => !!(b.bytes_before || b.bytes_after || b.objects_before || b.objects_after)
+    // Every member a scan holds has its row, an unchanged one included; under a scope, one it leaves empty is absent
+    // (as in the group's subtree).
+    let members = held.filter(m => !scoped || nonEmpty(m))
+    /** The member reads behind the answer's meta (expansions, lookups, tier, flags). */
+    let bs = held.map(m => m.body)
     let reads = first.reads
     if (!summary && depth !== 1) {
       // Each member with anything on either side, under the group's threshold; `depth=N` is N − 1 levels below a bucket.
-      const drawn = held.filter(({ body: b }) => b.bytes_before || b.bytes_after || b.objects_before || b.objects_after)
+      const drawn = held.filter(nonEmpty)
       const below: Record<string, string> = depth && depth > 1 ? { depth: String(depth - 1) } : {}
       const second = await read(drawn.map(m => m.bucket), b => ask(b, below, depth ? [] : ['depth'], threshold * atten))
       if (second instanceof Response) return second
-      members = drawn.flatMap((m, i) => (second.bodies[i] ? [{ bucket: m.bucket, body: second.bodies[i]! }] : []))
+      const deeper = new Map(drawn.flatMap((m, i) => (second.bodies[i] ? [[m.bucket, second.bodies[i]!] as const] : [])))
+      // A member left out of the second pass (empty on both sides) keeps its totals, with no rows below.
+      members = members.map(m => ({ bucket: m.bucket, body: deeper.get(m.bucket) ?? { ...m.body, rows: [] } }))
+      bs = [...deeper.values()]
       reads = second.reads
     }
-    const bs = members.map(m => m.body)
     const sum = (k: 'expansions' | 'lookups') => bs.reduce((n, b) => n + b[k], 0)
     const lead = held[0]?.body as (MemberDiffBody & { lens?: string; owner?: unknown }) | undefined
     return new Response(JSON.stringify({
