@@ -5,7 +5,7 @@ import { cacheKeyFor } from './edgeCache'
 import { indexDir, openIndex, pathScans, storeTarget, storeCreds } from './index'
 import { overTimeDataset } from './overTime'
 import { REQ, Req, reqOf, snapshotsPrefix } from './shared'
-import { LENS_PRIMARY_ONLY, primaryOnly, secondaryStores, storeEnv, storeKey, storePaths, withStore } from './stores'
+import { LENS_PRIMARY_ONLY, primaryOnly, secondaryStores, storeEnv, storeGroups, storeKey, storePaths, withStore } from './stores'
 import { sqliteD1 } from './testD1'
 import { onRequestGet as owners } from '../api/owners'
 import { onRequestGet as subtree } from '../api/subtree'
@@ -47,7 +47,7 @@ describe('secondaryStores', () => {
       try { secondaryStores({ STORES_JSON: JSON.stringify(json) } as Env) } catch (e) { return (e as Error).message }
       return null
     }
-    expect(err({ primary: {} })).toBe("STORES_JSON: bad store key 'primary'")
+    expect(err({ primary: { vars: {} } })).toBe('STORES_JSON.primary: unknown field(s) vars (the primary store takes groups alone)')
     expect(err({ Meta: {} })).toBe("STORES_JSON: bad store key 'Meta'")
     expect(err({ meta: { bucket: 'x' } })).toBe('STORES_JSON.meta: unknown field(s) bucket')
     expect(err({ meta: { vars: { BASE_SCOPE: 'admin' } } })).toBe("STORES_JSON.meta.vars: unknown var 'BASE_SCOPE'")
@@ -85,6 +85,62 @@ describe('secondaryStores', () => {
     expect(err({ meta: { path: '/m' }, nas: { path: '/m/' } })).toBe("STORES_JSON.nas.path: '/m' is also 'meta's")
     expect(err({ meta: {}, all: { union: ['primary', 'meta'], path: '/all' } }))
       .toBe('STORES_JSON.all: unknown field(s) path (a union view takes union, main, sources)')
+  })
+})
+
+describe('storeGroups', () => {
+  const err = (json: unknown, env: Partial<Env> = {}) => {
+    try { storeGroups({ STORES_JSON: JSON.stringify(json), ...env } as Env) } catch (e) { return (e as Error).message }
+    return null
+  }
+  const POOL = { label: 'pool A', buckets: ['alpha', 'beta'] }
+
+  it('the primary\'s under the reserved key `primary`, a secondary store\'s on its own entry, each its store\'s alone; none = {}', () => {
+    const json = JSON.stringify({ primary: { groups: { 'pool-a': POOL } }, meta: { ...META, groups: { solo: { label: 'solo', buckets: ['gamma'] } } } })
+    const primary = { STORES_JSON: json } as Env
+    expect(storeGroups(primary)).toEqual({ 'pool-a': { name: 'pool-a', label: 'pool A', buckets: ['alpha', 'beta'] } })
+    expect(storeGroups(storeEnv(primary, 'meta', secondaryStores(primary).meta))).toEqual({ solo: { name: 'solo', label: 'solo', buckets: ['gamma'] } })
+    expect(storeGroups(PRIMARY)).toEqual({})
+    expect(storeGroups({} as Env)).toEqual({})
+    // The reserved key is no store: `store=primary` is still the primary, and no secondary store is named `primary`.
+    expect(Object.keys(secondaryStores(primary))).toEqual(['meta'])
+  })
+
+  it('refuses a malformed group: a bad name, an empty or duplicate member, an empty group, a shared label, an unknown field', () => {
+    const at = (g: unknown) => err({ primary: { groups: g } })
+    expect([
+      at([]),
+      at({ 'Pool A': POOL }),
+      at({ p: 'x' }),
+      at({ p: { label: '', buckets: ['a'] } }),
+      at({ p: { label: 'p', buckets: [] } }),
+      at({ p: { label: 'p' } }),
+      at({ p: { label: 'p', buckets: ['a', 'a'] } }),
+      at({ p: { label: 'p', buckets: ['a/b'] } }),
+      at({ p: { label: 'p', buckets: [''] } }),
+      at({ p: POOL, q: POOL }),
+      at({ p: { ...POOL, zone: 'x' } }),
+    ]).toEqual([
+      'STORES_JSON.primary.groups: want an object of name → {label, buckets}',
+      "STORES_JSON.primary.groups: bad group name 'Pool A' (want ^[a-z0-9][a-z0-9-]*$)",
+      'STORES_JSON.primary.groups.p: want an object',
+      'STORES_JSON.primary.groups.p.label: want a nonempty string',
+      'STORES_JSON.primary.groups.p.buckets: want a nonempty list of bucket names',
+      'STORES_JSON.primary.groups.p.buckets: want a nonempty list of bucket names',
+      "STORES_JSON.primary.groups.p.buckets: 'a' is named twice",
+      'STORES_JSON.primary.groups.p.buckets: want bucket names (nonempty, no \'/\'), got "a/b"',
+      'STORES_JSON.primary.groups.p.buckets: want bucket names (nonempty, no \'/\'), got ""',
+      "STORES_JSON.primary.groups.q.label: 'pool A' is also group 'p's",
+      'STORES_JSON.primary.groups.p: unknown field(s) zone (want label, buckets)',
+    ])
+    expect(err({ meta: { groups: { p: { label: 'p', buckets: [] } } } })).toBe('STORES_JSON.meta.groups.p.buckets: want a nonempty list of bucket names')
+  })
+
+  it('a member outside the store\'s `STORE_BUCKETS` (where it sets them) is unknown', () => {
+    const json = { primary: { groups: { 'pool-a': POOL } } }
+    expect(err(json, { STORE_BUCKETS: 'alpha, beta,delta' })).toBe(null)
+    expect(err(json, { STORE_BUCKETS: 'alpha,delta' })).toBe('STORES_JSON.primary.groups.pool-a.buckets: not the store\'s (STORE_BUCKETS): beta')
+    expect(err(json)).toBe(null)
   })
 })
 

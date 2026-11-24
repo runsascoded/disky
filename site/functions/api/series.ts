@@ -3,6 +3,9 @@
  *
  *   GET /api/series?path=<P>[&lens=user:<id>|user:me][&o=owned|unowned][&chunk=<i>]
  *
+ * `g=<name>` (specs/bucket-groups.md, `_lib/groups.ts`): at the root, the bucket group's members' series summed per
+ * scan (`groupSeries`); below the root it is ignored.
+ *
  * With `OWNER_HISTORY_BATCH=1`, a lens / owner / class scoped series is read `SERIES_CHUNK` scans a request (its cost
  * model is there): no `chunk` answers the newest window and `chunks: n`; `chunk=i` (0 ≤ i < n, oldest first) the rest.
  *
@@ -16,7 +19,7 @@
  * filled in from the snapshot dir: the chart keeps any history that never
  * got (or lost) its tiers, rather than showing a gap.
  */
-import { hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionAnyStore, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
+import { hiddenNotFound, isHidden, restrictedGroupRefused, restrictedScopeRefused, restrictedSearchRefused, restrictionAnyStore, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
 import { baseReadScope, baseScope, type Ctx, type Identity, identify, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
@@ -40,6 +43,7 @@ import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId, scanInstant } from '../../src/scanSlug.js'
+import { atRoot, groupBlock, groupOf, groupReachesHidden, memberRequestOf, memberTraces, requestedGroup, sumPoints } from '../_lib/groups.js'
 
 // The default store's snapshot dirs (`snapshots/<date>/`; other stores live in
 // a named subdir that `isScanId` keeps out), and the scan-id shape they're named by.
@@ -85,11 +89,87 @@ export const onRequestGet = async (ctx0: SeriesCtx): Promise<Response> => {
   // without one never leaves `seriesOf`.
   const u = unionFor(ctx0.request, ctx0.env)
   if (u instanceof Response) return u
-  return u ? unionSeries(ctx0, u) : seriesOf(ctx0)
+  if (u) return unionSeries(ctx0, u)
+  // A bucket group's root (`g=`, `_lib/groups.ts`); below the root `g` is ignored.
+  const g = requestedGroup(ctx0.request)
+  return g !== null && atRoot(ctx0.request) ? groupSeries(ctx0, g) : seriesOf(ctx0)
 }
 
 /** The params a union root's series refuses: one store's axes (as `/api/subtree`'s root does). */
-const UNION_ROOT_UNSCOPED = ['lens', 'o', 'cl', 'q', 'paths'] as const
+const UNION_ROOT_UNSCOPED = ['lens', 'o', 'cl', 'q', 'paths', 'g'] as const
+
+/** A member bucket's `/api/series` body, as a group root reads it. */
+type MemberSeries = { points: SeriesPoint[]; roots?: SeriesTrace[]; failed?: string[]; unindexed?: string[]; chunks?: number; lens?: string; owner?: unknown; hexRuns?: unknown }
+
+/**
+ * `/api/series?g=<name>` at the root (specs/bucket-groups.md): the group's members summed per scan. `split=roots` (the
+ * unscoped root's): the store root's per-bucket traces (`split=roots`, the rows the root already reads per bucket), the
+ * members' kept and summed. `paths=` (a filter's match roots, every one under a member): those, as without `g`. Else
+ * each member's own series (`path=<bucket>`, no `g`; its own cache keys, its scope axes and chunk), summed per scan
+ * (`sumPoints`): a member without a point at a scan adds nothing. A path-restricted link is refused a group holding a
+ * hidden dir; a store's `series_scope` reads only `store=` (`summaryGate`), so never a group.
+ */
+async function groupSeries(ctx0: SeriesCtx, name: string): Promise<Response> {
+  const ctx1 = withStore(ctx0)
+  if (ctx1 instanceof Response) return ctx1
+  const ctx = await withPathStore(ctx1)
+  if (!ctx.env.DB) return json({ error: 'index backend not configured (DB)' }, 503)
+  if (!storeReady(ctx.env)) return json({ error: 'index reader not configured' }, 503)
+  const id = await summaryGate(ctx)
+  if (id instanceof Response) return id
+  const group = groupOf(ctx.env, name)
+  if (group instanceof Response) return group
+  const restriction = restrictionFor(id, ctx.env)
+  if (restriction && groupReachesHidden(group, restriction)) return restrictedGroupRefused()
+  const sp = new URL(ctx.request.url).searchParams
+  const gate = async () => id
+  const bare = new URL(ctx.request.url)
+  bare.searchParams.delete('g')
+  const asRoot = { ...ctx, request: new Request(bare, ctx.request) }
+  const paths = parsePaths(sp.getAll('paths'))
+  if (paths.length) {
+    if (paths.some(p => !group.buckets.includes(p.split('/')[0]))) return json({ error: `paths outside group '${group.name}'` }, 400)
+    return seriesRead(asRoot, gate)
+  }
+  const headers = (reads: readonly Response[], failed: boolean) => ({
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': failed ? 'no-store' : reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
+  })
+  if (sp.get('split') === 'roots') {
+    const r = await seriesRead(asRoot, gate)
+    if (!r.ok) return r
+    const body = await r.json() as MemberSeries
+    const roots = memberTraces(group, body.roots ?? [])
+    return new Response(JSON.stringify({
+      path: '', points: sumPoints(roots.map(t => t.points)), roots,
+      ...(body.failed?.length ? { failed: body.failed } : {}),
+      group: groupBlock(group),
+    }), { headers: headers([r], !!body.failed?.length) })
+  }
+  const reads = await Promise.all(group.buckets.map(b => seriesRead({ ...ctx, request: memberRequestOf(ctx.request, b) }, gate)))
+  const bodies: MemberSeries[] = []
+  for (const r of reads) {
+    if (r.status === 404) continue
+    if (!r.ok) return r
+    bodies.push(await r.json() as MemberSeries)
+  }
+  const union = (k: 'failed' | 'unindexed') => [...new Set(bodies.flatMap(b => b[k] ?? []))].sort()
+  const failed = union('failed')
+  const unindexed = union('unindexed')
+  const chunks = bodies.reduce<number | undefined>((n, b) => (b.chunks === undefined ? n : Math.max(n ?? 0, b.chunks)), undefined)
+  const lead = bodies[0]
+  return new Response(JSON.stringify({
+    path: '',
+    ...(chunks !== undefined ? { chunks } : {}),
+    ...(lead?.hexRuns ? { hexRuns: lead.hexRuns } : {}),
+    ...(unindexed.length ? { unindexed } : {}),
+    ...(lead?.lens ? { lens: lead.lens } : {}),
+    ...(lead?.owner ? { owner: lead.owner } : {}),
+    points: sumPoints(bodies.map(b => b.points)),
+    ...(failed.length ? { failed } : {}),
+    group: groupBlock(group),
+  }), { headers: headers(reads, failed.length > 0) })
+}
 
 /**
  * `/api/series` on a union view. The root: each member's own series (its scans, its points), concurrently, as

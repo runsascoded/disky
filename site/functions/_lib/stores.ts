@@ -67,6 +67,15 @@
  *
  *   "all": {"union": ["primary", "meta"], "main": true,
  *           "sources": {"primary": {"label": "Buckets", "icon": "/icons/buckets.svg"}, "meta": {"icon": "https://example.com/meta.png"}}}
+ *
+ * A store's **bucket groups** (`groups`, specs/bucket-groups.md): named sets of its buckets the Map shows together
+ * (`?g=<name>`: a synthetic root, `_lib/groups.ts`), e.g. buckets sharing one quota. Each name is a store key's shape
+ * (URL-safe), each group a nonempty `label` and its `buckets` (nonempty, none twice, none with a `/`; within the
+ * store's `STORE_BUCKETS` where it sets them). Two groups may not share a label. The primary store's groups sit under
+ * the reserved key `primary`, which takes `groups` alone:
+ *
+ *   STORES_JSON = {"primary": {"groups": {"pool-a": {"label": "pool A", "buckets": ["alpha", "beta"]}}},
+ *                  "meta": {…, "groups": {…}}}
  */
 import type { Env } from './auth.js'
 import { withReq } from './shared.js'
@@ -132,7 +141,15 @@ export interface StoreConfig {
   series_scope?: string
   /** The store's page path (`/meta`): the URL prefix its pages live under (normalized: no trailing `/`). */
   path?: string
+  /** Its bucket groups, by name (see the module comment). */
+  groups?: Record<string, GroupConfig>
 }
+
+/** A bucket group as `STORES_JSON` declares it (`groups.<name>`). */
+export interface GroupConfig { label: string; buckets: string[] }
+
+/** A store's bucket group (`?g=<name>`): its name, label and member buckets (config order). */
+export interface BucketGroup extends GroupConfig { name: string }
 
 const KEY_RE = /^[a-z0-9][a-z0-9-]*$/
 const SERIES_SCOPE_RE = /^[a-z0-9][a-z0-9_-]*$/
@@ -165,7 +182,8 @@ const PATH_RE = /^(\/[A-Za-z0-9._~-]+)+$/
 
 const ICON_RE = /^(https?:\/\/[^\s]+|\/[^\s/][^\s]*)$/
 
-let parsed: { raw: string; stores: Record<string, StoreConfig>; views: Record<string, UnionView> } | null = null
+type Parsed = { stores: Record<string, StoreConfig>; views: Record<string, UnionView>; groups: Record<string, Record<string, BucketGroup>> }
+let parsed: Parsed & { raw: string } | null = null
 
 /** The secondary stores (`STORES_JSON`), validated; `{}` when unset. */
 export function secondaryStores(env: Env): Record<string, StoreConfig> {
@@ -177,9 +195,9 @@ export function unionViews(env: Env): Record<string, UnionView> {
   return parseStores(env).views
 }
 
-function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Record<string, UnionView> } {
+function parseStores(env: Env): Parsed {
   const raw = env.STORES_JSON ?? ''
-  if (!raw) return { stores: {}, views: {} }
+  if (!raw) return { stores: {}, views: {}, groups: {} }
   if (parsed?.raw === raw) return parsed
   let obj: unknown
   try {
@@ -190,14 +208,22 @@ function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Re
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new StoreConfigError('STORES_JSON: want an object of store configs')
   const stores: Record<string, StoreConfig> = {}
   const unions: Record<string, Record<string, unknown>> = {}
+  const groups: Record<string, Record<string, BucketGroup>> = {}
   for (const [key, cfg] of Object.entries(obj as Record<string, unknown>)) {
-    if (!KEY_RE.test(key) || key === PRIMARY_STORE) throw new StoreConfigError(`STORES_JSON: bad store key '${key}'`)
+    if (!KEY_RE.test(key)) throw new StoreConfigError(`STORES_JSON: bad store key '${key}'`)
     if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new StoreConfigError(`STORES_JSON.${key}: want an object`)
+    if (key === PRIMARY_STORE) {
+      // The primary's own config is its vars; here it declares only its bucket groups.
+      const { groups: g, ...rest } = cfg as Record<string, unknown>
+      if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}: unknown field(s) ${Object.keys(rest).join(', ')} (the primary store takes groups alone)`)
+      groups[key] = parseGroups(key, g)
+      continue
+    }
     if ('union' in cfg) {
       unions[key] = cfg as Record<string, unknown>
       continue
     }
-    const { scope, series_scope: seriesScope, vars, secrets, path, ...rest } = cfg as Record<string, unknown>
+    const { scope, series_scope: seriesScope, vars, secrets, path, groups: g, ...rest } = cfg as Record<string, unknown>
     if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}: unknown field(s) ${Object.keys(rest).join(', ')}`)
     if (scope !== undefined && typeof scope !== 'string') throw new StoreConfigError(`STORES_JSON.${key}.scope: want a string`)
     if (seriesScope !== undefined && (typeof seriesScope !== 'string' || !SERIES_SCOPE_RE.test(seriesScope) || seriesScope === 'admin')) throw new StoreConfigError(`STORES_JSON.${key}.series_scope: want a scope name (not admin)`)
@@ -214,6 +240,7 @@ function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Re
         if (typeof v !== 'string') throw new StoreConfigError(`STORES_JSON.${key}.${field}.${k}: want a string`)
       }
     }
+    groups[key] = parseGroups(key, g)
     stores[key] = page === undefined ? cfg as StoreConfig : { ...(cfg as StoreConfig), path: page as string }
   }
   const views: Record<string, UnionView> = {}
@@ -229,8 +256,49 @@ function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Re
   }
   const mains = Object.values(views).filter(v => v.main).map(v => v.key)
   if (mains.length > 1) throw new StoreConfigError(`STORES_JSON: more than one main union view (${mains.join(', ')})`)
-  parsed = { raw, stores, views }
+  parsed = { raw, stores, views, groups }
   return parsed
+}
+
+/** A store's `groups`, validated (see the module comment); `{}` when absent. Membership in the store's
+ *  `STORE_BUCKETS` is checked where the store's env is known (`storeGroups`). */
+function parseGroups(key: string, raw: unknown): Record<string, BucketGroup> {
+  if (raw === undefined) return {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new StoreConfigError(`STORES_JSON.${key}.groups: want an object of name → {label, buckets}`)
+  const out: Record<string, BucketGroup> = {}
+  const labels = new Map<string, string>()
+  for (const [name, g] of Object.entries(raw as Record<string, unknown>)) {
+    const at = `STORES_JSON.${key}.groups.${name}`
+    if (!KEY_RE.test(name)) throw new StoreConfigError(`STORES_JSON.${key}.groups: bad group name '${name}' (want ${KEY_RE.source})`)
+    if (!g || typeof g !== 'object' || Array.isArray(g)) throw new StoreConfigError(`${at}: want an object`)
+    const { label, buckets, ...rest } = g as Record<string, unknown>
+    if (Object.keys(rest).length) throw new StoreConfigError(`${at}: unknown field(s) ${Object.keys(rest).join(', ')} (want label, buckets)`)
+    if (typeof label !== 'string' || !label.trim()) throw new StoreConfigError(`${at}.label: want a nonempty string`)
+    const same = labels.get(label)
+    if (same !== undefined) throw new StoreConfigError(`${at}.label: '${label}' is also group '${same}'s`)
+    labels.set(label, name)
+    if (!Array.isArray(buckets) || !buckets.length) throw new StoreConfigError(`${at}.buckets: want a nonempty list of bucket names`)
+    for (const b of buckets) if (typeof b !== 'string' || !b || b.includes('/')) throw new StoreConfigError(`${at}.buckets: want bucket names (nonempty, no '/'), got ${JSON.stringify(b)}`)
+    const bs = buckets as string[]
+    const twice = bs.find((b, i) => bs.indexOf(b) !== i)
+    if (twice !== undefined) throw new StoreConfigError(`${at}.buckets: '${twice}' is named twice`)
+    out[name] = { name, label, buckets: [...bs] }
+  }
+  return out
+}
+
+/** The bucket groups of the store `env` serves (the primary's, or a secondary store's overlay), validated against its
+ *  `STORE_BUCKETS` where it sets them (a group naming a bucket outside them is a config error); `{}` when none. */
+export function storeGroups(env: Env): Record<string, BucketGroup> {
+  const gs = parseStores(env).groups[storeKey(env)] ?? {}
+  const known = (env.STORE_BUCKETS ?? '').split(',').map(s => s.trim()).filter(Boolean)
+  if (known.length) {
+    for (const g of Object.values(gs)) {
+      const unknown = g.buckets.filter(b => !known.includes(b))
+      if (unknown.length) throw new StoreConfigError(`STORES_JSON.${storeKey(env)}.groups.${g.name}.buckets: not the store's (STORE_BUCKETS): ${unknown.join(', ')}`)
+    }
+  }
+  return gs
 }
 
 /** A union view's `sources` (each member's `label` / `icon`), validated: keys are members, values strings. */

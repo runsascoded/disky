@@ -2,7 +2,10 @@
  * (specs/done/view-serving.md; the folding lives in `_lib/view.ts`).
  *
  *   GET /api/subtree?date=<scan>&path=<P>&w=<px>&h=<px>[&minArea=<px²>]
- *                    [&lens=user:<id>|user:me][&o=owned|unowned][&q=<name filter>]
+ *                    [&lens=user:<id>|user:me][&o=owned|unowned][&q=<name filter>][&g=<bucket group>]
+ *
+ * `g=<name>` (specs/bucket-groups.md, `_lib/groups.ts`): at the root, the store's root restricted to that bucket
+ * group's members (`groupSubtree`); below the root it is ignored.
  *
  * The page's scope axes (specs/done/view-serving.md §2) are applied server-side:
  * the owner axis (`lens` for a user, `o` for the pools), the name filter
@@ -11,7 +14,7 @@
  * edge cache accordingly. w/h arrive quantized-up to 128px so resizes mostly
  * re-hit the cache.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, restrictSubtree, scopeReachesHidden } from '../_lib/restrict.js'
+import { filterJson, hiddenNotFound, isHidden, restrictedGroupRefused, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, restrictSubtree, scopeReachesHidden } from '../_lib/restrict.js'
 import { type Env, type Identity, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
@@ -27,7 +30,8 @@ import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { indexedScan, noScan, scanArg } from '../_lib/scanArg.js'
 import { ahead, loadScopes, traceJoins } from '../_lib/shared.js'
-import { type FilteredRoot, filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, type Resolved, resolveUnion, UnionOverlap, unionFiltered, unionFor, unionRoot, vectorOf } from '../_lib/union.js'
+import { type FilteredRoot, filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, type Resolved, resolveUnion, UnionOverlap, unionFiltered, unionFilterFields, unionFor, unionRoot, vectorOf } from '../_lib/union.js'
+import { atRoot, groupBlock, groupOf, groupReachesHidden, groupRoot, memberRequestOf, requestedGroup } from '../_lib/groups.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
 
@@ -39,7 +43,10 @@ export const onRequestGet = (ctx0: SubtreeCtx): Promise<Response> => {
   // without one never leaves `subtree`.
   const u = unionFor(ctx0.request, ctx0.env)
   if (u instanceof Response) return Promise.resolve(u)
-  return u ? unionSubtree(ctx0, u) : subtree(ctx0, true)
+  if (u) return unionSubtree(ctx0, u)
+  // A bucket group's root (`g=`, `_lib/groups.ts`); below the root `g` is ignored.
+  const g = requestedGroup(ctx0.request)
+  return g !== null && atRoot(ctx0.request) ? groupSubtree(ctx0, g) : subtree(ctx0, true)
 }
 
 /** Fill the edge cache for a subtree URL without a caller identity: what a
@@ -275,10 +282,103 @@ async function subtreeGated(
   }
 }
 
+/** A member bucket's `/api/subtree` body, as a group root reads it. */
+type MemberBody = Omit<FilteredRoot, 'tree'> & { tree: ViewNode; tier: string; index: string; nodes: number; truncated: boolean; budgetCut?: true; lens?: string; owner?: unknown }
+
+/**
+ * `/api/subtree?g=<name>` at the root (specs/bucket-groups.md): the store's root restricted to the group's buckets, a
+ * synthetic root labelled by the group with its members as children (`groupRoot`). Composed from each member's own
+ * read (`path=<bucket>`, no `g`; its own cache keys), as a union root is from its members': first each member's one
+ * level (`depth=1`, the same request a drill into it makes) or, under a name filter, its filtered read — whose totals
+ * give the group's one byte threshold — then, past a `depth=1` request, each member drawn under that threshold
+ * (`&T=`, attenuated one level: a bucket's children are the group root's grandchildren). A member a scope leaves
+ * empty is absent (as a bucket is from a scoped root), and so is one the scan doesn't hold. The scope axes (`lens`,
+ * `o`, `cl`, `q`) pass to each member. A path-restricted link is refused a group holding a hidden dir.
+ */
+async function groupSubtree(ctx0: SubtreeCtx, name: string): Promise<Response> {
+  const ctx1 = withStore(ctx0)
+  if (ctx1 instanceof Response) return ctx1
+  const ctx = await withPathStore(ctx1)
+  if (!storeReady(ctx.env)) return new Response('subtree API not configured (missing index store creds)', { status: 503 })
+  const sp = new URL(ctx.request.url).searchParams
+  if (!isScanId(sp.get('date') ?? '') && !sp.has('d')) return new Response('bad date', { status: 400 })
+  const id = await requireViewer(ctx as never)
+  if (id instanceof Response) return id
+  const group = groupOf(ctx.env, name)
+  if (group instanceof Response) return group
+  const restriction = restrictionFor(id, ctx.env)
+  if (restriction && groupReachesHidden(group, restriction)) return restrictedGroupRefused()
+  try {
+    const date = await scanArg(ctx.env, sp)
+    if (date instanceof Response) return date
+    const w = Math.ceil((Number(sp.get('w')) || 1280) / QUANT) * QUANT
+    const h = Math.ceil((Number(sp.get('h')) || 800) / QUANT) * QUANT
+    const minArea = Number(sp.get('minArea')) || MIN_AREA_DEFAULT
+    const atten = Number(sp.get('atten')) || ATTEN_DEFAULT
+    const depth = Number(sp.get('depth')) || undefined
+    const q = (sp.get('q') ?? '').trim() ? sp.get('q')! : ''
+    const scoped = !!(q || sp.get('lens') || sp.get('o') || sp.get('cl'))
+    const ask = (bucket: string, set: Record<string, string>, drop: string[], threshold?: number) =>
+      subtree({ ...ctx0, request: memberRequestOf(ctx0.request, bucket, { date, ...set }, ['d', ...drop]) }, true, { id, ...(threshold === undefined ? {} : { threshold }) })
+    /** Each member's answer (null: the scan doesn't hold it); a failure is the group's. */
+    const read = async (buckets: readonly string[], one: (b: string) => Promise<Response>): Promise<{ bodies: (MemberBody | null)[]; reads: Response[] } | Response> => {
+      const reads = await Promise.all(buckets.map(one))
+      const bodies: (MemberBody | null)[] = []
+      for (const r of reads) {
+        if (r.status === 404) { bodies.push(null); continue }
+        if (!r.ok) return r
+        bodies.push(await r.json() as MemberBody)
+      }
+      return { bodies, reads }
+    }
+    const first = await read(group.buckets, b => ask(b, q ? {} : { depth: '1' }, []))
+    if (first instanceof Response) return first
+    const held = group.buckets.flatMap((bucket, i) => (first.bodies[i] ? [{ bucket, body: first.bodies[i]! }] : []))
+    const threshold = (held.reduce((n, m) => n + m.body.tree.bytes, 0) * minArea) / (w * h)
+    const drawn = held.filter(m => !scoped || m.body.tree.bytes > 0)
+    let members = drawn
+    let reads = first.reads
+    if (depth !== 1) {
+      // Each member under the group's threshold; `depth=N` is N − 1 levels below a bucket.
+      const below: Record<string, string> = depth && depth > 1 ? { depth: String(depth - 1) } : {}
+      const second = await read(drawn.map(m => m.bucket), b => ask(b, below, depth ? [] : ['depth'], threshold * atten))
+      if (second instanceof Response) return second
+      members = drawn.flatMap((m, i) => (second.bodies[i] ? [{ bucket: m.bucket, body: second.bodies[i]! }] : []))
+      reads = second.reads
+    }
+    // A `depth=1` answer is the members alone (each a drillable branch, its children not sent).
+    const kids = members.map(({ bucket, body }) => {
+      const { children: _c, folded: _f, ...node } = body.tree
+      return depth === 1 ? { ...node, name: bucket } : { ...body.tree, name: bucket }
+    })
+    const bs = members.map(m => m.body)
+    const lead = held[0]?.body
+    return new Response(JSON.stringify({
+      date, path: '', w, h, minArea, atten,
+      tier: bs[0]?.tier ?? lead?.tier ?? 'none', index: bs[0]?.index ?? lead?.index ?? 'none',
+      ...(lead?.lens ? { lens: lead.lens } : {}),
+      threshold: Math.round(threshold),
+      nodes: bs.reduce((n, b) => n + b.nodes, 0),
+      truncated: bs.some(b => b.truncated),
+      ...(lead?.owner ? { owner: lead.owner } : {}),
+      ...(q ? { q, ...unionFilterFields(members.map(m => ({ store: m.bucket, body: m.body })), []) } : {}),
+      ...(bs.some(b => b.budgetCut) ? { budgetCut: true } : {}),
+      group: groupBlock(group),
+      tree: groupRoot(group.label, kids),
+    }), { headers: unionHeaders(reads) })
+  } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
+    const msg = String((e as Error).message ?? e)
+    if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
+    return new Response(`subtree failed: ${msg}`, { status: 500 })
+  }
+}
+
 /** The params a union root refuses: each is one store's axis (the ledger's lens and pools, storage classes), not
  *  yet composed across members. A drill below the root takes them (its member answers). The name filter (`q`) is
  *  composed: `unionFilteredRoot`. */
-const UNION_ROOT_UNSCOPED = ['lens', 'o', 'by', 'cl'] as const
+const UNION_ROOT_UNSCOPED = ['lens', 'o', 'by', 'cl', 'g'] as const
 
 /** A union answer's headers: as private as its members' answers; a member's uncacheable one (a budget-cut
  *  partial) makes it so. */

@@ -133,6 +133,9 @@ const del = route('DELETE')
 /** A scan-reading route checks its view before its gate: a date it accepts. */
 const AT = 'date=2026-10-01'
 const SPAN = 'from=2026-09-01&to=2026-10-01'
+/** The primary store's bucket groups (`STORES_JSON` `groups`, specs/bucket-groups.md): `clear` holds nothing a
+ *  restricted link hides; `holds` holds `bk`, above its hidden dir (`HIDDEN`). Made-up buckets. */
+const GROUPS = { STORES_JSON: JSON.stringify({ primary: { groups: { clear: { label: 'clear pool', buckets: ['aa', 'cc'] }, holds: { label: 'holds bk', buckets: ['aa', 'bk'] } } } }) }
 const STAGING = { STAGING: '1' }
 const INTERVALS = { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g1', INDEX_R2: { get: async () => null, head: async () => null } }
 const GOOGLE = { GOOGLE_CLIENT_ID: 'client-id', GOOGLE_CLIENT_SECRET: 'client-secret' }
@@ -186,7 +189,8 @@ const SHARED_ROUTES: Record<string, Case[]> = {
     post('/api/db/admin_edits', 'nobody'),
     post('/api/db/actions', 'nobody'),
   ],
-  'api/diff.ts': [get(`/api/diff?${SPAN}`, 'viewer')],
+  // A bucket group (`g=`) at the root is composed from its members' reads, behind the same gate.
+  'api/diff.ts': [get(`/api/diff?${SPAN}`, 'viewer'), get(`/api/diff?${SPAN}&g=clear`, 'viewer', GROUPS)],
   // Level diffs read the interval store: without one, a 409 before the gate.
   'api/diff/level.ts': [get(`/api/diff/level?${SPAN}&p=a`, 'viewer', INTERVALS), get(`/api/diff/level?${SPAN}&p=a`, 'unconfigured')],
   'api/digest-image.ts': [post('/api/digest-image', 'viewer')],
@@ -207,6 +211,7 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/filter-cover.ts': [get(`/api/filter-cover?${AT}&q=abc`, 'viewer')],
   'api/filter-scans.ts': [get('/api/filter-scans?q=abc', 'viewer')],
   'api/footer-cache.ts': [get('/api/footer-cache', 'admin'), post('/api/footer-cache', 'admin')],
+  'api/groups.ts': [get('/api/groups', 'viewer'), get('/api/groups', 'viewer', GROUPS)],
   'api/health.ts': [get('/api/health', 'viewer')],
   'api/largest.ts': [get(`/api/largest?${AT}`, 'viewer')],
   'api/me.ts': [get('/api/me', 'viewer')],
@@ -258,7 +263,7 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/scan-runs/card-url.ts': [get('/api/scan-runs/card-url', 'viewer')],
   // "Run a scan": an admin starts the deployment's scan submitter (`_lib/scanDispatch.ts`).
   'api/scan-runs/dispatch.ts': [post('/api/scan-runs/dispatch', 'admin')],
-  'api/series.ts': [get('/api/series', 'viewer')],
+  'api/series.ts': [get('/api/series', 'viewer'), get('/api/series?g=clear', 'viewer', GROUPS)],
   'api/session-log/[[path]].ts': [
     // The config says only whether logging is on (and purges only for a viewer); a batch is a viewer's, while it is on
     // (off: a 503 before the gate).
@@ -274,7 +279,7 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/slack-emoji.ts': [get('/api/slack-emoji', 'admin')],
   'api/static-bench.ts': [get('/api/static-bench', 'viewer'), post('/api/static-bench', 'viewer')],
   'api/store.ts': [get('/api/store', 'viewer')],
-  'api/subtree.ts': [get(`/api/subtree?${AT}`, 'viewer')],
+  'api/subtree.ts': [get(`/api/subtree?${AT}`, 'viewer'), get(`/api/subtree?${AT}&g=clear`, 'viewer', GROUPS)],
   'api/sweep/dispatch.ts': [post('/api/sweep/dispatch', 'admin')],
   'api/sweep/jobs.ts': [get('/api/sweep/jobs', 'viewer')],
   'api/sweep/logs.ts': [get('/api/sweep/logs', 'viewer')],
@@ -389,6 +394,8 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /api/filter-caps': 'pathless',
   'GET /api/filter-cover': 'blocked',
   'GET /api/filter-scans': 'pathless',
+  // A group holding a hidden dir is left out (`api/groups.ts`; the bucket-group table at the end).
+  'GET /api/groups': 'filtered',
   'GET /api/health': 'blocked',
   'GET /api/largest': 'filtered',
   'GET /api/me': 'pathless',
@@ -859,5 +866,51 @@ describe("a store's `series_scope`: its root-level `/api/series` and nothing els
   it('an agent token can\'t mint a grant carrying it', async () => {
     const res = await mintAs(w, 'agent token', ['gcs:read', 'totals'])
     expect(res.status).toBe(403)
+  })
+})
+
+// ---- a bucket group (`g=`) under a path-restricted link -------------------------------------------------------------
+
+/** Each request on the primary's groups (`GROUPS`), and what the open link and the restricted one (hiding `HIDDEN`, under
+ *  member `bk` of `holds`) get: `pass`, or a 403's body. A group holding a hidden dir is refused as an owner or class
+ *  scope reaching one is (`restrictedGroupRefused`); one holding none answers as for the open link. */
+const GROUP_REFUSED = '{"error":"this bucket group isn’t available on this link","code":"restricted-group"}\n'
+const GROUP_EXPECT: [string, string, string, string][] = [
+  //                                                                   open   restricted
+  ['api/subtree.ts', `/api/subtree?${AT}&g=clear`,                     P,     P],
+  ['api/subtree.ts', `/api/subtree?${AT}&g=holds`,                     P,     GROUP_REFUSED],
+  // Below the root `g` is ignored: the path's own read (here a hidden path's 404, as without `g`).
+  ['api/subtree.ts', `/api/subtree?${AT}&g=holds&path=${HIDDEN}/x`,    P,     P],
+  ['api/diff.ts', `/api/diff?${SPAN}&g=clear`,                         P,     P],
+  ['api/diff.ts', `/api/diff?${SPAN}&g=holds`,                         P,     GROUP_REFUSED],
+  ['api/series.ts', '/api/series?g=clear',                             P,     P],
+  ['api/series.ts', '/api/series?g=holds',                             P,     GROUP_REFUSED],
+  ['api/series.ts', '/api/series?g=holds&split=roots',                 P,     GROUP_REFUSED],
+]
+
+describe('a bucket group (`g=`) under a path-restricted link: refused when it holds a hidden dir', () => {
+  let w: World
+  beforeAll(async () => { w = await world(MODES[0]) })
+
+  it.each(GROUP_EXPECT.map(([file, path, open, restricted]) => ({ file, path, open, restricted })))('GET $path', async ({ file, path, open, restricted }) => {
+    const mod = MODULES[file]
+    const c: Case = { method: 'GET', path, gate: 'viewer', env: GROUPS }
+    const run = behindMiddleware(mod[handlerFor(mod, 'GET')] as Handler)
+    const got = async (headers: Record<string, string>, as: string) => {
+      const { did, body } = await answer(w, run, file, c, headers, as)
+      return did === '403' ? body : did === '401' ? '401' : P
+    }
+    expect({ open: await got(w.links.open, 'the open link'), restricted: await got(w.links.restricted, 'the restricted link') }).toEqual({ open, restricted })
+  })
+
+  it('`/api/groups` lists every group to the open link, and leaves out the one holding a hidden dir for the restricted', async () => {
+    const run = MODULES['api/groups.ts'].onRequestGet as Handler
+    const list = async (headers: Record<string, string>) => {
+      const r = await run({ request: new Request(`${ORIGIN}/api/groups`, { headers }), env: { ...w.env, ...GROUPS } }) as Response
+      return [r.status, await r.json()]
+    }
+    const clear = { name: 'clear', label: 'clear pool', buckets: ['aa', 'cc'] }
+    expect(await list(w.links.open)).toEqual([200, { groups: [clear, { name: 'holds', label: 'holds bk', buckets: ['aa', 'bk'] }] }])
+    expect(await list(w.links.restricted)).toEqual([200, { groups: [clear] }])
   })
 })
