@@ -1,6 +1,8 @@
+// the `.wasm` import's type, also where the page's typecheck reaches this file (`activity.ts`, through `auth.ts`)
+/// <reference path="./og/wasm.d.ts" />
 /**
- * A staged-deletion post's sender face: the person's photo with a corner fold in the color of what they did (staged,
- * dispatched, finished, …) and its glyph. Rendered by resvg to a PNG and published as a public avatar
+ * A post's sender face when the bot posts as a person: the person's photo with a corner fold in the color of what they
+ * did (a staged deletion's staged, dispatched, finished, …; `activity` for an activity burst) and its glyph. Rendered by resvg to a PNG and published as a public avatar
  * (`publishAvatar`: `/a/<sha256>.png`), so Slack can fetch it as `icon_url`. Anything that fails (no face, a face
  * that won't decode, no `public_avatars` table, an http origin Slack can't reach) leaves the plain face: a post is
  * never held up by its avatar.
@@ -11,7 +13,7 @@ import RESVG from './og/vendor/resvg.wasm'
 import { ensureWasm, svgToPng } from './og/render.js'
 import { identiconPng, identiconSeed, publishAvatar } from './publicAvatar.js'
 
-export type Badge = 'staged' | 'dry' | 'dispatched' | 'finished' | 'failed' | 'undone'
+export type Badge = 'staged' | 'dry' | 'dispatched' | 'finished' | 'failed' | 'undone' | 'activity'
 
 /** Each badge's fold color and glyph: a 24-unit path, white, stroked unless `fill`. */
 export const BADGES: Record<Badge, { color: string; glyph: string; fill?: boolean }> = {
@@ -21,6 +23,8 @@ export const BADGES: Record<Badge, { color: string; glyph: string; fill?: boolea
   finished: { color: '#2e9e62', glyph: 'M5 12.5l4.5 4.5L19 7' },
   failed: { color: '#d93844', glyph: 'M7 7l10 10M17 7L7 17' },
   undone: { color: '#8a63e0', glyph: 'M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3' },
+  // an activity burst: what they looked at (an eye), on a neutral slate fold
+  activity: { color: '#475569', glyph: 'M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12zM12 9.25a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 1 0 0-5.5z' },
 }
 
 /** The badge a sender's verb carries; none for a verb without one. */

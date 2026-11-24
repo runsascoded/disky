@@ -9,6 +9,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import { BATCH_GAP_S } from './batchGroups.js'
 import { slackApi, type SlackEnv, slackScopes, slackPeople } from './slack.js'
 import { dataUriImage, identiconPng, identiconSeed, publishAvatar, serviceIconPng } from './publicAvatar.js'
+import { badgedAvatarUrl } from './badgedAvatar.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
   activityEventLine, addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, hostTag, type HostTagEnv, joins, KIND_DEFS, type KindConf,
@@ -389,28 +390,38 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
   const s = sinks(env)
   const who = s.slack || s.discord ? await senderOf(env, b, now) : { name: '', icon: null }
   const name = reasons ? plainName(who.name) : who.name
+  // A post made as a person carries the `activity` badge over the face it would show (the plain face when the badge
+  // can't be made); a service link's keeps its fixed service face. Made only when a post is created (an edit can't
+  // change the sender).
+  const faceOf = async (icon: string | null): Promise<string | null> =>
+    grant?.service || !icon ? icon : (await badgedAvatarUrl(env, db, b.origin, { email: b.actor, image: icon }, 'activity')) ?? icon
   if (s.slack && notices?.slack !== null) {
     const notice = notices?.slack ?? undefined
     const channel = env.SLACK_ADMIN_CHANNEL!
     const asUser = (await slackScopes(env)).has('chat:write.customize')
     const slackWho = asUser ? await slackSenderOf(env, b, who) : who
-    const sender = asUser ? { username: slackWho.name, ...(slackWho.icon ? { icon_url: slackWho.icon } : {}) } : {}
+    let made: Promise<{ username?: string; icon_url?: string }> | null = null
+    const sender = () => made ??= (async () => {
+      if (!asUser) return {}
+      const icon = await faceOf(slackWho.icon)
+      return { username: slackWho.name, ...(icon ? { icon_url: icon } : {}) }
+    })()
     const text = renderHeadline(shown, { fmt: SLACK, conf, name, notice, tag: hostTag(b.origin, env, SLACK, env.SLACK_PR_EMOJI) }, asUser)
     const parent = await ensurePost(db, b.id, 'slack', 'parent', now,
-      async () => (await slackApi(env, 'chat.postMessage', { channel, text, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
+      async () => (await slackApi(env, 'chat.postMessage', { channel, text, ...(await sender()), unfurl_links: false, unfurl_media: false })).ts ?? null,
       ts => slackApi(env, 'chat.update', { channel, ts, text }))
     if (parent && notice) await keepNotice(db, b.id, 'slack', notice, now)
     if (parent) {
       const details = renderDetails(b, { fmt: SLACK, conf, highlights: h })
       if (details) {
         await ensurePost(db, b.id, 'slack', 'details', now,
-          async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: details, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
+          async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: details, ...(await sender()), unfurl_links: false, unfurl_media: false })).ts ?? null,
           ts => slackApi(env, 'chat.update', { channel, ts, text: details }))
       }
       for (const [kind, es] of lineKinds) {
         const reply = renderLines(kind, lineEvents(es, SLACK), SLACK)
         await ensurePost(db, b.id, 'slack', kind, now,
-          async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: reply, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
+          async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: reply, ...(await sender()), unfurl_links: false, unfurl_media: false })).ts ?? null,
           ts => slackApi(env, 'chat.update', { channel, ts, text: reply }))
       }
     }
@@ -424,10 +435,11 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
       `${b.origin}/admin/activity?burst=${b.id}`,
     )
     const body = JSON.stringify({ content, allowed_mentions: { parse: [] } })
-    const created = JSON.stringify({ content, allowed_mentions: { parse: [] }, username: who.name.slice(0, 80), ...(who.icon ? { avatar_url: who.icon } : {}) })
     const headers = { 'content-type': 'application/json' }
     const posted = await ensurePost(db, b.id, 'discord', 'parent', now,
       async () => {
+        const icon = await faceOf(who.icon)
+        const created = JSON.stringify({ content, allowed_mentions: { parse: [] }, username: who.name.slice(0, 80), ...(icon ? { avatar_url: icon } : {}) })
         const r = await fetch(`${url}?wait=true`, { method: 'POST', headers, body: created })
         if (!r.ok) { console.log(`activity: discord post ${r.status}`); return null }
         return ((await r.json()) as { id?: string }).id ?? null

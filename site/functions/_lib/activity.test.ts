@@ -8,7 +8,8 @@ import {
   type ActivityEnv, auditWithActivity, burstEvents, bump, burstFor, feedClient, listBursts, loadBurst, purgeActivity, readKinds, recordServer,
   rerender, THROTTLE_MS, type Wait, writeKind,
 } from './activity'
-import { serviceIconPng, sha256Hex } from './publicAvatar'
+import { identiconPng, serviceIconPng, sha256Hex } from './publicAvatar'
+import { badgedAvatarUrl, resetBadgedAvatars } from './badgedAvatar'
 import {
   activityEventLine, activityRefreshLine, addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
   hostTag, renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, serviceReasons, sessionLinks, SLACK,
@@ -317,13 +318,17 @@ describe('rendering', () => {
 
 /** A stubbed `fetch`: Slack posts get ts `1.00000N`, Discord posts id `dN`; every call is recorded. */
 /** Slack (and Discord) as fetch: posts get sequential ids; `auth.test` answers with `scopes` (the installed app's) and
- *  isn't logged. */
-function stubFetch(fail = false, scopes = 'chat:write,chat:write.customize', photo: string | null = null) {
+ *  isn't logged. `photo` is the person's Slack photo: a PNG unless `servePhoto` is off (a 404), its gets not logged. */
+function stubFetch(fail = false, scopes = 'chat:write,chat:write.customize', photo: string | null = null, servePhoto = true) {
   const calls: { url: string; method: string; body: Record<string, unknown> }[] = []
   let n = 0
   resetSlackScopes()
   resetSlackPeople()
+  resetBadgedAvatars()
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    if (photo && url === photo) {
+      return servePhoto ? new Response(identiconPng(new Uint8Array([1, 2, 3, 4]), 96), { headers: { 'content-type': 'image/png' } }) : new Response('', { status: 404 })
+    }
     if (url.includes('/users.lookupByEmail?')) return new Response(JSON.stringify(photo ? { ok: true, user: { id: 'U1', profile: { image_192: photo } } } : { ok: false, error: 'users_not_found' }))
     if (url.endsWith('auth.test')) return new Response(JSON.stringify({ ok: true }), { headers: { 'x-oauth-scopes': scopes } })
     const body = JSON.parse(String(init.body ?? '{}'))
@@ -463,16 +468,26 @@ describe('D1 and sinks', () => {
     ])
   })
 
-  it('uses Slack photos on the parent and replies, keeping Discord on the site fallback', async () => {
+  it('posts as the person under their Slack photo badged `activity` on the parent and replies, keeping Discord on the site fallback', async () => {
     const photo = 'https://avatars.slack-edge.com/ann.png'
     const calls = stubFetch(false, 'chat:write,chat:write.customize', photo)
     const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1', DISCORD_ADMIN_WEBHOOK: 'https://discord.example.test/hook' })
     await feed(env, wait, 'sid-slack-photo', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
-    expect(calls.map(c => ({ url: c.url, username: c.body.username, icon: c.body.icon_url ?? c.body.avatar_url ?? null }))).toEqual([
-      { url: 'https://slack.com/api/chat.postMessage', username: 'ann', icon: photo },
-      { url: 'https://slack.com/api/chat.postMessage', username: 'ann', icon: photo },
+    // the badged face, published once (`badgedAvatarUrl` answers it again from its cache)
+    const badged = await badgedAvatarUrl(env, env.DB!, ORIGIN, { email: 'ann@example.test', image: photo }, 'activity')
+    expect([/^https:\/\/gcs\.example\.test\/a\/[0-9a-f]{64}\.png$/.test(badged ?? ''), calls.map(c => ({ url: c.url, username: c.body.username, icon: c.body.icon_url ?? c.body.avatar_url ?? null }))]).toEqual([true, [
+      { url: 'https://slack.com/api/chat.postMessage', username: 'ann', icon: badged },
+      { url: 'https://slack.com/api/chat.postMessage', username: 'ann', icon: badged },
       { url: 'https://discord.example.test/hook?wait=true', username: 'ann', icon: null },
-    ])
+    ]])
+  })
+
+  it('a face the badge can\'t be drawn over leaves the plain one', async () => {
+    const photo = 'https://avatars.slack-edge.com/ann.png'
+    const calls = stubFetch(false, 'chat:write,chat:write.customize', photo, false)
+    const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    await feed(env, wait, 'sid-slack-photo', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
+    expect(calls.map(c => [c.body.username, c.body.icon_url])).toEqual([['ann', photo], ['ann', photo]])
   })
 
   it('an app installed without `chat:write.customize` posts as itself, and the line says who', async () => {
