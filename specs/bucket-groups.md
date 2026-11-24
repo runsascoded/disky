@@ -85,10 +85,12 @@ The group's merged answer is not cached itself, as a union root's isn't. Its mem
 ### Picker and crumbs (`site/src/App.tsx`)
 
 - `?g=` joins the map's `scopeQs`, so every subtree and diff request carries it (the server ignores it below the root) and the views' query keys differ per group. `SizeOverTime` takes `group` and sends `&g=` at the root.
-- Crumbs: `<root> › <group> / <bucket> / …`.
+- Crumbs:
   - The root crumb drops `g`, and shows the deployment's label, not the group root's.
-  - The group crumb returns to the group root, keeping `g`. Its tooltip lists the members.
-- At the root, a select (`Bucket group`) lists the store's groups from `/api/groups`, plus "all buckets". It is shown only when the store has groups.
+  - At the group root: `<root> › [Bucket group ▾]`. The select stands in for the group's crumb, so the group's label shows once (cw, 2026-11-24: `Marin CoreWeave › 08a zone` beside a select also reading `08a zone`). Its help text lists the members.
+  - Below the group root (in a member bucket): `<root> › <group> / <bucket> / …`. The group crumb returns to the group root, keeping `g`. Its tooltip lists the members.
+  - Without a group: `<root>`, then the select.
+- The select (`Bucket group`) lists the store's groups from `/api/groups`, plus "all buckets" (in a group) or "groups…" (outside one). Outside a group it is shown only when the store has groups; in one it is always shown at the group root, holding the group's own entry until the list loads.
 - The age chart (`/api/age-pyramid`) is not group-scoped. At a group root it still shows the whole store.
 
 ### Left for item 4

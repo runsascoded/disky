@@ -1319,33 +1319,43 @@ function AppContent() {
   const atRoot = segs.length <= storeRoot.length
   const ext = <ExtLink link={store.externalLink?.(segs, here?.kind !== 'file')} />
   // A bucket group (`?g=`) sits between the root and its buckets: the root crumb leaves the group (its label the
-  // deployment's, not the group root's), the group's crumb is the group's root. Its label: the group root's own name
-  // (the view's tree), else the groups list's, else its key.
+  // deployment's, not the group root's). At the group's root the picker stands in for its crumb (`<root> › [group]`);
+  // below it, the group's crumb returns to the group's root (`<root> › <group> / <bucket>`). Its label: the group
+  // root's own name (the view's tree), else the groups list's, else its key.
   const group = gP ? groups.find(x => x.name === gP) : undefined
   const groupLabel = gP ? (mapTree?.name ?? group?.label ?? gP) : undefined
+  const groupMembers = group ? <>{group.buckets.length} buckets: {group.buckets.join(', ')}</> : <>bucket group <code>{gP}</code></>
   const rootCrumb = <RootCrumb treeName={gP ? undefined : mapTree?.name} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot && !gP} onClick={() => navigate(groupLoc(undefined))} />
-  // The store's groups beside its buckets: a pick shows that group's root; "all" the store's.
-  const groupPicker = groups.length > 0 && (
+  // The store's groups beside its buckets: a pick shows that group's root; "all" the store's. In a group it is shown
+  // even before (or without) the groups list, holding the group's own entry.
+  const groupPicker = (groups.length > 0 || gP) && (
     <FitSelect className="tb-select tb-group" value={gP ?? ''} ariaLabel="Bucket group" onChange={e => navigate(groupLoc(e.target.value || undefined))}>
       <option value="">{gP ? 'all buckets' : 'groups…'}</option>
       {groups.map(x => <option key={x.name} value={x.name}>{x.label}</option>)}
       {gP && !group && <option value={gP}>{groupLabel}</option>}
     </FitSelect>
   )
-  const groupCrumb = gP && (
-    <span>
-      <span className="sep">›</span>
-      <Tooltip content={group ? <>{group.buckets.length} buckets: {group.buckets.join(', ')}</> : <>bucket group <code>{gP}</code></>}>
-        <button type="button" className={atRoot ? 'here' : ''} onClick={() => drillTo(storeRoot)}>{groupLabel}</button>
-      </Tooltip>
-    </span>
-  )
+  const groupCrumb = gP && (atRoot
+    ? (
+      <span>
+        <span className="sep">›</span>
+        <Explain text={groupMembers}>{groupPicker}</Explain>
+        {ext}
+      </span>
+    )
+    : (
+      <span>
+        <span className="sep">›</span>
+        <Tooltip content={groupMembers}>
+          <button type="button" onClick={() => drillTo(storeRoot)}>{groupLabel}</button>
+        </Tooltip>
+      </span>
+    ))
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
       {atRoot && !gP ? <span>{rootCrumb}{ext}</span> : rootCrumb}
       {groupCrumb}
-      {atRoot && gP && ext}
-      {atRoot && groupPicker}
+      {atRoot && !gP && groupPicker}
       {segs.map((sg, i) => i < storeRoot.length ? null : (
         <span key={i}>
           <span className="sep">/</span>
