@@ -1030,6 +1030,9 @@ def pin_op(client, channel: str, state: dict, op_ts: str, prev_op: str | None) -
 _WIRE_MONTH = r"<[^|>\n]+\|(?:← [A-Z][a-z]+|[A-Z][a-z]+ →)>"
 #: The OP's month-link line: nothing but month links, ` · `-separated.
 _WIRE_MONTHS_LINE = re.compile(rf"{_WIRE_MONTH}(?: · {_WIRE_MONTH})*")
+#: The same links ending a line after a space: an OP's plain `text` as Slack stores it can have its newlines flattened to
+#: spaces, which leaves the month-link line at the end of one long line.
+_WIRE_MONTHS_TAIL = re.compile(rf"(?<= ){_WIRE_MONTH}(?: · {_WIRE_MONTH})*$")
 #: The fields Slack adds to an image block when it stores one (thrds's `rewrite._IMAGE_ADDED`), left out of an edit.
 _IMAGE_ADDED = frozenset({"image_width", "image_height", "image_bytes", "fallback", "is_animated"})
 
@@ -1037,7 +1040,8 @@ _IMAGE_ADDED = frozenset({"image_width", "image_height", "image_bytes", "fallbac
 def relink_text(wire: str, line: str) -> str:
     """``wire`` (an OP's text as Slack stores it) with its month-link line (its last) replaced by ``line`` (wire form;
     ``""`` drops it and the blank line before it), else ``line`` appended after a blank line, where the OP renders it
-    (after the weekly lines; the plot line is lifted into an image block). Nothing else changes."""
+    (after the weekly lines; the plot line is lifted into an image block). A text whose newlines Slack flattened to
+    spaces has its links at the end of its last line, replaced there. Nothing else changes."""
     lines = wire.split("\n")
     at = [i for i, s in enumerate(lines) if _WIRE_MONTHS_LINE.fullmatch(s)]
     if at:
@@ -1048,6 +1052,12 @@ def relink_text(wire: str, line: str) -> str:
             del lines[i]
             if i and not lines[i - 1]:
                 del lines[i - 1]
+        return "\n".join(lines)
+    # Flattened (newlines as spaces): the links end the last nonblank line
+    last = max((i for i, s in enumerate(lines) if s.strip()), default=None)
+    if last is not None and (m := _WIRE_MONTHS_TAIL.search(lines[last].rstrip())):
+        head = lines[last].rstrip()[:m.start()]
+        lines[last] = f"{head}{line}" if line else head.rstrip()
         return "\n".join(lines)
     return f"{wire.rstrip(chr(10))}\n\n{line}" if line else wire
 

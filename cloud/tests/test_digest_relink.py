@@ -107,6 +107,10 @@ def test_relink_text():
     # none to link: the line goes, with the blank line before it
     assert E.relink_text(f"a\n\n<{URL}1|← August>", "") == "a"
     assert E.relink_text("a", "") == "a"
+    # Slack's flattened plain `text` (newlines as spaces): the links ending the last line are the link line
+    assert E.relink_text(f"a b *Weekly* c <{URL}1|← August>", line) == f"a b *Weekly* c {line}"
+    assert E.relink_text(f"a b <{URL}1|← August> · <{URL}3|October →> ", line) == f"a b {line}"
+    assert E.relink_text(f"a b <{URL}1|← August>", "") == "a b"
 
 
 def test_month_links():
