@@ -2050,6 +2050,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 }
 
 .children-tbl { margin-top: 10px; }
+// A row-selection table's container takes focus on a click inside (`TableFocus`, `tabIndex` -1, for its
+// count-prefixed keys): no ring for that, its rows and controls keep their own.
+.children-tbl:focus, .staged-batches:focus { outline: none; }
 // The diff map's table: status chips in the diff's polarity (added green,
 // removed red, first-scanned the site's blue, changed/unchanged neutral), Δ
 // columns inked the same way, dashes for the side a row doesn't exist on.

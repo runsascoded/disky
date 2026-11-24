@@ -35,7 +35,7 @@ vi.mock('./MatchActions', async () => {
 })
 vi.mock('./AssignSelect', () => ({ AssignSelect: ({ items, label }: { items: unknown; label?: string }) => createElement('i', { 'data-assign': JSON.stringify(items), 'data-label': label ?? '' }) }))
 vi.mock('./rowSelection', () => ({
-  useRowSelectionKeys: () => {},
+  useRowSelectionKeys: () => ({}),
   useRowSelection: <T,>(rows: readonly T[], key: (r: T) => string) => ({
     selected, isSelected: (r: T) => selected.has(key(r)), toggle: () => {}, rowRef: () => () => {}, rowProps: () => ({}),
     pageAll: false, togglePage: () => {}, clear: () => {}, cursor: 0, cursorRow: rows[0],
