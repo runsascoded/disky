@@ -2,7 +2,7 @@ import { compactQuietLines } from './compact'
 /** The `quota` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
  * (the job sends them: `QuotaTemplate.rows_json`; goldens: `./parity.test.ts`). The replies: `./quotaReply.ts`. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
-import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
+import { type BucketCfg, deg, diffUrl, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, tb, weekOf, windowLabel, windowStart } from './common'
 import { type Pool, poolRows, pools, quotaLine, QUIET_PCT, used } from './pools'
 import { addDays, dayOf, fixed, grouped, hhmm, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
@@ -44,11 +44,6 @@ export function scoped(total: number, classes: Record<string, number> | null, q:
 
 const quotas = (total: number, classes: Record<string, number> | null, qs: Quota[], cfg: DigestCfg): string =>
   qs.map(q => ` · ${fixed((scoped(total, classes, q) / (q.bytes / cfg.unit.bytes)) * 100, 1)}% of ${q.name}`).join('')
-
-export function diffUrl(scan: string, slug: string, since: number | null, site: string, bucket = ''): string {
-  const s = since !== null ? `-${span(since, scanTime(scan))}` : ''
-  return `${site}/${bucket}?d=${slug}${s}#over-time`
-}
 
 export function bucketLink(bucket: string, r: QuotaScan, since: number | null, cfg: DigestCfg): string {
   const b: BucketCfg | undefined = cfg.buckets[bucket]

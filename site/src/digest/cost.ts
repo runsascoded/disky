@@ -1,7 +1,7 @@
 /** The `cost` digest template's OP: its text and its storage-class plot's `/api/digest-image` request, from the
  * month's per-day rows (the job sends them: `CostTemplate.rows_json`; goldens: `./parity.test.ts`). Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
-import { deg, type DigestCfg, type DigestParams, type OpLinks, pct, prevMonthLink, span, tb, usd, weekOf, windowLabel, windowStart } from './common'
+import { deg, diffUrl, type DigestCfg, type DigestParams, type OpLinks, pct, prevMonthLink, span, tb, usd, weekOf, windowLabel, windowStart } from './common'
 import { addDays, dayOf, grouped, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
 
@@ -53,8 +53,10 @@ export function opText(m: CostRows, month: number, cfg: DigestCfg, p: DigestPara
   const { start, seen, back: [backTb, backAt] } = window(m, month, p)
   const last = rows[rows.length - 1]
   const backUrl = `${site}/?d=${dlink(last)}-${span(scanTime(backAt), scanTime(last.date))}#over-time`
+  // month-to-date's baseline: the first row's delta baseline; absent one, the first row itself
+  const mtdSince = rows[0].prev ? scanTime(rows[0].prev) : rows[0] !== last ? scanTime(rows[0].date) : null
   const figures: Record<'mtd' | 'window', string> = {
-    mtd: `**${tb(mdtb)} TiB** month-to-date · `,
+    mtd: `**${tb(mdtb)} TiB** [month-to-date](${diffUrl(last.date, dlink(last), mtdSince, site)}) · `,
     // (none when it starts where month-to-date does: a store whose first scan is this month's)
     window: backAt !== (rows[0].prev ?? rows[0].date) ? `**${tb(last.tb - backTb)} TiB** [${windowLabel(start, backAt, p.windowDays)}](${backUrl}) · ` : '',
   }
