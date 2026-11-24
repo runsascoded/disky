@@ -2130,18 +2130,34 @@ def setup_env(profile: ScanProfile, env: dict[str, str]) -> None:
 def r2_profile(env: dict[str, str], home: Path | None = None) -> None:
     """The R2 archive through blobfs (`R2_ARCHIVE=r2://$R2_BUCKET`): R2's own credentials profile (`r2`) + a
     `buckets.yml` entry with its endpoint, so a source's `AWS_*` keys (another provider's) stay the lister's. Never
-    `DISKY_R2_ENDPOINT_URL`: it would override every bucket's endpoint."""
+    `DISKY_R2_ENDPOINT_URL`: it would override every bucket's endpoint.
+
+    It replaces the registry blobfs reads (`<root>/buckets.yml`, the root `$DISKY_ROOT`, else `~/.config/disk-tree`),
+    so it writes only where that registry is the job's: a Batch task (`$BATCH_TASK_INDEX`; the key in `$TMPDIR`), or a
+    local root `env` names that isn't `~/.config/disk-tree` (the key beside it). Anywhere else (a laptop sourcing
+    `job/r2-env.sh`) it raises, writing nothing: the registry there is the machine's own."""
     if not all(env.get(k) for k in ("R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID")):
         return
-    creds = Path(env.get("TMPDIR") or "/tmp") / "r2-credentials"
+    from disk_tree.env import get as env_get
+
+    default = (home or Path(env.get("HOME") or Path.home())) / ".config" / "disk-tree"
+    root = env_get("ROOT", env=env)
+    named = Path(root).expanduser() if root and "://" not in root else None
+    own = named is not None and named.resolve() != default.resolve()
+    batch = "BATCH_TASK_INDEX" in env
+    if not (batch or own):
+        raise RuntimeError(f"r2_profile: not a Batch task ($BATCH_TASK_INDEX unset) and no disk-tree root but {default}: "
+                           "writing buckets.yml there would replace this machine's own registry; set DISKY_ROOT to a scratch dir")
+    cfg = named if own else default
+    # On Batch the key stays in the task's scratch, never a root that may be a mounted bucket
+    creds = Path(env.get("TMPDIR") or "/tmp") / "r2-credentials" if batch else cfg / "r2-credentials"
+    cfg.mkdir(parents=True, exist_ok=True)
     old = os.umask(0o077)
     try:
         creds.write_text(f"[r2]\naws_access_key_id = {env['R2_ACCESS_KEY_ID']}\naws_secret_access_key = {env.get('R2_SECRET_ACCESS_KEY', '')}\n")
     finally:
         os.umask(old)
     env["AWS_SHARED_CREDENTIALS_FILE"] = str(creds)
-    cfg = (home or Path(env.get("HOME") or Path.home())) / ".config" / "disk-tree"
-    cfg.mkdir(parents=True, exist_ok=True)
     (cfg / "buckets.yml").write_text(f"buckets:\n  - uri: r2://{env['R2_BUCKET']}\n    endpoint_url: {env['R2_ENDPOINT']}\n    profile: r2\n")
     env["R2_ARCHIVE"] = f"r2://{env['R2_BUCKET']}"
 
