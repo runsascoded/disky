@@ -1,5 +1,4 @@
-import { useEffect, useRef } from 'react'
-import type { FocusEvent } from 'react'
+import { useEffect, useRef, type FocusEvent } from 'react'
 import { useRowSelection as useKbdRowSelection, useRowSelectionKeys as useKbdRowSelectionKeys, useActions, useMode } from 'use-kbd'
 import type { ActionConfig, RowSelectionRowProps, UseRowSelectionResult } from 'use-kbd'
 
