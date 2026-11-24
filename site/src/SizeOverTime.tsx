@@ -187,7 +187,7 @@ const fmtPct = (y: number) => {
   return a === 0 ? '0%' : signed(y, `${a >= 10 ? a.toFixed(0) : a.toFixed(1)}%`)
 }
 
-export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, ledgerRev, scopeReady = true, onPickDate, onBrush, window: win, admin = false, scopeLabel = 'all buckets', refused, paths, pathsTotal, queryOnly, filterLabel, filterQs }: {
+export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, group, ledgerRev, scopeReady = true, onPickDate, onBrush, window: win, admin = false, scopeLabel = 'all buckets', refused, paths, pathsTotal, queryOnly, filterLabel, filterQs }: {
   /** The store's root scope word for the unscoped subtitle (`all buckets`, `the whole bucket`). */
   scopeLabel?: string
   /** The page view's filter refusal (`term-too-common`, …): no match roots to sum, so the series is never asked
@@ -222,6 +222,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   /** The owner axis's pool — `unowned` = bytes no person owns, `owned`
    * = bytes some person owns — under `prefix`, per scan. `user` wins. */
   pool?: 'unowned' | 'owned' | null
+  /** The page's bucket group (`?g=`): at the root, the series is its members' (specs/bucket-groups.md). */
+  group?: string
   /** Click a point → view the page as of that scan (pins `?d=`). */
   onPickDate?: (date: string) => void
   /** Drag across the chart → make [from, to] the page's diff window. */
@@ -277,7 +279,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   // answers it from the static name index, or refuses (400) and the chart says why.
   const nPaths = pathsTotal ?? paths?.length ?? 0
   const overMax = nPaths > SERIES_MAX_PATHS
-  const scope = (user ? `&lens=user:${encodeURIComponent(user)}` : pool ? `&o=${pool}` : '') + (paths?.length && !overMax && !queryOnly ? `&paths=${encodeURIComponent(paths.join(','))}` : '') + (filterLabel && filterQs ? filterQs : '') + (split ? '&split=roots' : '')
+  const scope = (user ? `&lens=user:${encodeURIComponent(user)}` : pool ? `&o=${pool}` : '') + (paths?.length && !overMax && !queryOnly ? `&paths=${encodeURIComponent(paths.join(','))}` : '') + (filterLabel && filterQs ? filterQs : '') + (split ? '&split=roots' : '') + (group && !prefix ? `&g=${encodeURIComponent(group)}` : '')
   // The subtree's store: its key in the query key (two mounted stores may
   // share a prefix spelling), its `store=` on the request.
   const store = useStore()

@@ -184,6 +184,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Diff start (legacy)',
     description: 'Legacy spelling of a pinned diff start (a scan id, as once used on `/names`). It is folded into `d` and rewritten on load.',
   },
+  g: {
+    label: 'Bucket group',
+    description: 'Shows one of the store\'s named bucket groups (its `groups` config) as the map\'s root: the group\'s buckets alone, its size, objects, diff and size over time their sums. Drilling into a bucket keeps it in the crumbs (root › group › bucket); it acts at the root only. When absent, the root shows every bucket.',
+    examples: ['pool-a'],
+  },
   iec: {
     label: 'Binary units',
     description: 'When present (as a bare `?iec`), shows sizes in binary units (KiB, MiB, GiB). Picking units also saves the choice in this browser. When absent, the saved choice applies, else decimal units.',
