@@ -42,6 +42,32 @@ The text is rendered by the site, as the digest's OP is (`/api/digest-op`).
 - `nominal` posts what the route returns, so the fleet app can share the renderer (pages-kit).
 - `/admin/slack` previews it.
 
+#### As built (phase 1)
+
+**Renderer:** `@disk-tree/pages-kit/admin/monthOp` (`packages/pages-kit/src/admin/monthOp.ts`), pure: `monthOpText({runs, month, now, meta}, {site, store?, prevUrl?, nextUrl?, marks?})`. `runs` are `/api/scan-runs`' summaries (`RunSummary`, any kind: only the store's own scan runs count, `kind = 'scan'`, no parent, no `nop`); `meta` is `{store, series: {points: [{t, bytes}]} | {status}}`, or null when the deployment has no meta store. Each line is its own exported function (`statusLine`, `monthLine`, `costLine`, `metaLine`, `linkLine`), as are nominal's formats (`stamp`, `took`, `si`, `outcome`, `grade`, `short`).
+
+```
+✅ 3 consecutive clean runs · latest [11/23 07:17Z](https://…/scans/h) · 46m 40s · $0.17 · output 1.20 G (+12.0 M)
+This month: 7 runs · 3 clean · 1 with issues · 1 failed · 1 cancelled · 1 running · 3 scheduled / 3 manual / 1 unknown
+Cost: $1.07 month-to-date · $1.52 last 30d · run time 47m (7d median, +3.7%)
+[Metadata](https://…/meta): 49.9 G · +3.06 G over 30d · [All scans](https://…/scans)
+[← October](…) · [December →](…)
+```
+
+- **Status line:** an outcome is nominal's `grade` (a run with any phase issue but a deferred append is `issues`, recovered or not; the card's `runOutcome` counts only open ones). The streak is the run of consecutive clean, or consecutive unclean, finished runs ending with the newest (running and cancelled runs aren't outcomes), worded as the heads are today (`N consecutive clean runs`, `N consecutive runs with phase issues`, `N consecutive failed runs`, `N consecutive runs failed or with phase issues`; `at least` when it reaches the start of history). Then `latest` with the run's start linked to its record, an unclean run's `short` reason, and nominal's `outcome` (duration, cost, output). No finished run: `No finished runs yet`. Marks are the vocabulary's stock `run.<outcome>` characters, overridable per outcome (`marks`, nominal's `Config.emoji`).
+- **Month line:** `This month: N runs`, then each outcome's count in the order clean, with issues, failed, cancelled, running (zeros left out), then `S scheduled / M manual` (`/ U unknown` when any). None yet: `This month: no runs yet`.
+- **Cost line:** recorded `cost_usd` summed over the month's runs and over runs started in the last 30 days (a run without a cost adds nothing), then the card's run time (`stripModel`: the last 7 days' succeeded runs' median, and its change against the 7 before), left out when there is none.
+- **Metadata line:** nominal's `store_line` over 30 days: the meta store's size at its newest scan and the change since the newest scan at least 30 days before (`over Nd`, N the actual span); `size unavailable (HTTP n)`, `no scans yet`; then `[All scans]`. A deployment with no meta store gets `[All scans]` alone.
+- **Link line:** `[← October](prev) · [December →](next)`, either alone, or no line.
+- **Closed month** (`now` past its end): drawn as of its last second, without the status line: `November: N runs · …`, `Cost: $X month total · $Y last 30d · …`.
+
+**Route:** `POST /api/scan-runs/month-op[?store=<key>]` (`site/functions/api/scan-runs/month-op.ts`), body `{month: 'YYYY-MM', prev_url?, next_url?, color?, emoji?}` → `{text, card_url}`.
+- Viewer-gated like `card-url` (the job's grant); a path-restricted link is refused (`RESTRICTED_BLOCKED`'s `/api/scan-runs`). 503 without `SESSION_SECRET`, without D1, or without the scan-run tables; 400 for a malformed body or a month not started.
+- Runs: `loadScanRuns` + `scanRunsList`, as `/api/scan-runs` (the whole store's history: the streak can reach past 30 days).
+- Meta: `STORES_JSON`'s `meta` store's root series through `seriesRead` + `summaryGate` (no HTTP self-call), under the caller's own credential: the job's grant needs the meta store's `scope` or `series_scope`, else its line reads `size unavailable (HTTP 403)`.
+- `card_url`: `deployCardUrl`, as `card-url` mints it (`color` its dot). Null for a closed month: the live card draws the last runs as of now, and a signed URL expires (see Closed months).
+- `prev_url` / `next_url`: https permalinks with nothing a markdown link would end at; `emoji`: `{outcome: ':code:' | characters}`, as nominal's `EMOJI_RE`.
+
 ### Replies
 
 - **One rolling runs reply per ISO week:** `wk of 11/23 · runs`, with today's `trail` line format, oldest first.
@@ -83,7 +109,7 @@ On the month's last report, or the first one of the next month:
 
 ## Phases
 
-1. Site: `POST /api/scan-runs/month-op` (renderer in pages-kit), `/admin/slack` preview, tests.
+1. Site: `POST /api/scan-runs/month-op` (renderer in pages-kit), `/admin/slack` preview, tests. The route, renderer and tests are built (above); the `/admin/slack` preview is still to do.
 2. `nominal`: monthly mode behind `nominal.monthly`, with OP, weekly replies, failure replies, pin, relink, close and cutover. Tests: the state machine over a fixture month, cutover from a quiet thread and from a failure thread, closing the month, idempotent re-runs.
 3. Canary on hf and r2, then cw and gcs.
 4. Fleet: the per-deployment reply uses the shared renderer and links the month thread.
