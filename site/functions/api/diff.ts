@@ -4,6 +4,9 @@
  *   GET /api/diff?from=<scan>&to=<scan>&path=<P>&w=<px>&h=<px>[&minArea=<px²>][&top=<n>]
  *                 [&lens=user:<id>|user:me][&o=owned|unowned][&q=<name filter>][&summary=1][&depth=<levels>]
  *
+ * `g=<name>` (specs/bucket-groups.md, `_lib/groups.ts`): at the root, the diff of that bucket group's members alone
+ * (`groupDiff`); below the root it is ignored.
+ *
  * `summary=1` answers with the totals only (both sides' scoped root reads,
  * no walk — `rows` empty): the section's headline, seconds before the rows.
  *
@@ -12,7 +15,7 @@
  * immutable per (from, to, path, budget, scope) plus the ledger head under a
  * user lens, and edge-cached accordingly.
  */
-import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
+import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictedGroupRefused, restrictedScopeRefused, restrictedSearchRefused, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
 import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { DESCENT_V } from '../_lib/diffDescent.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
@@ -31,6 +34,7 @@ import { ahead, HELD_BYTES, loadScopes, traceJoins } from '../_lib/shared.js'
 import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, type Union, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
+import { atRoot, groupBlock, groupDiffRows, groupOf, groupReachesHidden, memberRequestOf, requestedGroup } from '../_lib/groups.js'
 
 type DiffCtx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
 
@@ -39,7 +43,10 @@ export const onRequestGet = async (ctx0: DiffCtx): Promise<Response> => {
   // one never leaves `diffOf`.
   const u = unionFor(ctx0.request, ctx0.env)
   if (u instanceof Response) return u
-  return u ? unionDiff(ctx0, u) : diffOf(ctx0)
+  if (u) return unionDiff(ctx0, u)
+  // A bucket group's root (`g=`, `_lib/groups.ts`); below the root `g` is ignored.
+  const g = requestedGroup(ctx0.request)
+  return g !== null && atRoot(ctx0.request) ? groupDiff(ctx0, g) : diffOf(ctx0)
 }
 
 /** A union member's diff (`unionDiff`): the identity its gate already resolved, the union root's common byte
@@ -307,7 +314,7 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       const pre = performance.now() - t0
       return withUnionTiming(await ask(p, { id: un.id }), unionTiming(pre, marks))
     }
-    const scoped = (['lens', 'o', 'cl'] as const).filter(k => sp.get(k))
+    const scoped = (['lens', 'o', 'cl', 'g'] as const).filter(k => sp.get(k))
     if (scoped.length) return new Response(`a union view's root is unscoped (${scoped.join(', ')}: drill into one store)`, { status: 400 })
     const w = Math.ceil((Number(sp.get('w')) || 1280) / QUANT) * QUANT
     const h = Math.ceil((Number(sp.get('h')) || 800) / QUANT) * QUANT
@@ -363,6 +370,107 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
     if (refused) return refused
     const msg = String((e as Error).message ?? e)
     if (e instanceof UnionOverlap) return new Response(msg, { status: 500 })
+    if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
+    return new Response(`diff failed: ${msg}`, { status: 500 })
+  }
+}
+
+/**
+ * `/api/diff?g=<name>` at the root (specs/bucket-groups.md): the diff of the group's buckets alone, its rows those of
+ * the store's root restricted to them (`groupDiffRows`). Composed from each member's own diff (`path=<bucket>`, no
+ * `g`; its own cache keys): first each member's totals (`summary=1`), which give the group's totals and one byte
+ * threshold (from the larger side, as a root's); then, past a `summary=1` or `depth=1` request, each member with bytes
+ * or objects on either side diffed under that threshold (`&T=`, attenuated one level: a bucket's children are the
+ * group root's grandchildren), its rows below its own. A member neither scan holds is absent. The scope axes (`lens`,
+ * `o`, `cl`, `q`) pass to each member. A path-restricted link is refused a group holding a hidden dir.
+ */
+async function groupDiff(ctx0: DiffCtx, name: string): Promise<Response> {
+  const ctx1 = withStore(ctx0)
+  if (ctx1 instanceof Response) return ctx1
+  const ctx = await withPathStore(ctx1)
+  if (!storeReady(ctx.env)) return new Response('diff API not configured (missing index store creds)', { status: 503 })
+  const sp = new URL(ctx.request.url).searchParams
+  const from = sp.get('from') ?? ''
+  const to = sp.get('to') ?? ''
+  if (!isScanId(from) || !isScanId(to)) return new Response('bad from/to', { status: 400 })
+  if (from >= to) return new Response('from must precede to', { status: 400 })
+  const id = await requireViewer(ctx as never)
+  if (id instanceof Response) return id
+  const group = groupOf(ctx.env, name)
+  if (group instanceof Response) return group
+  const restriction = restrictionFor(id, ctx.env)
+  if (restriction && groupReachesHidden(group, restriction)) return restrictedGroupRefused()
+  try {
+    // Both ends must be indexed scans: a miss is a 404, never another scan.
+    for (const key of ['from', 'to']) {
+      const scan = await scanArg(ctx.env, sp, key)
+      if (scan instanceof Response) return scan
+    }
+    const w = Math.ceil((Number(sp.get('w')) || 1280) / QUANT) * QUANT
+    const h = Math.ceil((Number(sp.get('h')) || 800) / QUANT) * QUANT
+    const minArea = Number(sp.get('minArea')) || MIN_AREA_DEFAULT
+    const atten = Number(sp.get('atten')) || ATTEN_DEFAULT
+    const summary = sp.get('summary') === '1'
+    const depth = Number(sp.get('depth')) || undefined
+    const q = (sp.get('q') ?? '').trim() ? sp.get('q')! : ''
+    const ask = (bucket: string, set: Record<string, string>, drop: string[], threshold?: number) =>
+      diffOf({ ...ctx0, request: memberRequestOf(ctx0.request, bucket, set, drop) }, { id, ...(threshold === undefined ? {} : { threshold }) })
+    /** Each member's answer (null: neither scan holds it); a failure is the group's. */
+    const read = async (buckets: readonly string[], one: (b: string) => Promise<Response>): Promise<{ bodies: (MemberDiffBody | null)[]; reads: Response[] } | Response> => {
+      const reads = await Promise.all(buckets.map(one))
+      const bodies: (MemberDiffBody | null)[] = []
+      for (const r of reads) {
+        if (r.status === 404) { bodies.push(null); continue }
+        if (!r.ok) return r
+        bodies.push(await r.json() as MemberDiffBody)
+      }
+      return { bodies, reads }
+    }
+    const first = await read(group.buckets, b => ask(b, { summary: '1' }, ['depth']))
+    if (first instanceof Response) return first
+    const held = group.buckets.flatMap((bucket, i) => (first.bodies[i] ? [{ bucket, body: first.bodies[i]! }] : []))
+    const side = (k: keyof DiffSides) => held.reduce((n, m) => n + m.body[k], 0)
+    const threshold = (Math.max(side('bytes_before'), side('bytes_after')) * minArea) / (w * h)
+    let members = held
+    let reads = first.reads
+    if (!summary && depth !== 1) {
+      // Each member with anything on either side, under the group's threshold; `depth=N` is N − 1 levels below a bucket.
+      const drawn = held.filter(({ body: b }) => b.bytes_before || b.bytes_after || b.objects_before || b.objects_after)
+      const below: Record<string, string> = depth && depth > 1 ? { depth: String(depth - 1) } : {}
+      const second = await read(drawn.map(m => m.bucket), b => ask(b, below, depth ? [] : ['depth'], threshold * atten))
+      if (second instanceof Response) return second
+      members = drawn.flatMap((m, i) => (second.bodies[i] ? [{ bucket: m.bucket, body: second.bodies[i]! }] : []))
+      reads = second.reads
+    }
+    const bs = members.map(m => m.body)
+    const sum = (k: 'expansions' | 'lookups') => bs.reduce((n, b) => n + b[k], 0)
+    const lead = held[0]?.body as (MemberDiffBody & { lens?: string; owner?: unknown }) | undefined
+    return new Response(JSON.stringify({
+      prev: from, curr: to, path: '',
+      ...(lead?.lens ? { lens: lead.lens } : {}),
+      ...(lead?.owner ? { owner: lead.owner } : {}),
+      ...(q ? { q } : {}),
+      rows: summary ? [] : groupDiffRows(members.map(m => ({ bucket: m.bucket, total: m.body, rows: depth === 1 ? [] : m.body.rows }))),
+      bytes_before: side('bytes_before'), bytes_after: side('bytes_after'), objects_before: side('objects_before'), objects_after: side('objects_after'),
+      expansions: sum('expansions'),
+      truncated: bs.some(b => b.truncated),
+      threshold: Math.round(threshold),
+      tier: bs[0]?.tier ?? lead?.tier ?? 'none',
+      lookups: sum('lookups'),
+      lookups_capped: bs.some(b => b.lookups_capped),
+      ...(bs.some(b => b.lookups_late) ? { lookups_late: true } : {}),
+      ...(bs.some(b => b.searchLate) ? { searchLate: true } : {}),
+      ...(bs.some(b => b.budgetCut) ? { budgetCut: true } : {}),
+      ...(q ? unionFilterFields(members.map(m => ({ store: m.bucket, body: m.body })), []) : {}),
+      group: groupBlock(group),
+    }), { headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
+    } })
+  } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
+    const msg = String((e as Error).message ?? e)
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
     return new Response(`diff failed: ${msg}`, { status: 500 })
   }

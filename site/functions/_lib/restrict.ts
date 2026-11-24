@@ -168,6 +168,10 @@ export const restrictedSearchRefused = (): Response => refused('search isn’t a
 /** 403 for an owner, class or lens scope at or above a hidden dir (`scopeReachesHidden`); a refusal, as above. */
 export const restrictedScopeRefused = (): Response => refused('this owner, class or user view isn’t available here on this link', 'restricted-scope')
 
+/** 403 for a bucket group (`?g=`) holding a hidden dir (a member at or above one, `groupReachesHidden`); a refusal,
+ *  as above. */
+export const restrictedGroupRefused = (): Response => refused('this bucket group isn’t available on this link', 'restricted-group')
+
 /** 403 for a route a restricted link can't use (raw bytes, D1 path lists). */
 export const restrictedForbidden = (): Response =>
   new Response(JSON.stringify({ error: 'forbidden for a path-restricted link' }) + '\n', { status: 403, headers: { 'content-type': 'application/json; charset=utf-8' } })
