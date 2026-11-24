@@ -1269,6 +1269,79 @@ def test_the_current_months_op_takes_the_pin(tmp_path: Path, capsys):
     assert _api(fake.calls) == []
 
 
+@thrds_fake(SlackClient)
+class _StoredSlack(_FakeSlack):
+    """`_FakeSlack` that keeps each OP as Slack stores it (`edit_desired`'s wire text and blocks) and answers the reads
+    and `chat.update` thrds's rewrite makes (`digest.relink`); only `chat.update` is recorded among those."""
+
+    channel = "C1"
+    token = "xoxb-test"
+    bot_ids = ("U1", "B1")
+
+    def __init__(self):
+        super().__init__()
+        self.stored: dict[str, dict] = {}
+
+    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, broadcast=False):
+        m = super().post(content, thread_id, username=username, icon_url=icon_url, icon_emoji=icon_emoji, broadcast=broadcast)
+        if thread_id is None:
+            self._store(m.id, content, username)
+        return m
+
+    def edit(self, ts, content):
+        m = super().edit(ts, content)
+        if ts in self.stored:
+            self._store(ts, content, self.stored[ts]["username"])
+        return m
+
+    def _store(self, ts: str, content: str, username: str | None) -> None:
+        d = E.edit_desired(content)
+        self.stored[ts] = {"ts": ts, "text": d.text, "blocks": d.blocks or [{"type": "rich_text", "elements": []}],
+                           "bot_id": "B1", "subtype": "bot_message", "username": username}
+
+    def _request(self, api, args, **kw):
+        # (thrds passes the HTTP verb as `method=`)
+        if api == "conversations.replies":
+            m = self.stored.get(args["ts"])
+            return {"messages": [m] if m else []}
+        if api == "conversations.history":
+            return {"messages": [self.stored[max(self.stored, key=lambda ts: int(ts[1:]))]]}
+        if api == "chat.update":
+            self.calls.append(("api", api, {"ts": args["ts"], "text": args["text"]}))
+            self.stored[args["ts"]].update(text=args["text"], blocks=args["blocks"] or [{"type": "rich_text", "elements": []}])
+            return {"ok": True}
+        return super()._request(api, args, **kw)
+
+
+def test_a_new_months_op_links_last_months_forward_once(tmp_path: Path, monkeypatch):
+    """When the scheduled converge posts a month's OP, last month's OP gains its forward link: the link line of the text
+    Slack stores edited in place (`relink`), never re-rendered, exactly once; a re-run edits it no more."""
+    import thrds.rewrite
+
+    monkeypatch.setattr(thrds.rewrite.time, "sleep", lambda s: None)
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _StoredSlack()
+    E.converge_slack(_tpl(), str(root), SEP, fake, "C1", "sender")
+    sep = "<site OP: quota 2026-09, 4 scans to 2026-09-02T1200, params ->"
+    assert fake.stored["m1"]["text"] == sep
+
+    _publish(root, [("2026-10-01T1200", _meta(716))])
+    fake.calls.clear()
+    E.converge_slack_now(_tpl(), str(root), OCT, fake, "C1", "sender")
+    # October's OP is m4: September's (m1) links forward to it, in its text and its section block alike
+    linked = f"{sep}\n\n<https://slack.example.org/archives/C1/pm4|October →>"
+    assert ([c for c in fake.calls if c[:2] == ("api", "chat.update")], fake.stored["m1"]["text"], fake.stored["m1"]["blocks"][0]["text"]["text"]) == (
+        [("api", "chat.update", {"ts": "m1", "text": linked})], linked, linked,
+    )
+    state = E.load_state(E.state_path(str(root), SEP, CFG.state.format(channel="C1", variant="sender")))
+    assert (state["prev_url"], state["next_url"]) == (None, "https://slack.example.org/archives/C1/pm4")
+
+    fake.calls.clear()
+    E.converge_slack_now(_tpl(), str(root), OCT, fake, "C1", "sender")
+    assert [c for c in fake.calls if c[:2] == ("api", "chat.update")] == []
+
+
 def test_closing_last_months_thread_leaves_the_pin_alone(tmp_path: Path):
     """The scheduled run re-converges last month's thread first when it still holds an alert: that converge moves
     no pin; only the current month's OP is pinned."""
