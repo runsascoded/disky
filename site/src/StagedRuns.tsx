@@ -273,7 +273,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       {r && <Link to={runHref(r.run_id)}>details</Link>}
                       {CAPS.runFiles && r && dir && <> · <Link to={runHref(r.run_id, 'plan')}>plan</Link></>}
                       {CAPS.runFiles && r && dir && (r.finished_ts || live) && <> · <Link to={runHref(r.run_id, 'log')}>log</Link></>}
-                      {job?.logs && <>{CAPS.runFiles && dir && ' · '}<a href={job.logs} target="_blank" rel="noreferrer">Batch ↗</a></>}
+                      {job?.logs && <>{r && ' · '}<a href={job.logs} target="_blank" rel="noreferrer">Batch ↗</a></>}
                     </td>
                     <td className="nb">
                       {buckets.length ? buckets.map(shortBucket).join(', ') : 'all'}
