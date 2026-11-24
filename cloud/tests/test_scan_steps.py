@@ -65,8 +65,9 @@ class Runner:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.delenv("SCAN_RUNS_PROFILE", raising=False)
+    # a step runs as a Batch task, where `r2_profile` writes the job's registry
     return {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1", "TMPDIR": str(tmp_path / "t"),
-            "HOME": str(tmp_path / "home")}
+            "HOME": str(tmp_path / "home"), "BATCH_TASK_INDEX": "0"}
 
 
 def ctx(tmp_path, env, runner=None, **kw) -> S.Ctx:
@@ -149,7 +150,7 @@ def test_serving_steps_gate_on_credentials(tmp_path, env):
 
 
 def test_serving_steps_commands(tmp_path, env):
-    env.update(BATCH_TASK_INDEX="0", CLOUDFLARE_API_TOKEN=" tok\n", CLOUDFLARE_ACCOUNT_ID="acct", R2_ENDPOINT="https://r2.example.org",
+    env.update(CLOUDFLARE_API_TOKEN=" tok\n", CLOUDFLARE_ACCOUNT_ID="acct", R2_ENDPOINT="https://r2.example.org",
                R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s", SITE_TOKEN="st", SITE_URL="https://site.example.org",
                SLACK_BOT_TOKEN="x", SLACK_CHANNEL="C1")
     c = ctx(tmp_path, env, secrets={"CLOUDFLARE_API_TOKEN": "cf-token"})
