@@ -238,6 +238,15 @@ describe('runControls — per executor capabilities', () => {
       runControls(view(run({ purge_state: 'pending' })), gcs, true, 9000).purge,
     ]).toEqual([true, false, true, false, false])
   })
+  it('a real run that recorded no deletes shows undo disabled, on either executor, windowed or not', () => {
+    const nothing = (o: Partial<DeletionRun>) => runControls(view(run({ deleted_objects: 0, deleted_bytes: 0, ...o })), cw, true, 2000)
+    const off = { stop: false, undo: false, purge: false, undoing: false, undoOff: 'Nothing to undo: this run recorded no deletes.' }
+    expect([
+      nothing({ undo_deadline: null }),
+      nothing({}),
+      runControls(view(run({ deleted_objects: 0, deleted_bytes: 0 })), gcs, true, 2000),
+    ]).toEqual([off, off, off])
+  })
 })
 
 describe('attemptOnly — runs whose deleted count means attempted', () => {

@@ -435,6 +435,7 @@ export function runControls(v: RunView, caps: ExecCaps, admin: boolean, now: num
   const undoOff = !caps.undo ? null
     : undoing ? 'An undo of this run is in progress.'
     : r.undo_state === 'full' ? 'Already undone.'
+    : r.deleted_objects === 0 ? 'Nothing to undo: this run recorded no deletes.'
     : runHasNoUndo(r) ? runNoUndoText(r)
     : r.undo_deadline == null ? caps.undoUnwindowed ? null : 'This run recorded no undo window.'
     : now >= r.undo_deadline ? `Undo window closed ${utcMinute(r.undo_deadline)} UTC.`

@@ -10,6 +10,7 @@ import { stringParam, useUrlState } from 'use-prms'
 import { FaRegCopy } from 'react-icons/fa6'
 import { copyText } from './CopyName'
 import { Tooltip } from './Tooltip'
+import { ArmedButton } from './ArmedButton'
 import { UserChip } from './UserChip'
 import { TimeCell } from './PrefixTable'
 import { RunOutcome, runOutcomeLabel } from './RunOutcome'
@@ -284,7 +285,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                     <td className="actions nb">
                       {ctl.stop && (
                         <Tooltip content={CAPS.stopHint}>
-                          <button type="button" disabled={busy || stopping.has(jobId)} onClick={() => { setStopping(s => new Set([...s, jobId])); act({ action: 'stop', job_id: jobId }) }}>{stopping.has(jobId) ? 'stopping' : 'stop'}</button>
+                          <ArmedButton label={stopping.has(jobId) ? 'stopping' : 'stop'} confirm="confirm stop" disabled={busy || stopping.has(jobId)} onClick={() => { setStopping(s => new Set([...s, jobId])); act({ action: 'stop', job_id: jobId }) }} />
                         </Tooltip>
                       )}
                       {(ctl.undo || ctl.undoOff) && r && (
@@ -293,7 +294,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       )}
                       {ctl.purge && r && (
                         <Tooltip content="Permanently drop this run's deleted versions (irreversible; the undo window has closed).">
-                          <button type="button" className="danger" disabled={busy} onClick={() => act({ action: 'purge', run_id: r.run_id })}>purge</button>
+                          <ArmedButton label="purge" confirm="confirm purge" className="danger" disabled={busy} onClick={() => act({ action: 'purge', run_id: r.run_id })} />
                         </Tooltip>
                       )}
                     </td>

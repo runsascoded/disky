@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { stringParam, useUrlState } from 'use-prms'
+import { ArmedButton } from './ArmedButton'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type QuotaRows, type PreviewBundle, type PreviewReply, type RenderedReply, type ReplyCell, replies as renderReplies } from './digest'
@@ -224,14 +225,6 @@ async function send<T>(url: string, method: string, body: unknown): Promise<T> {
   return j
 }
 
-/** A button that asks once more before it acts (no browser dialogs). */
-function Confirm({ label, confirm, onClick, disabled }: { label: string; confirm: string; onClick: () => void; disabled?: boolean }) {
-  const [armed, setArmed] = useState(false)
-  // Armed long enough to read the prompt (e.g. "edit thread in D0CE8QE83EH?") before confirming.
-  useEffect(() => { if (armed) { const t = setTimeout(() => setArmed(false), 15000); return () => clearTimeout(t) } }, [armed])
-  return <button disabled={disabled} className={armed ? 'armed' : ''} onClick={() => (armed ? (setArmed(false), onClick()) : setArmed(true))}>{armed ? confirm : label}</button>
-}
-
 /** The live settings: what the job renders the OP (`params`) and replies (`quota_marks`) under, over its file's. */
 function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: string[]; form: { params: string; quota_marks: string }; setForm: (f: { params: string; quota_marks: string }) => void }) {
   const qc = useQueryClient()
@@ -267,7 +260,7 @@ function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: st
         })}
         <label>reply marks <select value={form.quota_marks} onChange={e => setForm({ ...form, quota_marks: e.target.value })}>
           {MARKS.map(m => <option key={m} value={m}>{m}</option>)}</select></label>
-        <Confirm label="save" confirm={`save as live (${template})?`} disabled={save.isPending || (cur?.params === form.params && cur?.quota_marks === form.quota_marks)} onClick={() => save.mutate()} />
+        <ArmedButton label="save" confirm={`save as live (${template})?`} disabled={save.isPending || (cur?.params === form.params && cur?.quota_marks === form.quota_marks)} onClick={() => save.mutate()} />
       </div>
       {save.error && <p className="err">{save.error.message}</p>}
     </section>
@@ -350,7 +343,7 @@ function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_
         </>}
         <label><input type="checkbox" checked={underForm} onChange={e => setUnderForm(e.target.checked)} /> under the form's settings above (else the live ones)</label>
         <button disabled={go.isPending} onClick={() => go.mutate(true)}>preview (dry run)</button>
-        {kind === 'thread' && <Confirm label="converge" confirm={`converge the whole thread in ${channel}?`} disabled={go.isPending} onClick={() => go.mutate(false)} />}
+        {kind === 'thread' && <ArmedButton label="converge" confirm={`converge the whole thread in ${channel}?`} disabled={go.isPending} onClick={() => go.mutate(false)} />}
       </div>
       {go.error && <p className="err">{go.error.message}</p>}
       {runs.data && runs.data.runs.length > 0 && (

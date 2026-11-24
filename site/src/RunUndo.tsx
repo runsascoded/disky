@@ -4,6 +4,7 @@
 // as a record when the undo is unavailable. Each reason sits in a tip a tap pins open (no hover on a phone), and inline
 // in the run's detail.
 import { Tooltip } from './Tooltip'
+import { ArmedButton } from './ArmedButton'
 import { fmtDur, type UndoStatus, utcMinute as utc } from './runs'
 import { UNDO_UNAVAILABLE_WHY, UNDO_UNSEEN_WHO, type UndoUnavailable, undoUnavailableReason, undoUnavailableText, type UndoUnseen, undoUnseenText } from './softDelete'
 
@@ -41,13 +42,13 @@ export function UndoLine({ status: s, now, live }: { status: UndoStatus; now: nu
   }
 }
 
-/** The undo control of a run's row: offered, or shown disabled with why (`runControls`' `undoOff`). `aria-disabled`, not
+/** The undo control of a run's row: offered (a second click confirms), or shown disabled with why (`runControls`' `undoOff`). `aria-disabled`, not
  * `disabled`: a disabled button takes no pointer or focus events, so its tip could never open; this one opens on hover and
  * focus, and a tap pins it. */
 export function UndoControl({ off, tip, busy, onUndo }: { off: string | null; tip: string; busy: boolean; onUndo: () => void }) {
   return off
     ? <Tooltip pinnable content={off}><button type="button" className="undo off" aria-disabled="true">undo</button></Tooltip>
-    : <Tooltip content={tip}><button type="button" className="undo" disabled={busy} onClick={onUndo}>undo</button></Tooltip>
+    : <Tooltip content={tip}><ArmedButton label="undo" confirm="confirm undo" className="undo" disabled={busy} onClick={onUndo} /></Tooltip>
 }
 
 /** The run detail's recovery section when its undo can't be done now. `buckets`: every bucket the run deleted from; the ones
