@@ -3,6 +3,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { CONTAINER_BG, contrastEdge, DEFAULT_PALETTE, slotColor } from './colors'
 import { DustHatch } from './DustHatch'
+import { cellDustCount } from './dust'
 import { bandRects, stripeBackground } from './cellPaint'
 import type { FoldedNode, LayoutConfig } from './layout'
 import { cellStroke, flattenPlaced, isFolded, layoutCells, layoutChildren } from './layout'
@@ -969,6 +970,7 @@ export function Treemap<T>({
     depth: number,
     mode: Tiling,
     parentBw: number,
+    alone: boolean,
   ): ReactNode => {
     const folded = isFolded(kid0)
     // Single-child wrapper chains render as ONE cell labeled `a/…/z`: each
@@ -1076,6 +1078,9 @@ export function Treemap<T>({
     // folded item. Guarded by item count so a very long tail doesn't re-lay on
     // every render; larger tails stay drawn but non-interrogable.
     const foldedNode = folded ? (kid as FoldedNode<T>) : null
+    // The hatch's count, or none: an aggregate that is all its parent shows (its only drawn child, or a collapsed
+    // chain's end) is the parent's whole content and draws plain (`cellDustCount`, as `layoutCells`' `onlyChild`).
+    const dustCount = cellDustCount(foldedNode?.count, style.dustCount, alone || chainLabels !== null)
     const dustHits = foldedNode && dustTexture && foldedNode.children.length > 1
       && Math.min(r.w, r.h) >= 10 && foldedNode.children.length <= 4000
       ? squarify<T>(foldedNode.children, 0, 0, boxW, boxH, getSize)
@@ -1265,7 +1270,7 @@ export function Treemap<T>({
             cells. Its own layer over the paint (fill, bands, makeup stripes), outside the depth fade (only the
             cell's `opacity` dims it), inked black or white against that paint so it reads at any depth.
             Hit-detection (above) maps a hover back to a specific folded item. */}
-        {(foldedNode || style.dustCount !== undefined) && dustTexture && Math.min(r.w, r.h) >= 6 && (
+        {dustCount !== undefined && dustTexture && Math.min(r.w, r.h) >= 6 && (
           <div
             className="dt-treemap-dust"
             style={{ position: 'absolute', inset: paintInset, opacity: style.opacity ?? 1, pointerEvents: 'none' }}
@@ -1273,7 +1278,7 @@ export function Treemap<T>({
             <DustHatch
               w={Math.max(0, boxW - 2 * paintInset)}
               h={Math.max(0, boxH - 2 * paintInset)}
-              count={foldedNode?.count ?? style.dustCount!}
+              count={dustCount}
               ground={style.segments && style.segments.length > 1 && kids.length === 0 && !dust && Math.min(r.w, r.h) >= 18 ? style : { ...style, segments: undefined }}
               alpha={fadeAt(depth) * (style.opacity ?? 1)}
               frame={!!foldedNode && Math.min(r.w, r.h) >= 8}
@@ -1360,7 +1365,7 @@ export function Treemap<T>({
           >
             {kids
               .filter(s => s.w >= 3 && s.h >= 3)
-              .map(s => cell(s.it, isFolded(s.it) ? kidPath : [...kidPath, s.it as T], s, depth + 1, kidsMode, shared ? bw : Infinity))}
+              .map((s, _i, drawn) => cell(s.it, isFolded(s.it) ? kidPath : [...kidPath, s.it as T], s, depth + 1, kidsMode, shared ? bw : Infinity, drawn.length === 1))}
           </div>
         )}
       </CellTag>
@@ -1636,7 +1641,7 @@ export function Treemap<T>({
                 }}
               />
             ))
-          : rects.filter(r => r.w >= 3 && r.h >= 3).map(r => cell(r.it, isFolded(r.it) ? path : [...path, r.it as T], r, 0, rootMode, Infinity))}
+          : rects.filter(r => r.w >= 3 && r.h >= 3).map((r, _i, drawn) => cell(r.it, isFolded(r.it) ? path : [...path, r.it as T], r, 0, rootMode, Infinity, drawn.length === 1))}
         {outlineGroups && size.w > 0 && size.h > 0 && (
           <OutlineOverlay<T> cells={placedCells} width={size.w} height={size.h} groups={outlineGroups} />
         )}

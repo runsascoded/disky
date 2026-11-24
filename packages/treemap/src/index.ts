@@ -5,7 +5,7 @@ export type { CellCtx, CellDims, CellStyle, Tiling, TilingCtx, TreemapProps } fr
 export { foldSmall, foldThin, squarifyRemainder, squarify } from './squarify'
 export type { Rect } from './squarify'
 export { drawDust, DustHatch, resolvedDustInk } from './DustHatch'
-export { dustGround, dustInk, dustLineCount, dustLines, dustOffsets, hatchInk, HATCH_DARK, HATCH_LIGHT } from './dust'
+export { cellDustCount, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, hatchInk, HATCH_DARK, HATCH_LIGHT } from './dust'
 export type { DustHatchProps } from './DustHatch'
 export { cellStroke, flattenPlaced, hitTest, isFolded, layoutCells } from './layout'
 export type { FoldedNode, LayoutConfig, PlacedCell } from './layout'

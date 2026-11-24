@@ -4,7 +4,7 @@ import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { browserRgba, colorResolver } from './cssColor'
 import { drawDust, drawDustFrame } from './DustHatch'
 import { bandRects, drawStripes } from './cellPaint'
-import { type DustNotch, dustInk } from './dust'
+import { cellDustCount, type DustNotch, dustInk } from './dust'
 import { resolveCellStyle, resolveRing, type StyleOpts } from './cellStyle'
 import { flattenPlaced, hitTest, type FoldedNode, type PlacedCell } from './layout'
 import { squarify } from './squarify'
@@ -519,8 +519,9 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
   // Dust: the folded tail's dashed frame, then the cross-hatch (a folded tile, or a consumer's aggregate with
   // `dustCount`). Drawn over the fill, bands and makeup segments, outside the depth fade (only a consumer's
   // `opacity` dims it), in black or white against the ground actually painted, so it reads at any depth. Painted
-  // once the label is laid out (below), so its rules can step around the label's text (`notch`).
-  const dustCount = folded ? (cell.node as FoldedNode<T>).count : style.dustCount
+  // once the label is laid out (below), so its rules can step around the label's text (`notch`). None on an
+  // aggregate that is all its parent shows (`cellDustCount`).
+  const dustCount = cellDustCount(folded ? (cell.node as FoldedNode<T>).count : undefined, style.dustCount, cell.onlyChild)
   let paintDust: ((notch: DustNotch | null) => void) | null = null
   if (dustCount !== undefined && dustTexture && Math.min(w, h) >= 6 && bw > 0 && bh > 0) {
     const ground = { bg: resolveVar(style.bg ?? ''), bands: style.bands?.map(b => ({ ...b, color: resolveVar(b.color) })), segments: segs && !hasKids && !dust && Math.min(w, h) >= 18 ? segs.map(s => ({ ...s, color: resolveVar(s.color) })) : undefined }

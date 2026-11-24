@@ -13,7 +13,7 @@
 import { CONTAINER_BG, DEFAULT_PALETTE, parseColor, slotColor } from './colors'
 import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { resolveCellStyle, resolveRing, type StyleOpts } from './cellStyle'
-import { type DustNotch, dustInk, dustRules } from './dust'
+import { cellDustCount, type DustNotch, dustInk, dustRules } from './dust'
 import { flattenPlaced, isFolded, layoutCells, type FoldedNode, type LayoutConfig, type PlacedCell } from './layout'
 import { foldSmall, foldThin, squarify } from './squarify'
 import type { Tiling } from './cellTypes'
@@ -235,8 +235,8 @@ export function treemapSvg<T>(cells: PlacedCell<T>[], o: SvgPaintOpts<T>): strin
     }
     // Dust: a folded tile's dashed frame and cross-hatch, or a consumer aggregate's (`dustCount`) hatch, as
     // `TreemapCanvas` paints them: over the fill, outside the depth fade, black or white against that fill, its
-    // rules stepping around the label.
-    const dustCount = folded ? (cell.node as FoldedNode<T>).count : style.dustCount
+    // rules stepping around the label. None on an aggregate that is all its parent shows (`cellDustCount`).
+    const dustCount = cellDustCount(folded ? (cell.node as FoldedNode<T>).count : undefined, style.dustCount, cell.onlyChild)
     if (dustCount !== undefined && dustTexture && Math.min(w, h) >= 6 && bw > 0 && bh > 0) {
       const ink = dustInk({ bg: resolveVars(style.bg ?? '', vars) }, alpha)
       const stroke = paint('stroke', ink, style.opacity ?? 1, vars)!

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CONTAINER_BG } from '../src/colors'
-import { dustGround, dustInk, dustLineCount, dustLines, dustOffsets, dustRules, HATCH_DARK, HATCH_LIGHT, hatchInk } from '../src/dust'
+import { cellDustCount, dustGround, dustInk, dustLineCount, dustLines, dustOffsets, dustRules, HATCH_DARK, HATCH_LIGHT, hatchInk } from '../src/dust'
 
 describe('dustOffsets', () => {
   it('places rules whose gaps grow geometrically from the dense end', () => {
@@ -22,6 +22,18 @@ describe('dustOffsets', () => {
   it('returns nothing for a non-positive length or count', () => {
     expect(dustOffsets(0, 4, 1.3)).toEqual([])
     expect(dustOffsets(100, 0, 1.3)).toEqual([])
+  })
+})
+
+describe('cellDustCount', () => {
+  it("is a fold's count, else the consumer's `dustCount`, and none for a cell that is all its parent shows", () => {
+    expect([
+      cellDustCount(40, undefined, false),
+      cellDustCount(undefined, 7, false),
+      cellDustCount(undefined, undefined, false),
+      cellDustCount(40, undefined, true),
+      cellDustCount(undefined, 7, true),
+    ]).toEqual([40, 7, undefined, undefined, undefined])
   })
 })
 

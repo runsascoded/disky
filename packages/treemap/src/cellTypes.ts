@@ -11,7 +11,8 @@ export interface CellStyle {
   ink?: string
   /** repeating-gradient overlay (e.g. the class-lens hatch marin uses) */
   hatch?: string
-  /** Density hint for an aggregated cell supplied by the consumer. Draws the dust grid in both renderers. */
+  /** Density hint for an aggregated cell supplied by the consumer. Draws the dust grid in every renderer, beside
+   *  real sibling tiles only: an aggregate that is all its parent shows draws plain (`cellDustCount`). */
   dustCount?: number
   /** Horizontal fill bands, in top-to-bottom order. Shared by DOM, canvas and image export. */
   bands?: { color: string; frac: number }[]

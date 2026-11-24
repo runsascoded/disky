@@ -25,6 +25,14 @@ export function dustOffsets(len: number, n: number, ratio: number): number[] {
   return out
 }
 
+/** The hatch's count for a cell, or undefined when it draws none: a fold's own `foldedCount`, else the consumer's
+ *  `dustCount`. An aggregate is dust only beside real tiles: as all its parent shows (`onlyChild`: the parent's only
+ *  drawn child, or the end of a collapsed chain), it is the parent's whole content, not a remainder, and draws
+ *  plain (its fill, no hatch). One rule for every renderer (DOM, canvas, SVG). */
+export function cellDustCount(foldedCount: number | undefined, dustCount: number | undefined, onlyChild: boolean): number | undefined {
+  return onlyChild ? undefined : foldedCount ?? dustCount
+}
+
 /** Target rule count on an axis of length `len`, given how many cells folded
  * in — grows with `log2(count)`, clamped so a rule is never under ~4px apart. */
 export function dustLineCount(len: number, count: number, base: number): number {

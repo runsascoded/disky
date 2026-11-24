@@ -45,6 +45,9 @@ export interface PlacedCell<T> {
   edge: number
   /** Rendered small enough (< 14px short side) to be a "dust" cell. */
   dust: boolean
+  /** All its parent shows: the parent's only drawn child, or a collapsed chain (whose deepest node is an only
+   *  child). An aggregate here is the parent's whole content, so it draws no dust hatch (`cellDustCount`). */
+  onlyChild: boolean
   /** Cell box after the gaps gutter / shared inset — the region children fill. */
   boxW: number
   boxH: number
@@ -202,6 +205,7 @@ function place<T>(
   mode: Tiling,
   cfg: LayoutConfig<T>,
   parentBw: number,
+  alone: boolean,
 ): PlacedCell<T> {
   const { getLabel, childrenOf, showLabels, collapseChains } = cfg
   const folded = isFolded(node0)
@@ -247,19 +251,19 @@ function place<T>(
   const innerLeft = kidsMode === 'shared' ? edge : 3
   const innerTop = kidsMode === 'shared' ? (showLbl ? 20 : edge) : (showLbl ? 20 : 3)
 
-  const children: PlacedCell<T>[] = kids
-    .filter(s => s.w >= 3 && s.h >= 3)
-    .map(s =>
-      place(
-        s.it,
-        isFolded(s.it) ? path : [...path, s.it as T],
-        { x: r.x + innerLeft + s.x, y: r.y + innerTop + s.y, w: s.w, h: s.h },
-        depth + 1,
-        kidsMode,
-        cfg,
-        shared ? bw : Infinity,
-      ),
-    )
+  const drawn = kids.filter(s => s.w >= 3 && s.h >= 3)
+  const children: PlacedCell<T>[] = drawn.map(s =>
+    place(
+      s.it,
+      isFolded(s.it) ? path : [...path, s.it as T],
+      { x: r.x + innerLeft + s.x, y: r.y + innerTop + s.y, w: s.w, h: s.h },
+      depth + 1,
+      kidsMode,
+      cfg,
+      shared ? bw : Infinity,
+      drawn.length === 1,
+    ),
+  )
 
   return {
     node,
@@ -274,6 +278,7 @@ function place<T>(
     mode,
     edge,
     dust,
+    onlyChild: alone || chainLabels !== null,
     boxW,
     boxH,
     showLbl,
@@ -296,19 +301,19 @@ export function layoutCells<T>(
   rootMode: Tiling,
   cfg: LayoutConfig<T>,
 ): PlacedCell<T>[] {
-  return topRects
-    .filter(r => r.w >= 3 && r.h >= 3)
-    .map(r =>
-      place(
-        r.it,
-        isFolded(r.it) ? basePath : [...basePath, r.it as T],
-        r,
-        0,
-        rootMode,
-        cfg,
-        Infinity,
-      ),
-    )
+  const drawn = topRects.filter(r => r.w >= 3 && r.h >= 3)
+  return drawn.map(r =>
+    place(
+      r.it,
+      isFolded(r.it) ? basePath : [...basePath, r.it as T],
+      r,
+      0,
+      rootMode,
+      cfg,
+      Infinity,
+      drawn.length === 1,
+    ),
+  )
 }
 
 /** Flatten a placed tree parent-first (paint order: parents before children). */

@@ -87,15 +87,36 @@ describe('treemapSvg dust', () => {
       '<path d="M299.5 1V99M298.5 1V99M297.5 1V99M297.5 1V99M295.5 1V99M294.5 1V99M292.5 1V99M289.5 1V99M285.5 1V99M281.5 1V99M274.5 30V99M266.5 30V99M255.5 30V99M241 99.5H299M241 98.5H299M241 97.5H299M241 97.5H299M241 95.5H299M241 94.5H299M241 92.5H299M241 89.5H299M241 86.5H299M241 81.5H299M241 75.5H299M241 68.5H299M241 57.5H299M241 43.5H299M275 25.5H299" fill="none" stroke="rgb(255,255,255)" stroke-opacity="0.6" stroke-width="1"/>',
     ])
   })
-  it("hatches a consumer aggregate (`dustCount`) with no frame, dimmed only by the cell's own opacity", () => {
-    const root: N = { n: 'root', size: 100, children: [{ n: 'agg', size: 100 }] }
-    const cells = staticLayout(root, { width: 40, height: 20, getSize, getLabel, getChildren, tiling: 'shared', showLabels: false })
-    const svg = treemapSvg(cells, { width: 40, height: 20, ...paintOpts, colorForCell: () => ({ bg: 'rgb(55, 175, 75)', ink: '#fff', dustCount: 7, opacity: 0.5 }) })
+  it("hatches a consumer aggregate (`dustCount`) beside a real sibling with no frame, dimmed only by the cell's own opacity", () => {
+    const root: N = { n: 'root', size: 100, children: [{ n: 'real', size: 50 }, { n: 'agg', size: 50 }] }
+    const cells = staticLayout(root, { width: 80, height: 20, getSize, getLabel, getChildren, tiling: 'shared', showLabels: false })
+    const agg = (n: N) => n.n === 'agg' ? { bg: 'rgb(55, 175, 75)', ink: '#fff', dustCount: 7, opacity: 0.5 } : { bg: 'rgb(55, 175, 75)', ink: '#fff' }
     // Green at 0.46 (0.92 fade × 0.5) over the dark base is dark: white rules, at 0.6 × the 0.5 opacity.
-    expect(dustEls(svg)).toEqual([
-      '<path d="M38.5 1V19M36.5 1V19M35.5 1V19M32.5 1V19M29.5 1V19M24.5 1V19M19.5 1V19M11.5 1V19M1.5 1V19M1 16.5H39M1 12.5H39M1 8.5H39" fill="none" stroke="rgb(255,255,255)" stroke-opacity="0.3" stroke-width="1"/>',
-    ])
-    expect(dustEls(treemapSvg(cells, { width: 40, height: 20, ...paintOpts, dustTexture: false, colorForCell: () => ({ bg: 'rgb(55, 175, 75)', dustCount: 7 }) }))).toEqual([])
+    expect(dustEls(treemapSvg(cells, { width: 80, height: 20, ...paintOpts, colorForCell: agg }))).toEqual(SIBLING_DUST)
+    expect(dustEls(treemapSvg(cells, { width: 80, height: 20, ...paintOpts, dustTexture: false, colorForCell: agg }))).toEqual([])
+  })
+  // An `(other)` that is all its parent shows is the parent's whole content, not a remainder: the same fill, no
+  // hatch, so the SVG is byte-identical to one whose style carries no `dustCount`.
+  const plainAndHatched = (root: N, collapseChains: boolean) => {
+    const cells = staticLayout(root, { width: 200, height: 100, getSize, getLabel, getChildren, tiling: 'shared', showLabels: false, collapseChains })
+    const style = (dust: boolean) => (n: N) => ({ bg: 'rgb(55, 175, 75)', ink: '#fff', ...(dust && n.n === '(other)' && { dustCount: 7 }) })
+    return [treemapSvg(cells, { width: 200, height: 100, ...paintOpts, colorForCell: style(true) }), treemapSvg(cells, { width: 200, height: 100, ...paintOpts, colorForCell: style(false) })]
+  }
+  it("draws an aggregate plain when it is the view's only tile", () => {
+    const [hatched, plain] = plainAndHatched({ n: 'root', size: 100, children: [{ n: '(other)', size: 100 }] }, false)
+    expect([dustEls(hatched), hatched]).toEqual([[], plain])
+  })
+  it("draws an aggregate plain when it is its folder's only child, nested or collapsed into the folder's cell", () => {
+    const root: N = { n: 'root', size: 200, children: [{ n: 'dir', size: 100, children: [{ n: '(other)', size: 100 }] }, { n: 'file', size: 100 }] }
+    for (const collapse of [false, true]) {
+      const [hatched, plain] = plainAndHatched(root, collapse)
+      expect([dustEls(hatched), hatched]).toEqual([[], plain])
+    }
+  })
+  it("hatches an aggregate beside a sibling in its folder", () => {
+    const root: N = { n: 'root', size: 200, children: [{ n: 'dir', size: 100, children: [{ n: 'c.txt', size: 60 }, { n: '(other)', size: 40 }] }, { n: 'file', size: 100 }] }
+    const [hatched, plain] = plainAndHatched(root, true)
+    expect([dustEls(hatched), dustEls(plain)]).toEqual([NESTED_DUST, []])
   })
 })
 
@@ -122,3 +143,11 @@ const TEXTS = [
 // The map ground, then per cell an opaque base + faded fill, and a contrast
 // edge on the 3 leaves (the container's fill is the ground's: no edge)
 const RECTS = 1 + 4 * 2 + 3
+// `agg`, the right half (40,0 40×20) of an 80×20 map beside `real`: its paint box inset by the 1px half-edge.
+const SIBLING_DUST = [
+  '<path d="M78.5 1V19M76.5 1V19M75.5 1V19M72.5 1V19M69.5 1V19M64.5 1V19M59.5 1V19M51.5 1V19M41.5 1V19M41 16.5H79M41 12.5H79M41 8.5H79" fill="none" stroke="rgb(255,255,255)" stroke-opacity="0.3" stroke-width="1"/>',
+]
+// `dir`'s `(other)`, under its `c.txt` (1,59.8 98×39.2 inside `dir`'s 1px edge): no cell opacity, so the ink's own 0.6.
+const NESTED_DUST = [
+  '<path d="M96 60.3V98.5M93 60.3V98.5M88 60.3V98.5M81 60.3V98.5M73 60.3V98.5M62 60.3V98.5M47 60.3V98.5M28 60.3V98.5M1.5 97.8H98.5M1.5 96.8H98.5M1.5 94.8H98.5M1.5 91.8H98.5M1.5 88.8H98.5M1.5 84.8H98.5M1.5 78.8H98.5M1.5 70.8H98.5" fill="none" stroke="rgb(255,255,255)" stroke-opacity="0.6" stroke-width="1"/>',
+]

@@ -1186,6 +1186,27 @@ describe('<Treemap renderer>', () => {
       expect(container.querySelectorAll('.dt-treemap-cell canvas').length).toBe(0)
     } finally { restore() }
   })
+  it("hatches a remainder only beside a real sibling: one that is all its folder shows draws plain", () => {
+    const restore = withLayout()
+    try {
+      // `solo` holds just its remainder; `mixed` holds `c.txt` beside its own.
+      const aggTree: Node = {
+        n: 'root',
+        size: 400,
+        children: [
+          { n: 'solo', size: 200, children: [{ n: 'solo-rest', size: 200 }] },
+          { n: 'mixed', size: 200, children: [{ n: 'c.txt', size: 120 }, { n: 'mixed-rest', size: 80 }] },
+        ],
+      }
+      const props = { root: aggTree, ...accessors, minCellArea: null, colorForCell: (n: Node) => n.n.endsWith('-rest') ? { dustCount: 125 } : {} }
+      const hatched = (c: HTMLElement) => [...c.querySelectorAll('canvas')].map(el => el.closest('.dt-treemap-cell')?.querySelector('.dt-treemap-lbl')?.childNodes[0]?.textContent)
+      const { container, rerender } = render(<Treemap {...props} />)
+      expect(hatched(container)).toEqual(['mixed-rest'])
+      // Collapsed into `solo/solo-rest`, the remainder is still all `solo` shows.
+      rerender(<Treemap {...props} collapseChains />)
+      expect(hatched(container)).toEqual(['mixed-rest'])
+    } finally { restore() }
+  })
 
   it("default 'dom' renders DOM cells and no canvas", () => {
     const restore = withLayout()
