@@ -801,15 +801,16 @@ class Slack:
 
     def _sections(self, body: str) -> dict:
         """`body` (markdown, converted as thrds converts a post, a missing vocabulary emoji as its stock one) as one
-        message's `section` blocks: thrds' `section_blocks`, one block, else split at its blank lines into blocks of at
-        most 3,000 characters each; the whole text as the notification fallback."""
+        message's `section` blocks: thrds' `section_blocks`, one block, else split at its blank lines, and a paragraph
+        past the limit at its line breaks (`lines=True`: nominal keeps its bodies and only ever writes them whole), into
+        blocks of at most 3,000 characters each; the whole text as the notification fallback."""
         from thrds.mrkdwn import to_slack
         from thrds.slack import section_blocks
 
         wire = to_slack(V.fallback(body, self.have))
         unfurl = not getattr(self.client, '_suppress_unfurls', False)
         return {'channel': self.client.channel, 'text': wire, 'unfurl_links': unfurl, 'unfurl_media': unfurl,
-                'blocks': section_blocks(wire)}
+                'blocks': section_blocks(wire, lines=True)}
 
     def post_sections(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
                       broadcast: bool = False) -> str:
@@ -1384,19 +1385,11 @@ def week_sender(cfg: Config, week: str) -> dict[str, str] | None:
 def week_text(cfg: Config, week: str, runs: list[dict], urls: Mapping[str, str]) -> str:
     """A week's rolling runs reply: each run's line in `trail`'s format (`reply`; a live run's `running`), oldest first,
     a run with a reply of its own (`urls`) linking it. With senders off, headed by the week, which the sender says.
-    Lines, unless they'd pass a `section`'s 3,000 characters (less `CARD_BODY_MAX`'s margin for markdown → mrkdwn): then
-    each UTC day's lines a paragraph, the blank lines thrds' `section_blocks` splits a message's sections at
-    (`Slack.post_sections`). A single day past the limit can't be split there."""
-    days: dict[str, list[str]] = {}
-    for r in runs:
-        day = datetime.fromtimestamp(r['run']['started_ts'], timezone.utc).strftime('%Y-%m-%d')
-        days.setdefault(day, []).append(running(cfg, r) if live(r) else reply(cfg, r)
-                                        + (f" · [reply]({urls[r['run']['run_id']]})" if r['run']['run_id'] in urls else ''))
+    Past a `section`'s 3,000 characters the message splits between lines (`Slack.post_sections`)."""
     head = [] if cfg.senders else [f"**{week_label(week)} · runs**"]
-    text = '\n'.join(head + [line for lines in days.values() for line in lines])
-    if len(text) <= CARD_BODY_MAX:
-        return text
-    return '\n'.join(head) + ('\n' if head else '') + '\n\n'.join('\n'.join(lines) for lines in days.values())
+    return '\n'.join(head + [running(cfg, r) if live(r) else reply(cfg, r)
+                             + (f" · [reply]({urls[r['run']['run_id']]})" if r['run']['run_id'] in urls else '')
+                             for r in runs])
 
 
 def relink_op(text: str, month: str, prev_url: str | None, next_url: str | None) -> str:

@@ -800,7 +800,7 @@ requires-dist = [
     { name = "pyrmts", extras = ["duckdb"], url = "https://github.com/runsascoded/pyrmts/archive/541bc8e2759d42510b29047a5965c94267d5817e.tar.gz", subdirectory = "python/pyrmts" },
     { name = "pyrmts-engine", extras = ["duckdb"], marker = "extra == 'overtime'", url = "https://github.com/runsascoded/pyrmts/archive/541bc8e2759d42510b29047a5965c94267d5817e.tar.gz", subdirectory = "python/pyrmts_engine" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "thrds", url = "https://github.com/Open-Athena/thrds/archive/ac9d235e841686430497b6e5e19126ca9c850869.tar.gz" },
+    { name = "thrds", url = "https://github.com/Open-Athena/thrds/archive/b3a16909f9e29d0d666784599d5e026effc1155e.tar.gz" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.19" },
 ]
 provides-extras = ["overtime", "wandb", "s3", "emoji", "sheets", "fray"]
@@ -3150,14 +3150,14 @@ wheels = [
 [[package]]
 name = "thrds"
 version = "0.6.0"
-source = { url = "https://github.com/Open-Athena/thrds/archive/ac9d235e841686430497b6e5e19126ca9c850869.tar.gz" }
+source = { url = "https://github.com/Open-Athena/thrds/archive/b3a16909f9e29d0d666784599d5e026effc1155e.tar.gz" }
 dependencies = [
     { name = "click" },
     { name = "emoji" },
     { name = "pyyaml" },
     { name = "utz" },
 ]
-sdist = { hash = "sha256:5318b83ac04ea252577054b793da9e564b2577226d6815ebdc47380a74e19c0a" }
+sdist = { hash = "sha256:40060797bf33a5a4e27694586b239de42d995733b582b1816526e6cd751ecc72" }
 
 [package.metadata]
 requires-dist = [
