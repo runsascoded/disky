@@ -117,6 +117,7 @@ On the month's last report, or the first one of the next month:
 
 ## Decisions
 
-- Closed-month card hosting (above). Rec: publish the PNG with the digest's plots.
-- Weekly runs replies, rather than one reply per day or one for the whole month. Rec: weekly.
-- Failure replies broadcast to the channel. Rec: yes.
+Ryan's go 2026-11-25 (#94), all three as recommended:
+- **Closed-month card:** at close, render the PNG once and publish it beside the digest's plots (content-addressed), not a non-expiring signature.
+- **Runs replies:** one per ISO week.
+- **Failure replies:** also sent to the channel (`reply_broadcast`).
