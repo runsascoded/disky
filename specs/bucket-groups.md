@@ -59,6 +59,7 @@ Branch `rw/bucket-groups`. Item 4 (digest links) is not built yet; see "Left for
   - Otherwise, second pass: each member with bytes or objects on either side is diffed at `threshold · atten`.
   - The rows come from `groupDiffRows`. Each member gets a depth-1 row with its totals, marked `expanded` when its own rows came too. Its rows follow as `<bucket>/<row>`, one level deeper, with its `(other)` becoming `<bucket>/(other)`.
   - Every member a scan holds gets its depth-1 row, an unchanged one included (zero delta, drawn as any unchanged row is). A group is an explicit set of buckets and its totals count every member's bytes, so an unchanged member isn't dropped as filler the way an unchanged bucket is at the store root (cw, 2026-11-24: `rhoarnet-us-east-08a` was missing from `?g=08a&d=-7d`).
+  - The diff table lists it too, in Δ mode as well: the map draws no zero-area cell for it, but the table's rows are `buildTree`'s `table` (the map's cells, then every child it leaves undrawn), so an unchanged member reads `unchanged`, Δ 0, last under the Δ sort, and drills like any directory row. This holds for every diff table, not only a group's.
   - A member empty on both sides isn't diffed again in the second pass; it keeps its totals and has no rows below. Under a scope (`lens`, `o`, `cl`, `q`), a member the scope leaves empty on both sides is absent, as in the group's subtree.
   - A member neither scan holds (its diff is a 404) is absent.
 - **`/api/series`** (`groupSeries`):

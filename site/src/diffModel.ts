@@ -105,8 +105,13 @@ export interface DiffNode {
  * churn (delete X + add Y) makes children sum past either side's bytes.
  * Under-filled parents get a grey `(unchanged)` filler cell so areas stay
  * truthful without shipping every unchanged row.
+ *
+ * `cells` are the top-level nodes the map draws (weight > 0: in Δ mode an
+ * unchanged child has no area); `table` is every top-level node, `cells` in
+ * their order and then the zero-weight ones, for the diff table, which lists
+ * every child the server returned (an unchanged one as `unchanged`, Δ 0).
  */
-export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): { cells: DiffNode[] } {
+export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): { cells: DiffNode[]; table: DiffNode[] } {
   const byPath = new Map<string, DiffNode>()
   const roots: DiffNode[] = []
   const attach = (node: DiffNode, path: string) => {
@@ -191,5 +196,5 @@ export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): 
   cells.sort(areaMode === 'max'
     ? (a, b) => (b.delta - a.delta) || (b.weight - a.weight)
     : (a, b) => b.weight - a.weight)
-  return { cells }
+  return { cells, table: [...cells, ...roots.filter(r => r.weight === 0)] }
 }
