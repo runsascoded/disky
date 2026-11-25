@@ -27,6 +27,13 @@ def history(n):
     return [*(row(i) for i in range(n, 0, -1)), row(0, 'failed')]
 
 
+def sections(body):
+    """`body`'s `section` blocks' texts, as thrds splits a message (`section_blocks`)."""
+    from thrds.slack import section_blocks
+
+    return [b['text']['text'] for b in section_blocks(body)]
+
+
 class Slack:
     #: The workspace's custom emoji (`Transport.have`): unknown, so every starter's own emoji is kept
     have = None
@@ -57,20 +64,21 @@ class Slack:
             raise TimeoutError('response lost after Slack accepted the post')
         return ts
 
-    def post_sections(self, sections, parent, operation, sender=None, broadcast=False):
-        """As Slack's: one message of `section` blocks, its text their join; `broadcast` (`reply_broadcast`) kept on it."""
+    def post_sections(self, body, parent, operation, sender=None, broadcast=False):
+        """As Slack's: one message of `section` blocks (thrds' `section_blocks`' texts kept on it, as `sections`), and
+        `broadcast` (`reply_broadcast`)."""
         try:
-            return self.post('\n'.join(sections), parent, operation, sender)
+            return self.post(body, parent, operation, sender)
         finally:  # a lost response (`timeout`) still leaves the message as posted
-            self.messages_by_id[next(reversed(self.messages_by_id))].update(sections=list(sections), broadcast=broadcast)
+            self.messages_by_id[next(reversed(self.messages_by_id))].update(sections=sections(body), broadcast=broadcast)
 
     def edit(self, ts, body):
         self.calls.append(('edit', ts, body))
         self.messages_by_id[ts]['text'] = body
 
-    def edit_sections(self, ts, sections):
-        self.edit(ts, '\n'.join(sections))
-        self.messages_by_id[ts]['sections'] = list(sections)
+    def edit_sections(self, ts, body):
+        self.edit(ts, body)
+        self.messages_by_id[ts]['sections'] = sections(body)
 
     def delete(self, ts):
         """As Slack's: a message already gone is not an error."""
@@ -1736,23 +1744,26 @@ def test_a_month_posts_lost_response_is_recovered_not_posted_again():
 
 
 def test_a_weeks_runs_reply_past_a_sections_limit_is_one_message_of_several_sections():
-    """cw's 4 runs a day pass a `section`'s 3,000 characters within a week: one reply, in several sections."""
-    assert (N.SECTION_MAX, N.split('aa\nbb\ncc', limit=5), N.split('abcdefgh', limit=5)) == (2900, ['aa\nbb', 'cc'], ['abcd…'])
+    """cw's 4 runs a day pass a `section`'s 3,000 characters within a week: one reply, its days then paragraphs, which
+    thrds' `section_blocks` splits into several sections of the one message."""
     runs = [row(1, run_id=f'h{k:02d}', started_ts=T0 + 86400 + 3600 * k, finished_ts=T0 + 86400 + 3600 * k + 60) for k in range(48)]
     lines = [N.reply(MONTHLY, r) for r in runs]
-    # 42 lines of 68 characters fit 2,900 (42 × 68 + 41 = 2,897)
+    # hourly from 11/02 08:00Z: 16 runs that day, 24 the next, 8 on 11/04; 68 characters a line
     assert (lines[0], {len(line) for line in lines}) == ('✅ :alarm_clock: [11/02 08:00Z](https://site.test/scans/h00) · 1m 00s', {68})
+    days = ['\n'.join(lines[:16]), '\n'.join(lines[16:40]), '\n'.join(lines[40:])]
     m = Monthly()
+    # 30 lines (2,069 characters) stay lines, in one section
     m.run(runs[29::-1], T0 + 86400 + 3600 * 29 + 120)
     assert [(c[0], c[1]) for c in m.slack.calls] == [('post', '1.0'), ('post', '2.0')]
     assert m.slack.messages_by_id['2.0']['sections'] == ['\n'.join(lines[:30])]
     m.slack.calls.clear()
+    # 48 (3,311) are the days' paragraphs: the first two fit a section (1,103 + 2 + 1,655), the third starts another
     m.run(runs[::-1], T0 + 86400 + 3600 * 47 + 120)
     assert thread(m.slack) == [
-        ('edit', '2.0', '\n'.join(lines)),
+        ('edit', '2.0', '\n\n'.join(days)),
         ('edit', '1.0', 'status\nThis month: 48 runs' + card_line(CARD1, '11/04 07:00Z')),
     ]
-    assert m.slack.messages_by_id['2.0']['sections'] == ['\n'.join(lines[:42]), '\n'.join(lines[42:])]
+    assert m.slack.messages_by_id['2.0']['sections'] == [f'{days[0]}\n\n{days[1]}', days[2]]
     m.run(runs[::-1], T0 + 86400 + 3600 * 47 + 120)
     assert thread(m.slack) == []
 

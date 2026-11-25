@@ -720,10 +720,10 @@ class Transport(Protocol):
     def owns(self, message: dict) -> bool: ...
     def find(self, operation: str, parent: str | None, since: float) -> str | None: ...
     def post(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None) -> str: ...
-    def post_sections(self, sections: list[str], parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
+    def post_sections(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
                       broadcast: bool = False) -> str: ...
     def edit(self, ts: str, body: str) -> None: ...
-    def edit_sections(self, ts: str, sections: list[str]) -> None: ...
+    def edit_sections(self, ts: str, body: str) -> None: ...
     def delete(self, ts: str) -> None: ...
     def alert(self, link: str, since: float) -> str | None: ...
     def alert_messages(self, link: str, since: float) -> list[dict]: ...
@@ -799,21 +799,23 @@ class Slack:
     def edit(self, ts: str, body: str) -> None:
         self.client.edit(ts, V.fallback(body, self.have))
 
-    def _sections(self, sections: list[str]) -> dict:
-        """`sections` (markdown) as one message's `section` blocks, each converted as thrds converts a post (a missing
-        vocabulary emoji as its stock one, as `post`), and their joined text as the notification fallback."""
+    def _sections(self, body: str) -> dict:
+        """`body` (markdown, converted as thrds converts a post, a missing vocabulary emoji as its stock one) as one
+        message's `section` blocks: thrds' `section_blocks`, one block, else split at its blank lines into blocks of at
+        most 3,000 characters each; the whole text as the notification fallback."""
         from thrds.mrkdwn import to_slack
+        from thrds.slack import section_blocks
 
-        wires = [to_slack(V.fallback(s, self.have)) for s in sections]
+        wire = to_slack(V.fallback(body, self.have))
         unfurl = not getattr(self.client, '_suppress_unfurls', False)
-        return {'channel': self.client.channel, 'text': '\n'.join(wires), 'unfurl_links': unfurl, 'unfurl_media': unfurl,
-                'blocks': [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': w}} for w in wires]}
+        return {'channel': self.client.channel, 'text': wire, 'unfurl_links': unfurl, 'unfurl_media': unfurl,
+                'blocks': section_blocks(wire)}
 
-    def post_sections(self, sections: list[str], parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
+    def post_sections(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
                       broadcast: bool = False) -> str:
-        """One message of `section` blocks (`sections`: a text past a section's 3,000 characters, `split`), with
+        """One message of `section` blocks (`_sections`: a body past a section's 3,000 characters in several), with
         `post`'s metadata and sender; `broadcast`: a reply also sent to the channel (`reply_broadcast`)."""
-        data = {**self._sections(sections), **dict(sender or {}),
+        data = {**self._sections(body), **dict(sender or {}),
                 'metadata': {'event_type': 'disky_nominal', 'event_payload': {'operation': operation}}}
         if parent:
             data['thread_ts'] = parent
@@ -821,9 +823,9 @@ class Slack:
                 data['reply_broadcast'] = True
         return self.client._request('chat.postMessage', data)['ts']
 
-    def edit_sections(self, ts: str, sections: list[str]) -> None:
+    def edit_sections(self, ts: str, body: str) -> None:
         """Replace a `post_sections` message's sections (an edit keeps its sender, metadata and broadcast)."""
-        self.client._request('chat.update', {**self._sections(sections), 'ts': ts})
+        self.client._request('chat.update', {**self._sections(body), 'ts': ts})
 
     def delete(self, ts: str) -> None:
         """Delete our message (a reply with no replies of its own leaves no tombstone); one already gone is not an
@@ -1311,9 +1313,6 @@ def converge(
     return state
 
 
-#: Slack's longest `section` text, less a margin for markdown → mrkdwn and emoji fallbacks (`CARD_BODY_MAX`'s): a longer
-#: weekly runs reply is posted as several sections of one message (`split`)
-SECTION_MAX = CARD_BODY_MAX
 #: A failure reply is also sent to the channel (`reply_broadcast`) unless its run ended this long before the deployment's
 #: first monthly report (`since`): the failures a cutover seeds the month with were reported in the status threads.
 #: The report that cuts over can be the end of a failed run, which is news.
@@ -1384,26 +1383,20 @@ def week_sender(cfg: Config, week: str) -> dict[str, str] | None:
 
 def week_text(cfg: Config, week: str, runs: list[dict], urls: Mapping[str, str]) -> str:
     """A week's rolling runs reply: each run's line in `trail`'s format (`reply`; a live run's `running`), oldest first,
-    a run with a reply of its own (`urls`) linking it. With senders off, headed by the week, which the sender says."""
-    lines = [running(cfg, r) if live(r) else reply(cfg, r) + (f" · [reply]({urls[r['run']['run_id']]})" if r['run']['run_id'] in urls else '')
-             for r in runs]
-    return '\n'.join(([] if cfg.senders else [f"**{week_label(week)} · runs**"]) + lines)
-
-
-def split(text: str, limit: int = SECTION_MAX) -> list[str]:
-    """`text`'s lines packed in order into sections of at most `limit` characters (a longer line clipped, …): one message's
-    `section` blocks (`Transport.post_sections`)."""
-    out: list[list[str]] = []
-    size = 0
-    for line in text.split('\n'):
-        line = line if len(line) <= limit else line[:limit - 1] + '…'
-        if out and size + 1 + len(line) <= limit:
-            out[-1].append(line)
-            size += 1 + len(line)
-        else:
-            out.append([line])
-            size = len(line)
-    return ['\n'.join(s) for s in out]
+    a run with a reply of its own (`urls`) linking it. With senders off, headed by the week, which the sender says.
+    Lines, unless they'd pass a `section`'s 3,000 characters (less `CARD_BODY_MAX`'s margin for markdown → mrkdwn): then
+    each UTC day's lines a paragraph, the blank lines thrds' `section_blocks` splits a message's sections at
+    (`Slack.post_sections`). A single day past the limit can't be split there."""
+    days: dict[str, list[str]] = {}
+    for r in runs:
+        day = datetime.fromtimestamp(r['run']['started_ts'], timezone.utc).strftime('%Y-%m-%d')
+        days.setdefault(day, []).append(running(cfg, r) if live(r) else reply(cfg, r)
+                                        + (f" · [reply]({urls[r['run']['run_id']]})" if r['run']['run_id'] in urls else ''))
+    head = [] if cfg.senders else [f"**{week_label(week)} · runs**"]
+    text = '\n'.join(head + [line for lines in days.values() for line in lines])
+    if len(text) <= CARD_BODY_MAX:
+        return text
+    return '\n'.join(head) + ('\n' if head else '') + '\n\n'.join('\n'.join(lines) for lines in days.values())
 
 
 def relink_op(text: str, month: str, prev_url: str | None, next_url: str | None) -> str:
@@ -1481,8 +1474,8 @@ def converge_monthly(
     opens a thread when it has none: its OP (`month_op`'s text, under `<title> · runs`, the card under it), linking the
     month before's thread. Each open month then converges: a reply for each finished failed run or run with issues
     (`run_post`, its step alerts folded in, also sent to the channel), one rolling runs reply per ISO week (`week_text`,
-    edited in place, in sections past `SECTION_MAX`), the OP as the site renders it now with the months either side
-    linked; once past its end with no run going, the month closes (the site's closed render: no status line, no card)
+    edited in place, in several sections past 3,000 characters), the OP as the site renders it now with the months
+    either side linked; once past its end with no run going, the month closes (the site's closed render: no status line, no card)
     and its OP is never re-rendered again, only relinked when the next month opens (`relink_op`). `posted` maps each of
     those months' runs to its line's reply (its own reply, else its week's), for `link_threads`. Every post is a
     persisted send intent (`recover`) and every edit is made only when its text changed, so a report with nothing new
@@ -1559,7 +1552,7 @@ def converge_monthly(
             alerts, extra = fold(cfg, slack, r) if fresh else ([], '')
             text, sender = run_post(cfg, r)
             body = text + extra
-            send(f'fail:{m}:{rid}', body, ms['op_ts'], lambda op: slack.post_sections(split(body), ms['op_ts'], op, sender, fresh))
+            send(f'fail:{m}:{rid}', body, ms['op_ts'], lambda op: slack.post_sections(body, ms['op_ts'], op, sender, fresh))
             if alerts:
                 folded(slack, alerts, ms['failures'][rid], 'month thread')
         urls = ms['failure_urls']
@@ -1572,10 +1565,10 @@ def converge_monthly(
         for wk, wruns in weeks.items():
             text = week_text(cfg, wk, wruns, urls)
             if wk not in ms['weeks']:
-                send(f'week:{m}:{wk}', text, ms['op_ts'], lambda op: slack.post_sections(split(text), ms['op_ts'], op, week_sender(cfg, wk)))
+                send(f'week:{m}:{wk}', text, ms['op_ts'], lambda op: slack.post_sections(text, ms['op_ts'], op, week_sender(cfg, wk)))
             elif ms['week_bodies'].get(wk) != text:
                 check()
-                slack.edit_sections(ms['weeks'][wk], split(text))
+                slack.edit_sections(ms['weeks'][wk], text)
                 ms['week_bodies'][wk] = text
                 persist()
             posted.update({r['run']['run_id']: ms['failures'].get(r['run']['run_id']) or ms['weeks'][wk] for r in wruns})
