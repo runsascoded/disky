@@ -33,7 +33,7 @@ import { ReviewPreservation } from './RunPreservation'
 import {
   ATTEMPTED, attemptOnly, LOWER_BOUND, NOT_OBSERVABLE, totalsLowerBound, UNDO_CAVEAT, UNDO_LOG_ONLY,
   type Check, commonBucketPrefix, deletedBuckets, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
-  type PlanSummaryFile, plannedOf, progressEstimate, type ProgressFile, progressFromSamples, runControls, runFileHref, runFilesRel, runLabel, type RunView, sumProgress, type Tally,
+  type PlanSummaryFile, localStamp, plannedOf, progressEstimate, type ProgressFile, progressFromSamples, runControls, runFileHref, runFilesRel, runIdTime, runLabel, type RunView, sumProgress, type Tally,
   expectedOf, undoStatus, verifyRun, viewBuckets, viewLive, viewState, joinRuns,
 } from './runs'
 import { RecoveryUnavailable, RecoveryUnseen, UndoBy, UndoControl, UndoLine } from './RunUndo'
@@ -50,9 +50,10 @@ const rowId = (key: string): string => `run-${key.replace(/[^A-Za-z0-9_-]+/g, '-
 function RunId({ id, href }: { id: string; href?: string }) {
   const [copied, setCopied] = useState(false)
   const copy = () => copyText(id).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) })
+  const dispatched = runIdTime(id)
   return (
     <span className="run-id">
-      <Tooltip content={<code className="elide-full">{id}</code>}>{href ? <Link to={href}><code>{runLabel(id)}</code></Link> : <code>{runLabel(id)}</code>}</Tooltip>
+      <Tooltip content={<><code className="elide-full">{id}</code>{dispatched != null && <div>Dispatched {localStamp(dispatched)}</div>}</>}>{href ? <Link to={href}><code>{runLabel(id)}</code></Link> : <code>{runLabel(id)}</code>}</Tooltip>
       <Tooltip content={copied ? 'Copied ✓' : 'Copy full run ID'}>
         <button type="button" className="run-copy" aria-label="Copy full run ID" onClick={copy}>
           {copied ? <span className="copied">✓</span> : <FaRegCopy aria-hidden />}

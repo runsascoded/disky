@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { planDigest, realRun, type RunRow } from '../functions/_lib/plans'
 import {
   attemptOnly, itemsDigest, reusableDryRun, totalsLowerBound,
-  commonBucketPrefix, deletedBuckets, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, expectedOf, joinRuns, loggedOf, plannedOf, runControls,
-  progressEstimate, type ProgressFile, progressFromSamples, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, undoStatus, verifyRun, viewBuckets, viewState,
+  commonBucketPrefix, deletedBuckets, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, expectedOf, joinRuns, localStamp, loggedOf, plannedOf, runControls,
+  progressEstimate, type ProgressFile, progressFromSamples, runDirHref, runFileHref, runFilesRel, runIdTime, runJobId, runLabel, sumProgress, undoStatus, verifyRun, viewBuckets, viewState,
 } from './runs'
 
 const GCS_JOB = 'gcs-sweep-real-20260928-120000z'
@@ -63,14 +63,14 @@ describe('joinRuns — one row per run (+ its job and ops), then every unrecorde
 
 describe('elapsed / fmtDur / buckets / paths', () => {
   it('elapsed tooltips distinguish recorded executor times from Batch running time', () => {
-    expect(elapsedDetails({ key: 'a', run: run(), job: job({ job_id: GCS_JOB, created: '1970-01-01T00:10:00Z', run_secs: 61 }), ops: [] })).toEqual([
-      'Dispatched: 1970-01-01 00:10:00 UTC',
-      'Executor started: 1970-01-01 00:16:40 UTC',
-      'Executor finished: 1970-01-01 01:23:20 UTC',
+    expect(elapsedDetails({ key: 'a', run: run(), job: job({ job_id: GCS_JOB, created: '1970-01-01T00:10:00Z', run_secs: 61 }), ops: [] }, 'UTC')).toEqual([
+      'Dispatched: Jan 1, 1970, 12:10:00 AM UTC (00:10:00Z)',
+      'Executor started: Jan 1, 1970, 12:16:40 AM UTC (00:16:40Z)',
+      'Executor finished: Jan 1, 1970, 1:23:20 AM UTC (01:23:20Z)',
       'Elapsed is Batch running time, excluding queueing; executor timestamps cover its recorded work.',
     ])
-    expect(elapsedDetails({ key: 'a', run: run({ finished_ts: null }), job: job({ job_id: GCS_JOB, state: 'RUNNING', created: undefined }), ops: [] })).toEqual([
-      'Executor started: 1970-01-01 00:16:40 UTC',
+    expect(elapsedDetails({ key: 'a', run: run({ finished_ts: null }), job: job({ job_id: GCS_JOB, state: 'RUNNING', created: undefined }), ops: [] }, 'UTC')).toEqual([
+      'Executor started: Jan 1, 1970, 12:16:40 AM UTC (00:16:40Z)',
       'Executor still running',
     ])
     expect(elapsedDetails({ key: 'a', job: job({ job_id: GCS_JOB, created: undefined }), ops: [] })).toEqual(['Executor start/end not recorded'])
@@ -85,6 +85,22 @@ describe('elapsed / fmtDur / buckets / paths', () => {
   })
   it('fmtDur', () => {
     expect([fmtDur(59), fmtDur(125), fmtDur(3 * 3600 + 5 * 60), fmtDur(50 * 3600)]).toEqual(['0m', '2m', '3h 05m', '2d 2h'])
+  })
+  it('localStamp: the viewer\'s time, labelled, then UTC (with its date when that differs)', () => {
+    expect([
+      localStamp(1795536484, 'America/New_York'),
+      localStamp(1795575600, 'America/New_York'),
+    ]).toEqual([
+      'Nov 24, 2026, 11:08:04 AM EST (16:08:04Z)',
+      'Nov 24, 2026, 10:00:00 PM EST (2026-11-25 03:00:00Z)',
+    ])
+  })
+  it('runIdTime: the UTC time either run-id family names, else null', () => {
+    expect([
+      runIdTime('cw-sweep-real-20261124-160803z'),
+      runIdTime('2026-10-03-p1/20261004T034042Z'),
+      runIdTime('cw-sweep-real-custom'),
+    ]).toEqual([Date.UTC(2026, 10, 24, 16, 8, 3) / 1000, Date.UTC(2026, 9, 4, 3, 40, 42) / 1000, null])
   })
   it('runLabel: both run-id families at minute precision, else a readable fallback', () => {
     expect([

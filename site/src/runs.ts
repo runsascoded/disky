@@ -161,8 +161,19 @@ export function elapsed(v: RunView, now: number): number | null {
 }
 
 /** Recorded executor timestamps, distinct from Batch runtime and queueing. */
-export function elapsedDetails(v: RunView): string[] {
-  const stamp = (ts: number) => new Date(ts * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC')
+/** A timestamp in the viewer's timezone (`timeZone` overrides it), labelled, then in UTC: `Nov 24, 2026, 11:08:04 AM EST
+ *  (16:08:04Z)`; the UTC side carries its date when that differs from the local one. */
+export function localStamp(ts: number, timeZone?: string): string {
+  const d = new Date(ts * 1000)
+  const opts: Intl.DateTimeFormatOptions = { year: 'numeric', month: 'short', day: 'numeric', timeZone }
+  const local = d.toLocaleString('en-US', { ...opts, hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short' }).replace(/\u202f/g, ' ')
+  const sameDay = d.toLocaleDateString('en-US', opts) === d.toLocaleDateString('en-US', { ...opts, timeZone: 'UTC' })
+  const iso = d.toISOString()
+  return `${local} (${sameDay ? '' : `${iso.slice(0, 10)} `}${iso.slice(11, 19)}Z)`
+}
+
+export function elapsedDetails(v: RunView, timeZone?: string): string[] {
+  const stamp = (ts: number) => localStamp(ts, timeZone)
   const lines: string[] = []
   if (v.job?.created) lines.push(`Dispatched: ${stamp(Date.parse(v.job.created) / 1000)}`)
   if (v.run) {
@@ -184,11 +195,18 @@ export function fmtDur(s: number): string {
 
 /** A run identifier's timestamp at minute precision. Keep the full opaque ID
  * in the UI's tooltip/copy affordance; this is only its compact table label. */
+const runIdStamp = (id: string): RegExpMatchArray | null =>
+  id.match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/) ?? id.match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})z$/)
+
 export function runLabel(id: string): string {
-  const compact = id.match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\d{2}Z$/)
-  const dashed = id.match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}z$/)
-  const m = compact ?? dashed
+  const m = runIdStamp(id)
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}Z` : id.replace(/^[a-z0-9]+-sweep-(dry|real)-/, '')
+}
+
+/** The UTC time a run identifier names (its dispatch), in epoch seconds; null when it names none. */
+export function runIdTime(id: string): number | null {
+  const m = runIdStamp(id)
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000 : null
 }
 
 /** The buckets a run touched: its recorded cut, else its job's; empty = all. */
