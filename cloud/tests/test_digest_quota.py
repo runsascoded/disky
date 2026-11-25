@@ -1011,7 +1011,8 @@ def test_apply_slack_dry_run_hosts_the_plot_only_for_a_plan(tmp_path: Path, monk
 
 def test_edit_desired_is_what_edit_sends():
     """`edit_desired`: a body as `SlackClient.edit` sends it, as a rewrite `Desired`: the markdown converted to
-    mrkdwn; trailing image lines lifted to image blocks under a section of that text; the sender unset (kept)."""
+    mrkdwn; trailing image lines lifted to image blocks under that text's sections (split at blank lines past 3,000 chars); the
+    sender unset (kept)."""
     from thrds.rewrite import Desired
 
     assert E.edit_desired("[main](https://x.test/d): 78.4% of 1P") == Desired("<https://x.test/d|main>: 78.4% of 1P")
@@ -1022,9 +1023,15 @@ def test_edit_desired_is_what_edit_sends():
             {"type": "image", "image_url": "https://abc123.plots.pages.dev/plot-1.png?v=3", "alt_text": "plot"},
         ],
     )
+    a, b = "a" * 2000, "b" * 1500
+    assert E.edit_desired(f"{a}\n\n{b}\n\n![plot](https://abc123.plots.pages.dev/plot-1.png?v=3)").blocks == [
+        {"type": "section", "text": {"type": "mrkdwn", "text": a}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": b}},
+        {"type": "image", "image_url": "https://abc123.plots.pages.dev/plot-1.png?v=3", "alt_text": "plot"},
+    ]
     with pytest.raises(ValueError) as e:
         E.edit_desired("![plot](https://abc123.plots.pages.dev/plot-1.png?v=3)")
-    assert str(e.value) == "digest: a body with image blocks needs 1–3000 chars of text, not 0"
+    assert str(e.value) == "digest: a body with image blocks needs text above them"
 
 
 def test_rewrite_plan_edits_each_change_keeping_its_sender():

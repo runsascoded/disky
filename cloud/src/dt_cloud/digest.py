@@ -1362,13 +1362,14 @@ def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, 
 
 def edit_desired(body: str):
     """``body`` (the digest's markdown) as `SlackClient.edit(ts, body)` sends it, as a thrds rewrite ``Desired``: the
-    trailing `![alt](url)` lines lifted to image blocks under a section of the converted text, else the text alone
+    trailing `![alt](url)` lines lifted to image blocks under the converted text's sections (`section_blocks`: one, or
+    several split at blank lines past Slack's 3,000-char section limit), else the text alone
     (an edit then clears the blocks, as `edit` does). The sender is left unset, so the message keeps its own: a
     sender-variant reply plans as an ``edit``, never a ``repost``."""
     from thrds.imageblock import bust_token, is_upload_ref, split_trailing_images, to_block
     from thrds.mrkdwn import to_slack
     from thrds.rewrite import Desired
-    from thrds.slack import SLACK_SECTION_LIMIT
+    from thrds.slack import section_blocks
 
     text, refs = split_trailing_images(body)
     wire = to_slack(text)
@@ -1376,10 +1377,10 @@ def edit_desired(body: str):
         return Desired(wire)
     if any(is_upload_ref(r) for r in refs):
         raise ValueError("digest: a rewrite plan can't carry an image to upload; the digest's images are hosted URLs")
-    if not wire.strip() or len(wire) > SLACK_SECTION_LIMIT:
-        raise ValueError(f"digest: a body with image blocks needs 1–{SLACK_SECTION_LIMIT} chars of text, not {len(wire)}")
+    if not wire.strip():
+        raise ValueError("digest: a body with image blocks needs text above them")
     token = bust_token()
-    return Desired(wire, blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": wire}}, *(to_block(r, token) for r in refs)])
+    return Desired(wire, blocks=[*section_blocks(wire), *(to_block(r, token) for r in refs)])
 
 
 def rewrite_plan(found: Iterable[Any], changes: Iterable[Change], have: Collection[str] | None = None):

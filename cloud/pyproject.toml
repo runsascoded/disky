@@ -16,7 +16,7 @@ dependencies = [
     # editable image blocks, per-message sender, `reply_broadcast` for the quota alert, attached-file plots: `upload`, `replace_files`; bulk rewrite: `thrds.rewrite`, the digest re-apply's `--plan`).
     # GitHub tarball (not git+…) so `pip install ./marin` works in the git-less
     # python:slim image. Bump the SHA to update.
-    "thrds @ https://github.com/Open-Athena/thrds/archive/46740922d974cfcda7d1392fc4523ad4fd25b781.tar.gz",
+    "thrds @ https://github.com/Open-Athena/thrds/archive/ac9d235e841686430497b6e5e19126ca9c850869.tar.gz",
     # The shared engine: `dt_cloud` builds on `disk_tree` (listing normalization,
     # aggregation, backends). Workspace member of the parent repo (one lockfile;
     # specs/done/union-of-roots.md). The `gcs` + `s3` extras are what the overlay's
