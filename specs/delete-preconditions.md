@@ -81,7 +81,7 @@ Steps 1–2 are implemented locally and covered by listing/import, IS build/appe
 
 ## 6. Open
 
-- R2: verify actual `If-Match` enforcement with an owned canary (`plan-sweep canary` against R2's endpoint) before deploying conditional execution. CAIOS: done 2026-11-24, both forms enforced; the canary now also probes multipart ETags and a stale item beside a current one in one `DeleteObjects` call. Never probe a wrong validator against a real staged object that must survive.
+- R2: verify actual `If-Match` enforcement with an owned canary (`plan-sweep canary` against R2's endpoint) before deploying conditional execution. CAIOS: done 2026-11-24, both forms enforced; on 2026-11-25 (`cw-sweep-canary-20261125-033255`, marin-us-west-04a) also multipart ETags and a stale item beside a current one in one `DeleteObjects` call: all four probes enforced, nothing left behind. Never probe a wrong validator against a real staged object that must survive.
 - HF purge flow (§4): squash vs per-`oid` purge, and the reference check.
 - Whether the IS should also keep `mtime` per version for the §3 flag (it keeps `mtime` already as the version's `wts`/`d`; confirm it's the store's `updated`, not `created`).
 
