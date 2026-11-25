@@ -90,6 +90,49 @@ On the month's last report, or the first one of the next month:
   - Rec: at close, render the PNG once and publish it beside the digest's plots (`digest.pages_deploy`'s Pages project, a content-addressed path).
   - The alternative is a non-expiring signature for a closed month's card (the content is fixed once the month ends). That leaves a permanent public URL to the run data.
 
+### As built (phase 2)
+
+**Config:** `nominal.monthly: true` (`Config.monthly`, default false). Off, nothing changes. On, `nominal.run` converges `converge_monthly` instead of the status threads, `pin` pins the newest month's OP (`pin_month`), and the canvas links that thread. Every other key keeps its meaning: `senders`, `emoji`, `icons`, `badges`, `card`, `color`, `pin`, `canvas`. `group` and `quiet` only apply to the status threads.
+
+**State** (the same `state.json` under the same lease):
+
+```
+months: {YYYY-MM: {op_ts, op_url, op_text, op_card, prev_url, next_url, closed,
+                   weeks: {iso_week: ts}, week_bodies: {iso_week: text},
+                   failures: {run_id: ts}, failure_urls: {run_id: permalink}}}
+since:  the first monthly report's time
+posted: {run_id: ts}   the reply each open month's run's line is in, for `link_threads`
+status_thread: ts      the last status head, after the cutover
+```
+
+The brief's shape plus the text last written to each message (`op_text` without its card, `op_card`, `week_bodies`) and the failure replies' permalinks. Those make an edit happen only when its text changed, so a re-run with nothing new makes no Slack writes. Posts are persisted send intents keyed `op:<month>`, `week:<month>:<iso week>` and `fail:<month>:<run id>`, recovered by their metadata as the status threads' are (`recover`, factored out of `converge`).
+
+**Each report:**
+1. If the newest run's month has no thread, it opens. The OP comes from `POST /api/scan-runs/month-op` (`site_month_op`, the job's grant, `?store=`, body `{month, prev_url, next_url, color?, emoji?}`), is posted under `<title> · runs` (`Config.sender('runs')`), and carries the card when the route signs one (`signed_card`: only the site's own `/og/deploy.png`).
+2. Each open month then converges, in this order:
+   - Failure replies: one for each finished `failed` or `issues` run, as `run_post` (under `run_sender`) with its step alerts folded in (`fold`; each alert is left as a pointer to the "month thread"). Each is posted with `reply_broadcast`.
+   - Weekly replies: one per ISO week, under `wk of MM/DD · runs` with the app's icon (`week_sender`). Each holds `trail`'s line format, oldest first, a live run's `⏳ running` line in place, and a failed run's line ending ` · [reply](…)`. A reply always posts as `section` blocks (`Transport.post_sections` / `edit_sections`), split by lines into sections of at most 2,900 characters (`split`, `SECTION_MAX`): one message.
+   - The OP, re-requested with the months either side's permalinks and edited if its text changed. A new card alone isn't an edit: the signed URL changes on every request.
+3. A month closes when the report's time is past its end and none of its runs is still going. The OP's last edit is the route's closed render: no status line and no card (`card_url` is null). After that the OP is never requested again.
+4. When the next month's thread opens, a closed month's OP gains `→ <Month>`. This only rewrites its link line (`relink_op`, in `digest.month_links`' format), so its figures stay as posted. A month still open at that point gets the link in its own closing render.
+5. `posted` maps the open months' runs to their line's reply (a failed run's own reply, else its week's), and `link_threads` writes `scan_runs.thread_url` from it unchanged.
+
+**Cutover** (the first report with no `months` in the state, `cutover_start` → `finish_legacy`):
+- The status threads' state is set aside, keeping the pin, the canvas and `linked`.
+- The month thread opens and is seeded with every run of the month in the ledger.
+- The open status head gets a final edit: its text as last written, without its card, plus `Runs now report in the monthly thread: [November 2026](…).` A closed head is left as it ended.
+- A quiet thread's rolling reply loses its `⏳` lines, and every `⏳` reply is deleted.
+- Each run's `thread_url` moves to its line's reply (`linked` remembers the old one, so only moved runs are written). The pin moves from the old head to the OP.
+
+**Alerts:** with `monthly`, a run's `fail` alerts always wait for the report (`defers_failures`, whatever `group` is). They post top-level only if the run has no failure reply (`report_job`).
+
+**Deviations from the spec:**
+- The seeded failures' replies (runs that ended more than an hour, `SEED_GRACE`, before the cutover) aren't sent to the channel and fold no alerts: the status threads already reported them. The report that cuts over may be a failed run's own end, which is still sent.
+- A month stays open past its end while a run that started in it is still going. Its OP shows the closed render with that run counted as running, and the month closes on the report after the run ends, not on the first report of the next month.
+- The previous month's `→` link reuses the digest's link format (`month_links`) but not its `relink`. The digest's version reads the OP back from Slack through a thrds rewrite plan. nominal keeps the text it posted, so it rewrites that.
+- `prev_url` links only the calendar month before (the route labels it so): a month with no runs leaves no thread and no link.
+- The closed-month card isn't built (TODO in Phases).
+
 ## The fleet message
 
 `#disky-admin`'s fleet post (the `fleet/` app, disky.oa.dev) keeps its status strip.
@@ -110,7 +153,8 @@ On the month's last report, or the first one of the next month:
 ## Phases
 
 1. Site: `POST /api/scan-runs/month-op` (renderer in pages-kit), `/admin/slack` preview, tests. The route, renderer and tests are built (above); the `/admin/slack` preview is still to do.
-2. `nominal`: monthly mode behind `nominal.monthly`, with OP, weekly replies, failure replies, pin, relink, close and cutover. Tests: the state machine over a fixture month, cutover from a quiet thread and from a failure thread, closing the month, idempotent re-runs.
+2. `nominal`: monthly mode behind `nominal.monthly`, with OP, weekly replies, failure replies, pin, relink, close and cutover. Tests: the state machine over a fixture month, cutover from a quiet thread and from a failure thread, closing the month, idempotent re-runs. Built (below, "As built (phase 2)"), except the closed month's card.
+   - TODO(spec): the closed-month card. At close, render the PNG once and publish it beside the digest's plots (content-addressed, per Decisions); until then a closed OP has no card.
 3. Canary on hf and r2, then cw and gcs.
 4. Fleet: the per-deployment reply uses the shared renderer and links the month thread.
 5. Remove the status-thread code.

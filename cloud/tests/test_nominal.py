@@ -57,9 +57,20 @@ class Slack:
             raise TimeoutError('response lost after Slack accepted the post')
         return ts
 
+    def post_sections(self, sections, parent, operation, sender=None, broadcast=False):
+        """As Slack's: one message of `section` blocks, its text their join; `broadcast` (`reply_broadcast`) kept on it."""
+        try:
+            return self.post('\n'.join(sections), parent, operation, sender)
+        finally:  # a lost response (`timeout`) still leaves the message as posted
+            self.messages_by_id[next(reversed(self.messages_by_id))].update(sections=list(sections), broadcast=broadcast)
+
     def edit(self, ts, body):
         self.calls.append(('edit', ts, body))
         self.messages_by_id[ts]['text'] = body
+
+    def edit_sections(self, ts, sections):
+        self.edit(ts, '\n'.join(sections))
+        self.messages_by_id[ts]['sections'] = list(sections)
 
     def delete(self, ts):
         """As Slack's: a message already gone is not an error."""
@@ -1576,3 +1587,385 @@ def test_a_preview_shows_the_heads_card_and_asks_the_site_for_it(tmp_path, monke
     asked.clear()
     assert N.run(asdict(replace(cfg, card=False)), {'SITE_TOKEN': 'viewer'}, 'project') == f'{QUIET_HEAD}\n\n+++\n\n{TRAIL}'
     assert asked == ['/api/scan-runs?store=primary&emoji=1']
+
+
+# Monthly threads (specs/admin-monthly-thread.md, `Config.monthly`)
+
+MONTHLY = replace(SENT, monthly=True)
+#: November 2026's end: its last report, or December's first, closes it
+END = int(N.month_end('2026-11'))
+F1 = row(1, 'failed', failed_phase='index', error='boom')
+
+
+def week(monday):
+    """A weekly runs reply's sender: its ISO week's Monday, under the app's own icon."""
+    return {'username': f'wk of {monday} · runs'}
+
+
+class Site:
+    """The site's `POST /api/scan-runs/month-op` over the ledger `rows` as of `now`, as `MonthOp`: a status line (an open
+    month's only), the month's run count and runs going, the months either side linked as the route's `linkLine`
+    writes them (`digest.month_links`), and an open month's card."""
+
+    def __init__(self):
+        self.rows, self.now, self.calls = [], 0, []
+
+    def __call__(self, month, prev_url, next_url):
+        from datetime import date
+
+        from dt_cloud.digest import month_links
+
+        self.calls.append((month, prev_url, next_url))
+        runs = [r for r in self.rows if N.month_of(r) == month]
+        going = sum(N.live(r) for r in runs)
+        closed = self.now >= N.month_end(month)
+        count = f"{N.month_name(month).split()[0] if closed else 'This month'}: {len(runs)} runs" + (f' · {going} running' if going else '')
+        links = month_links(date(int(month[:4]), int(month[5:]), 1), prev_url, next_url)
+        return '\n'.join([*([] if closed else ['status']), count, *([links] if links else [])]), None if closed else CARD1
+
+
+class Monthly:
+    """`converge_monthly` over the fake Slack (`Pins` unless given) and the fake site, at a given time."""
+
+    def __init__(self, cfg=MONTHLY, slack=None, saved=None):
+        self.cfg, self.slack, self.site = cfg, slack or Pins(), Site()
+        self.saved = deepcopy(saved) if saved else {'namespace': cfg.namespace}
+
+    def save(self, value):
+        self.saved = deepcopy(value)
+
+    def run(self, rows, at):
+        self.site.rows, self.site.now = rows, at
+        return N.converge_monthly(self.cfg, rows, deepcopy(self.saved), self.slack, self.save, lambda: None, self.site, now=lambda: at)
+
+
+def thread(slack):
+    """Each call since the last, then forgets them: a post as `(post, ts, parent, sender, text, broadcast)`, an edit as
+    `(edit, ts, text)`, a delete as `(delete, ts, None)`, a pin as `(pin, ts)`."""
+    out = [('post', c[1], c[2], slack.senders[c[1]], c[3], slack.messages_by_id.get(c[1], {}).get('broadcast', False)) if c[0] == 'post'
+           else tuple(c) for c in slack.calls]
+    slack.calls.clear()
+    return out
+
+
+def as_pins(slack, *pinned):
+    """`slack`'s messages in a `Pins` fake, with `pinned` pinned."""
+    out = Pins()
+    out.messages_by_id, out.deleted, out.senders, out.pinned = slack.messages_by_id, slack.deleted, slack.senders, list(pinned)
+    return out
+
+
+def test_monthly_is_off_by_default_and_must_be_a_boolean():
+    assert (SENT.monthly, MONTHLY.monthly) == (False, True)
+    with pytest.raises(ValueError, match='nominal.monthly: true or false'):
+        N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', monthly='yes'))
+
+
+def test_months_and_iso_weeks():
+    assert [N.month_of(row(0)), N.month_of(row(30)), N.prior('2026-01'), N.following('2026-12'), N.month_name('2026-11')] == [
+        '2026-11', '2026-12', '2025-12', '2027-01', 'November 2026']
+    assert (END, int(N.month_end('2026-12'))) == (int(datetime(2026, 12, 1, tzinfo=timezone.utc).timestamp()),
+                                                 int(datetime(2027, 1, 1, tzinfo=timezone.utc).timestamp()))
+    # 11/01 is a Sunday: its ISO week began in October
+    assert [(N.week_of(row(i)), N.week_label(N.week_of(row(i)))) for i in (0, 1, 7, 8, 29, 30)] == [
+        ('2026-W44', 'wk of 10/26'), ('2026-W45', 'wk of 11/02'), ('2026-W45', 'wk of 11/02'), ('2026-W46', 'wk of 11/09'),
+        ('2026-W49', 'wk of 11/30'), ('2026-W49', 'wk of 11/30')]
+
+
+def test_a_month_thread_opens_on_its_first_run_and_keeps_a_reply_a_week_and_one_a_failure():
+    """The month's first report posts its OP (under `<title> · runs`, the card under it) and its week's runs reply; each
+    later report edits them; a failure gets its own reply, also sent to the channel, which its week's line links."""
+    m = Monthly()
+    m.run([row(0, 'running', finished_ts=None)], T0 + 10)
+    assert thread(m.slack) == [
+        ('post', '1.0', None, RUNS, 'status\nThis month: 1 runs · 1 running' + card_line(CARD1, '11/01 08:00Z'), False),
+        ('post', '2.0', '1.0', week('10/26'), '⏳ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · running', False),
+    ]
+    # the OP is asked for twice: to post it, then as every open month's is each report (unchanged here: no edit)
+    assert m.site.calls == [('2026-11', None, None), ('2026-11', None, None)]
+    m.run([row(0)], T0 + 120)
+    assert thread(m.slack) == [
+        ('edit', '2.0', '✅ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s'),
+        ('edit', '1.0', 'status\nThis month: 1 runs' + card_line(CARD1, '11/01 08:00Z')),
+    ]
+    m.run([row(1, 'running', finished_ts=None), row(0)], T0 + 86400 + 10)
+    assert thread(m.slack) == [
+        ('post', '3.0', '1.0', week('11/02'), '⏳ :alarm_clock: [11/02 08:00Z](https://site.test/scans/r1) · running', False),
+        ('edit', '1.0', 'status\nThis month: 2 runs · 1 running' + card_line(CARD1, '11/02 08:00Z')),
+    ]
+    writes = []
+    N.link_threads(m.saved, m.slack, writes.append, m.save)
+    assert writes == [[('r0', 'https://slack.test/p2.0'), ('r1', 'https://slack.test/p3.0')]]
+    m.run([F1, row(0)], T0 + 86400 + 120)
+    assert thread(m.slack) == [
+        ('post', '4.0', '1.0', {'username': '11/02 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'},
+         ':alarm_clock: [record](https://site.test/scans/r1) · boom', True),
+        ('edit', '3.0', '❌ :alarm_clock: [11/02 08:00Z](https://site.test/scans/r1) · 1m 00s · failed in index: boom · [reply](https://slack.test/p4.0)'),
+        ('edit', '1.0', 'status\nThis month: 2 runs' + card_line(CARD1, '11/02 08:00Z')),
+    ]
+    assert m.saved == {
+        'namespace': MONTHLY.namespace, 'since': T0 + 10, 'posted': {'r0': '2.0', 'r1': '4.0'}, 'linked': {'r0': '2.0', 'r1': '3.0'},
+        'months': {'2026-11': {
+            'op_ts': '1.0', 'op_url': 'https://slack.test/p1.0', 'op_text': 'status\nThis month: 2 runs', 'op_card': True,
+            'prev_url': None, 'next_url': None,
+            'weeks': {'2026-W44': '2.0', '2026-W45': '3.0'},
+            'week_bodies': {'2026-W44': '✅ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s',
+                            '2026-W45': '❌ :alarm_clock: [11/02 08:00Z](https://site.test/scans/r1) · 1m 00s · failed in index: boom · [reply](https://slack.test/p4.0)'},
+            'failures': {'r1': '4.0'}, 'failure_urls': {'r1': 'https://slack.test/p4.0'},
+        }},
+    }
+    # the failed run's link moves from its week's reply to its own
+    N.link_threads(m.saved, m.slack, writes.append, m.save)
+    assert writes[1:] == [[('r1', 'https://slack.test/p4.0')]]
+    # nothing new: no Slack writes
+    m.run([F1, row(0)], T0 + 86400 + 120)
+    assert thread(m.slack) == []
+
+
+def test_a_month_posts_lost_response_is_recovered_not_posted_again():
+    m = Monthly()
+    m.run([row(0)], T0 + 120)
+    m.slack.calls.clear()
+    m.slack.timeout = True
+    with pytest.raises(TimeoutError, match='response lost after Slack accepted the post'):
+        m.run([F1, row(0)], T0 + 86400 + 120)
+    assert m.saved['pending']['key'] == 'fail:2026-11:r1'
+    m.run([F1, row(0)], T0 + 86400 + 120)
+    assert [c[:2] for c in m.slack.calls] == [('post', '3.0'), ('post', '4.0'), ('edit', '1.0')]
+    assert (m.saved['months']['2026-11']['failures'], m.slack.messages_by_id['3.0']['broadcast'], 'pending' in m.saved) == ({'r1': '3.0'}, True, False)
+
+
+def test_a_weeks_runs_reply_past_a_sections_limit_is_one_message_of_several_sections():
+    """cw's 4 runs a day pass a `section`'s 3,000 characters within a week: one reply, in several sections."""
+    assert (N.SECTION_MAX, N.split('aa\nbb\ncc', limit=5), N.split('abcdefgh', limit=5)) == (2900, ['aa\nbb', 'cc'], ['abcd…'])
+    runs = [row(1, run_id=f'h{k:02d}', started_ts=T0 + 86400 + 3600 * k, finished_ts=T0 + 86400 + 3600 * k + 60) for k in range(48)]
+    lines = [N.reply(MONTHLY, r) for r in runs]
+    # 42 lines of 68 characters fit 2,900 (42 × 68 + 41 = 2,897)
+    assert (lines[0], {len(line) for line in lines}) == ('✅ :alarm_clock: [11/02 08:00Z](https://site.test/scans/h00) · 1m 00s', {68})
+    m = Monthly()
+    m.run(runs[29::-1], T0 + 86400 + 3600 * 29 + 120)
+    assert [(c[0], c[1]) for c in m.slack.calls] == [('post', '1.0'), ('post', '2.0')]
+    assert m.slack.messages_by_id['2.0']['sections'] == ['\n'.join(lines[:30])]
+    m.slack.calls.clear()
+    m.run(runs[::-1], T0 + 86400 + 3600 * 47 + 120)
+    assert thread(m.slack) == [
+        ('edit', '2.0', '\n'.join(lines)),
+        ('edit', '1.0', 'status\nThis month: 48 runs' + card_line(CARD1, '11/04 07:00Z')),
+    ]
+    assert m.slack.messages_by_id['2.0']['sections'] == ['\n'.join(lines[:42]), '\n'.join(lines[42:])]
+    m.run(runs[::-1], T0 + 86400 + 3600 * 47 + 120)
+    assert thread(m.slack) == []
+
+
+def test_the_next_months_first_report_opens_it_closes_the_last_and_links_both_ways():
+    """December's first run opens its thread linking November's; November, past its end with no run going, is closed:
+    its OP rendered once more by the site (no status line, no card) linking December, then frozen. The pin moves."""
+    m = Monthly()
+    m.run([row(0)], T0 + 120)
+    N.pin_month(m.saved, m.slack, m.save)
+    thread(m.slack)
+    d0 = row(30, 'running', finished_ts=None)
+    m.site.calls.clear()
+    m.run([d0, row(0)], T0 + 30 * 86400 + 10)
+    assert thread(m.slack) == [
+        ('post', '3.0', None, RUNS, 'status\nThis month: 1 runs · 1 running\n[← November](https://slack.test/p1.0)' + card_line(CARD1, '12/01 08:00Z'), False),
+        ('edit', '1.0', 'November: 1 runs\n[December →](https://slack.test/p3.0)'),
+        ('post', '4.0', '3.0', week('11/30'), '⏳ :alarm_clock: [12/01 08:00Z](https://site.test/scans/r30) · running', False),
+    ]
+    assert m.site.calls == [('2026-12', 'https://slack.test/p1.0', None), ('2026-11', None, 'https://slack.test/p3.0'),
+                            ('2026-12', 'https://slack.test/p1.0', None)]
+    assert m.saved['months']['2026-11'] == {
+        'op_ts': '1.0', 'op_url': 'https://slack.test/p1.0', 'op_text': 'November: 1 runs\n[December →](https://slack.test/p3.0)', 'op_card': False,
+        'prev_url': None, 'next_url': 'https://slack.test/p3.0', 'closed': True,
+        'weeks': {'2026-W44': '2.0'}, 'week_bodies': {'2026-W44': '✅ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s'},
+        'failures': {}, 'failure_urls': {},
+    }
+    assert m.saved['posted'] == {'r0': '2.0', 'r30': '4.0'}
+    N.pin_month(m.saved, m.slack, m.save)
+    assert (thread(m.slack), m.slack.pinned, m.saved['pinned']) == ([('join',), ('pin', '3.0'), ('unpin', '1.0')], ['3.0'], '3.0')
+    # a closed month is never asked for again
+    m.site.calls.clear()
+    m.run([d0, row(0)], T0 + 30 * 86400 + 10)
+    N.pin_month(m.saved, m.slack, m.save)
+    assert (thread(m.slack), m.site.calls, m.saved['posted']) == ([], [('2026-12', 'https://slack.test/p1.0', None)], {'r30': '4.0'})
+
+
+def test_a_month_closes_once_its_last_run_ends_and_is_relinked_when_the_next_opens():
+    """A run going at the month's end keeps it open (the site draws the closed month, the run still going); its end
+    closes it. December's first report then edits only November's link line: a closed OP is never rendered again."""
+    m = Monthly()
+    r29 = row(29, 'running', finished_ts=None)
+    m.run([r29], T0 + 29 * 86400 + 10)
+    assert [(c[0], c[1]) for c in m.slack.calls] == [('post', '1.0'), ('post', '2.0')]
+    m.slack.calls.clear()
+    m.run([r29], END + 600)
+    assert (thread(m.slack), m.saved['months']['2026-11'].get('closed')) == ([('edit', '1.0', 'November: 1 runs · 1 running')], None)
+    done = row(29, finished_ts=END + 2400)
+    m.run([done], END + 2410)
+    assert thread(m.slack) == [
+        ('edit', '2.0', '✅ :alarm_clock: [11/30 08:00Z](https://site.test/scans/r29) · 1m 00s'),
+        ('edit', '1.0', 'November: 1 runs'),
+    ]
+    assert m.saved['months']['2026-11']['closed'] is True
+    m.site.calls.clear()
+    d0 = row(30, 'running', finished_ts=None)
+    m.run([d0, done], T0 + 30 * 86400 + 10)
+    assert thread(m.slack) == [
+        ('post', '3.0', None, RUNS, 'status\nThis month: 1 runs · 1 running\n[← November](https://slack.test/p1.0)' + card_line(CARD1, '12/01 08:00Z'), False),
+        ('post', '4.0', '3.0', week('11/30'), '⏳ :alarm_clock: [12/01 08:00Z](https://site.test/scans/r30) · running', False),
+        ('edit', '1.0', 'November: 1 runs\n[December →](https://slack.test/p3.0)'),
+    ]
+    assert m.site.calls == [('2026-12', 'https://slack.test/p1.0', None), ('2026-12', 'https://slack.test/p1.0', None)]
+    assert (m.saved['months']['2026-11']['next_url'], m.saved['months']['2026-11']['op_text']) == (
+        'https://slack.test/p3.0', 'November: 1 runs\n[December →](https://slack.test/p3.0)')
+    m.run([d0, done], T0 + 30 * 86400 + 10)
+    assert thread(m.slack) == []
+    assert N.relink_op('November: 1 runs\n[← October](https://slack.test/p0.0)', '2026-11', 'https://slack.test/p0.0', 'https://slack.test/p3.0') == (
+        'November: 1 runs\n[← October](https://slack.test/p0.0) · [December →](https://slack.test/p3.0)')
+
+
+def test_the_cutover_from_a_quiet_thread_links_it_seeds_the_month_and_repoints_its_runs():
+    """A deployment's first monthly report: the month thread opens with this month's runs so far (a failure already
+    reported in the status threads gets its reply, not sent to the channel again); the open status thread's head gets a
+    last edit linking it, its rolling reply loses the runs going now; the pin moves; each run's link moves to its line's
+    reply."""
+    w = quiet_running_writer()
+    writes = []
+    N.link_threads(w.saved, w.slack, writes.append, w.save)
+    assert writes == [[('r1', 'https://slack.test/p2.0'), ('r2', 'https://slack.test/p2.0')]]
+    head = w.saved['parent_body']
+    assert head == QUIET_HEAD.replace('Latest 2 runs', 'Running now: [11/04 08:00Z](https://site.test/scans/r3).\n\nLatest 2 runs')
+    m = Monthly(slack=as_pins(w.slack, '1.0'), saved={**w.saved, 'pinned': '1.0'})
+    rows = [row(3, 'running', finished_ts=None, **ADA), *history(2)]
+    m.run(rows, T0 + 3 * 86400 + 10)
+    assert thread(m.slack) == [
+        ('post', '3.0', None, RUNS, 'status\nThis month: 4 runs · 1 running' + card_line(CARD1, '11/04 08:00Z'), False),
+        ('edit', '1.0', head + '\n\nRuns now report in the monthly thread: [November 2026](https://slack.test/p3.0).'),
+        ('edit', '2.0', TRAIL),
+        ('post', '4.0', '3.0', {'username': '11/01 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}, ':alarm_clock: [record](https://site.test/scans/r0)', False),
+        ('post', '5.0', '3.0', week('10/26'), '❌ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s · failed · [reply](https://slack.test/p4.0)', False),
+        ('post', '6.0', '3.0', week('11/02'), f'{TRAIL}\n{R3_RUNNING}', False),
+    ]
+    assert (sorted(m.saved), m.saved['status_thread'], m.saved['posted']) == (
+        ['linked', 'months', 'namespace', 'pinned', 'posted', 'since', 'status_thread'], '1.0',
+        {'r0': '4.0', 'r1': '6.0', 'r2': '6.0', 'r3': '6.0'})
+    N.pin_month(m.saved, m.slack, m.save)
+    assert (thread(m.slack), m.slack.pinned) == ([('join',), ('pin', '3.0'), ('unpin', '1.0')], ['3.0'])
+    N.link_threads(m.saved, m.slack, writes.append, m.save)
+    assert writes[1:] == [[('r0', 'https://slack.test/p4.0'), ('r1', 'https://slack.test/p6.0'), ('r2', 'https://slack.test/p6.0'),
+                           ('r3', 'https://slack.test/p6.0')]]
+    m.run(rows, T0 + 3 * 86400 + 10)
+    N.pin_month(m.saved, m.slack, m.save)
+    assert thread(m.slack) == []
+
+
+def test_the_cutover_from_a_failure_thread_finishes_it_and_a_new_failure_folds_its_alerts_into_its_reply():
+    """The failure thread's head links the month thread and its ⏳ reply goes (the week's runs reply lists the run); each
+    of the month's failures gets its reply. A failure after the cutover is news: its reply carries its step alerts
+    (each left a pointer to it) and is also sent to the channel."""
+    w = red_writer()
+    w.run([row(4, 'running', finished_ts=None), F3, *history(2)])
+    assert w.saved['running'] == {'r4': {'ts': '5.0', 'parent': '3.0'}}
+    head = w.saved['parent_body']
+    w.slack.calls.clear()
+    m = Monthly(slack=w.slack, saved=w.saved)
+    m.run([row(4, 'running', finished_ts=None), F3, *history(2)], T0 + 4 * 86400 + 10)
+    f3 = '❌ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom · [reply](https://slack.test/p8.0)'
+    assert thread(m.slack) == [
+        ('post', '6.0', None, RUNS, 'status\nThis month: 5 runs · 1 running' + card_line(CARD1, '11/05 08:00Z'), False),
+        ('edit', '3.0', head + '\n\nRuns now report in the monthly thread: [November 2026](https://slack.test/p6.0).'),
+        ('delete', '5.0', None),
+        ('post', '7.0', '6.0', {'username': '11/01 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}, ':alarm_clock: [record](https://site.test/scans/r0)', False),
+        ('post', '8.0', '6.0', {'username': '11/04 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'}, ':ada: [record](https://site.test/scans/r3) · boom', False),
+        ('post', '9.0', '6.0', week('10/26'), '❌ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s · failed · [reply](https://slack.test/p7.0)', False),
+        ('post', '10.0', '6.0', week('11/02'), f'{TRAIL}\n{f3}\n⏳ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · running', False),
+    ]
+    assert (sorted(m.saved), m.saved['status_thread'], m.saved['posted']) == (
+        ['months', 'namespace', 'posted', 'since', 'status_thread'], '3.0', {'r0': '7.0', 'r1': '10.0', 'r2': '10.0', 'r3': '8.0', 'r4': '10.0'})
+    link = 'https://site.test/scans/r4'
+    alert = m.slack.top_alert(link, f'*⚠️ Test scans 2026-11-05T0800*\nprobe failed (exit 1): 4 failed\n<https://logs.test/u2|task logs> · <{link}|scan>')
+    assert alert == '11.0'
+    r4 = row(4, issues=[{'phase': 'probe'}])
+    m.run([r4, F3, *history(2)], T0 + 4 * 86400 + 120)
+    assert thread(m.slack) == [
+        ('post', '12.0', '6.0', {'username': '11/05 08:00Z · 1m 00s · phase issues: probe', 'icon_emoji': ':warning:'},
+         ':alarm_clock: [record](https://site.test/scans/r4)\nprobe failed (exit 1): 4 failed · [task logs](https://logs.test/u2)', True),
+        ('edit', '11.0', '↪ ⚠️ Test scans 2026-11-05T0800: in the [month thread](https://slack.test/p12.0)'),
+        ('edit', '10.0', f'{TRAIL}\n{f3}\n⚠️ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s · phase issues: probe · [reply](https://slack.test/p12.0)'),
+        ('edit', '6.0', 'status\nThis month: 5 runs' + card_line(CARD1, '11/05 08:00Z')),
+    ]
+    m.run([r4, F3, *history(2)], T0 + 4 * 86400 + 120)
+    assert thread(m.slack) == []
+
+
+def test_the_month_op_is_asked_of_the_site_as_the_job_and_its_card_taken_only_as_the_sites(monkeypatch):
+    import json
+
+    from dt_cloud import site
+
+    asked = []
+    answers = iter([{'text': 'T', 'card_url': CARD1}, {'text': 'T', 'card_url': 'https://evil.test/og/deploy.png?v=1'},
+                    {'text': 'C', 'card_url': None}, {'text': 'T', 'card_url': CARD1}])
+
+    def post_json(url, token, path, body):
+        asked.append((url, token, path, body))
+        return json.dumps(next(answers)).encode()
+    monkeypatch.setattr(site, 'post_json', post_json)
+    cfg = replace(MONTHLY, store='meta', color='#12ab34', emoji=(('clean', '🟢'),))
+    call = N.site_month_op(cfg, 'grant')
+    assert [call('2026-11', None, None), call('2026-11', 'https://slack.test/p1.0', None), call('2026-10', None, 'https://slack.test/p3.0'),
+            N.site_month_op(replace(MONTHLY, card=False), 'grant')('2026-11', None, None)] == [('T', CARD1), ('T', None), ('C', None), ('T', None)]
+    asks = {'color': '#12ab34', 'emoji': {'clean': '🟢'}}
+    assert asked == [
+        ('https://site.test', 'grant', '/api/scan-runs/month-op?store=meta', {'month': '2026-11', 'prev_url': None, 'next_url': None, **asks}),
+        ('https://site.test', 'grant', '/api/scan-runs/month-op?store=meta', {'month': '2026-11', 'prev_url': 'https://slack.test/p1.0', 'next_url': None, **asks}),
+        ('https://site.test', 'grant', '/api/scan-runs/month-op?store=meta', {'month': '2026-10', 'prev_url': None, 'next_url': 'https://slack.test/p3.0', **asks}),
+        ('https://site.test', 'grant', '/api/scan-runs/month-op?store=primary', {'month': '2026-11', 'prev_url': None, 'next_url': None}),
+    ]
+
+
+def test_a_monthly_preview_shows_what_the_month_would_post_and_a_report_converges_and_links_it(tmp_path, monkeypatch):
+    import json
+
+    from dt_cloud import probe, site
+
+    cfg = replace(MONTHLY, state=str(tmp_path / 'state'))
+    monkeypatch.setattr(probe, 'http_fetch', lambda *args: lambda path: SimpleNamespace(status=200, body=json.dumps(dict(configured=True, runs=[F1, row(0)]))))
+    monkeypatch.setattr(site, 'post_json', lambda *args: json.dumps({'text': 'status\nThis month: 2 runs', 'card_url': CARD1}).encode())
+    slack = Pins()
+    monkeypatch.setattr(N, 'Slack', lambda *args: slack)
+    assert N.run(asdict(cfg), {'SITE_TOKEN': 'viewer'}, 'project') == '\n\n+++\n\n'.join([
+        '[Test scans · runs]\nstatus\nThis month: 2 runs' + card_line(CARD1, '11/02 08:00Z'),
+        '[wk of 10/26 · runs]\n✅ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s',
+        '[wk of 11/02 · runs]\n❌ :alarm_clock: [11/02 08:00Z](https://site.test/scans/r1) · 1m 00s · failed in index: boom',
+        '[:x: 11/02 08:00Z · 1m 00s · failed in index]\n:alarm_clock: [record](https://site.test/scans/r1) · boom',
+    ])
+    assert (sorted(tmp_path.iterdir()), slack.calls) == ([], [])
+    env = {'SITE_TOKEN': 'viewer', 'SLACK_BOT_TOKEN': 'bot'}
+    sink = SimpleNamespace(statements=[])
+    sink.execute = sink.statements.extend
+    assert N.run(asdict(cfg), env, 'project', 'r1', execute=True, sink=sink) == 'nominal: month 2026-11 thread 1.0; 2 weekly, 1 failure replies'
+    # a first report seeds the month: the failure's reply first, so its week's line can link it
+    assert [(c[0], c[1]) for c in slack.calls] == [('post', '1.0'), ('post', '2.0'), ('post', '3.0'), ('post', '4.0')]
+    assert sink.statements == [
+        "UPDATE scan_runs SET thread_url = 'https://slack.test/p3.0' WHERE run_id = 'r0'",
+        "UPDATE scan_runs SET thread_url = 'https://slack.test/p2.0' WHERE run_id = 'r1'",
+    ]
+    slack.calls.clear()
+    assert N.run(asdict(cfg), env, 'project', 'r1', execute=True, sink=sink) == 'nominal: month 2026-11 thread 1.0; 2 weekly, 1 failure replies'
+    assert (slack.calls, len(sink.statements)) == ([], 2)
+
+
+@pytest.mark.parametrize('failures, expected', [({'r9': '4.0'}, []), ({}, [('fail', 'run failed (exit 1)')])])
+def test_a_month_threads_failure_reply_takes_the_runs_alert_whatever_the_grouping(tmp_path, monkeypatch, failures, expected):
+    job, posted = deferring_job(tmp_path, 'clean', monkeypatch)
+    job.profile.nominal = asdict(replace(CFG, group='clean', monthly=True))
+    job.alert('fail', 'run failed (exit 1)')
+    assert (posted, job.state()['deferred_alerts']) == ([], ['run failed (exit 1)'])
+
+    def fake_run(*args, final, **kwargs):
+        final.append({'months': {'2026-11': {'failures': failures}}})
+        return 'nominal: ok'
+    monkeypatch.setattr(N, 'run', fake_run)
+    N.report_job(job)
+    assert posted == expected

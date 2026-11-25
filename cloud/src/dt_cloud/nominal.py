@@ -2,6 +2,8 @@
 its outcome once the authoritative run record has finished; in a quiet clean thread (`Config.quiet`), no per-run
 replies, only the head and one rolling reply edited in place. Each post's sender (`Config.sender`: a fixed name and
 icon) says what it is: a thread's kind, a run's outcome, the rolling reply (specs/done/scan-thread-senders.md).
+`Config.monthly` replaces those status threads with one thread per UTC month (`converge_monthly`,
+specs/admin-monthly-thread.md).
 
 The site's run summaries are the outcome oracle. A renewed object-generation lease serializes writers; a
 persisted send intent and owned Slack message metadata recover a post whose response/state write was lost.
@@ -15,7 +17,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
@@ -110,6 +112,11 @@ class Config:
     card: bool = True
     #: The card's dot (`#rrggbb`): the deployment's colour in the fleet's `FLEET_JSON`; unset, the site's grey.
     color: str | None = None
+    #: One thread per UTC month (specs/admin-monthly-thread.md, `converge_monthly`) in place of the status threads: an
+    #: opening post the site renders (`POST /api/scan-runs/month-op`), one rolling runs reply per ISO week, and a reply
+    #: of its own for each failed run or run with issues, also sent to the channel. A deployment's first monthly report
+    #: is its cutover (`cutover`). Off: the status threads, as before.
+    monthly: bool = False
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -148,6 +155,8 @@ class Config:
             raise ValueError("nominal.card: true or false")
         if self.color is not None and not (isinstance(self.color, str) and re.fullmatch(r'#[0-9a-fA-F]{6}', self.color)):
             raise ValueError("nominal.color: #rrggbb")
+        if type(self.monthly) is not bool:
+            raise ValueError("nominal.monthly: true or false")
 
     def mark(self, outcome: str) -> str:
         """An outcome's emoji (`EMOJI`, overridden by `emoji`)."""
@@ -633,8 +642,14 @@ def card_url(cfg: Config, status: int, body: bytes) -> str | None:
     except (ValueError, KeyError, TypeError) as e:
         print(f'nominal: no status card (card-url answered {type(e).__name__})', file=sys.stderr)
         return None
+    return signed_card(cfg, url, 'card-url')
+
+
+def signed_card(cfg: Config, url: object, route: str) -> str | None:
+    """`url` when it is one of the site's signed `/og/deploy.png` URLs (`CARD_URL_RE`), else None (logged, naming the
+    `route` that answered it)."""
     if not isinstance(url, str) or not re.fullmatch(re.escape(cfg.site.rstrip('/')) + CARD_URL_RE, url):
-        print('nominal: no status card (card-url answered another URL)', file=sys.stderr)
+        print(f'nominal: no status card ({route} answered another URL)', file=sys.stderr)
         return None
     return url
 
@@ -683,11 +698,11 @@ def fold(cfg: Config, slack: Transport, row: dict) -> tuple[list[dict], str]:
     return found, ''.join(f"\n{line}" for a in found for line in alert_lines(a)[1])
 
 
-def folded(slack: Transport, alerts: list[dict], reply_ts: str) -> None:
-    """Each folded alert left as a pointer to the reply that now carries its lines."""
+def folded(slack: Transport, alerts: list[dict], reply_ts: str, where: str = 'failure thread') -> None:
+    """Each folded alert left as a pointer to the reply that now carries its lines (`where`: what that is called)."""
     link = slack.permalink(reply_ts)
     for a in alerts:
-        slack.edit(a['ts'], f"{FOLDED} {alert_lines(a)[0]}: in the [failure thread]({link})")
+        slack.edit(a['ts'], f"{FOLDED} {alert_lines(a)[0]}: in the [{where}]({link})")
 
 
 def missing(good: list[dict], posted: dict) -> list[dict]:
@@ -705,7 +720,10 @@ class Transport(Protocol):
     def owns(self, message: dict) -> bool: ...
     def find(self, operation: str, parent: str | None, since: float) -> str | None: ...
     def post(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None) -> str: ...
+    def post_sections(self, sections: list[str], parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
+                      broadcast: bool = False) -> str: ...
     def edit(self, ts: str, body: str) -> None: ...
+    def edit_sections(self, ts: str, sections: list[str]) -> None: ...
     def delete(self, ts: str) -> None: ...
     def alert(self, link: str, since: float) -> str | None: ...
     def alert_messages(self, link: str, since: float) -> list[dict]: ...
@@ -781,6 +799,32 @@ class Slack:
     def edit(self, ts: str, body: str) -> None:
         self.client.edit(ts, V.fallback(body, self.have))
 
+    def _sections(self, sections: list[str]) -> dict:
+        """`sections` (markdown) as one message's `section` blocks, each converted as thrds converts a post (a missing
+        vocabulary emoji as its stock one, as `post`), and their joined text as the notification fallback."""
+        from thrds.mrkdwn import to_slack
+
+        wires = [to_slack(V.fallback(s, self.have)) for s in sections]
+        unfurl = not getattr(self.client, '_suppress_unfurls', False)
+        return {'channel': self.client.channel, 'text': '\n'.join(wires), 'unfurl_links': unfurl, 'unfurl_media': unfurl,
+                'blocks': [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': w}} for w in wires]}
+
+    def post_sections(self, sections: list[str], parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
+                      broadcast: bool = False) -> str:
+        """One message of `section` blocks (`sections`: a text past a section's 3,000 characters, `split`), with
+        `post`'s metadata and sender; `broadcast`: a reply also sent to the channel (`reply_broadcast`)."""
+        data = {**self._sections(sections), **dict(sender or {}),
+                'metadata': {'event_type': 'disky_nominal', 'event_payload': {'operation': operation}}}
+        if parent:
+            data['thread_ts'] = parent
+            if broadcast:
+                data['reply_broadcast'] = True
+        return self.client._request('chat.postMessage', data)['ts']
+
+    def edit_sections(self, ts: str, sections: list[str]) -> None:
+        """Replace a `post_sections` message's sections (an edit keeps its sender, metadata and broadcast)."""
+        self.client._request('chat.update', {**self._sections(sections), 'ts': ts})
+
     def delete(self, ts: str) -> None:
         """Delete our message (a reply with no replies of its own leaves no tombstone); one already gone is not an
         error, so a report interrupted after it deleted can delete again."""
@@ -851,7 +895,7 @@ def pin_head(state: dict, slack: Transport, save: Callable[[dict], None]) -> Non
     """Pin the open thread's head, then unpin the head it replaced; a closed thread's head is unpinned at once (the
     channel then pins nothing until the next thread opens). Idempotent: a head already pinned, or one no longer
     pinned (unpinned by hand, or deleted), is not an error."""
-    head, was = state.get('parent'), state.get('pinned')
+    was = state.get('pinned')
     if state.get('closed'):
         if was:
             slack.join()
@@ -859,6 +903,13 @@ def pin_head(state: dict, slack: Transport, save: Callable[[dict], None]) -> Non
             del state['pinned']
             save(state)
         return
+    move_pin(state, slack, save, state.get('parent'))
+
+
+def move_pin(state: dict, slack: Transport, save: Callable[[dict], None], head: str | None) -> None:
+    """Pin `head`, then unpin what was pinned before it (`state['pinned']`), and record it; nothing when it is already
+    pinned (or there is none to pin)."""
+    was = state.get('pinned')
     if not head or head == was:
         return
     slack.join()
@@ -975,6 +1026,29 @@ def adopt(cfg: Config, rows: list[dict], slack: Transport) -> dict:
             'parent': cfg.adopt_parent, 'posted': posted}
 
 
+def recover(state: dict, slack: Transport, check: Callable[[], None], persist: Callable[[], None],
+            received: Callable[[dict, str], None]) -> None:
+    """A persisted send intent (`pending`) whose answer was lost: found by its metadata and given to `received`; else
+    kept, and this raises."""
+    if pending := state.get('pending'):
+        # An empty history page is not evidence that a timed-out send failed. Keep the intent until a receipt
+        # is found; bounded polling ends in an explicit operator state, never an automatic second send. Later
+        # invocations still check once, so eventual visibility can recover it without manual edits.
+        attempts = 1 if state.get('operator_required') else 3
+        for attempt in range(attempts):
+            check()
+            found = slack.find(pending['operation'], pending['parent'], pending['since'])
+            if found:
+                received(pending, found)
+                break
+            if attempt + 1 < attempts:
+                time.sleep(0.5 * (attempt + 1))
+        else:
+            state['operator_required'] = pending['operation']
+            persist()
+            raise RuntimeError(f"nominal: send remains ambiguous ({pending['operation']}); inspect Slack and the persisted intent; no resend attempted")
+
+
 def converge(
     cfg: Config,
     rows: list[dict],
@@ -1032,23 +1106,7 @@ def converge(
         check()
         received(pending, slack.post(body, root, operation, sender))
 
-    if pending := state.get('pending'):
-        # An empty history page is not evidence that a timed-out send failed. Keep the intent until a receipt
-        # is found; bounded polling ends in an explicit operator state, never an automatic second send. Later
-        # invocations still check once, so eventual visibility can recover it without manual edits.
-        attempts = 1 if state.get('operator_required') else 3
-        for attempt in range(attempts):
-            check()
-            found = slack.find(pending['operation'], pending['parent'], pending['since'])
-            if found:
-                received(pending, found)
-                break
-            if attempt + 1 < attempts:
-                time.sleep(0.5 * (attempt + 1))
-        else:
-            state['operator_required'] = pending['operation']
-            persist()
-            raise RuntimeError(f"nominal: send remains ambiguous ({pending['operation']}); inspect Slack and the persisted intent; no resend attempted")
+    recover(state, slack, check, persist, received)
     # The thread is decided by counted runs only (`counted`); a live run gets a ⏳ reply in the open thread (`running`),
     # which becomes its reply there when it ends in that thread, else is edited where it stands, linking where it was
     # reported. A cancelled run's ⏳ reply becomes its 🚫 reply where it stands; it joins no thread. With senders a
@@ -1253,6 +1311,351 @@ def converge(
     return state
 
 
+#: Slack's longest `section` text, less a margin for markdown → mrkdwn and emoji fallbacks (`CARD_BODY_MAX`'s): a longer
+#: weekly runs reply is posted as several sections of one message (`split`)
+SECTION_MAX = CARD_BODY_MAX
+#: A failure reply is also sent to the channel (`reply_broadcast`) unless its run ended this long before the deployment's
+#: first monthly report (`since`): the failures a cutover seeds the month with were reported in the status threads.
+#: The report that cuts over can be the end of a failed run, which is news.
+SEED_GRACE = 3600
+#: The status threads' state a cutover keeps: `KEPT` (the pin, the canvas), and each run's last written link
+#: (`link_threads`), so only runs whose reply moved are written again
+MONTH_KEPT = (*KEPT, 'linked')
+#: The run outcomes (`grade`) that get a reply of their own in the month thread
+OWN_REPLY = ('failed', 'issues')
+#: A month link in an OP's text, as the site's `linkLine` (and `digest.month_links`) writes it
+_MONTH_LINK = r"\[(?:← [A-Z][a-z]+|[A-Z][a-z]+ →)\]\([^()\s]+\)"
+_MONTHS_LINE = re.compile(rf"{_MONTH_LINK}(?: · {_MONTH_LINK})*")
+#: A head's trailing card line (`with_card`)
+_CARD_LINE = re.compile(r"\n\n!\[[^\]\n]*\]\([^()\s]+\)$")
+
+#: The site's month OP (`POST /api/scan-runs/month-op`, `site_month_op`): `(month, prev_url, next_url) → (text, card_url)`
+MonthOp = Callable[[str, str | None, str | None], tuple[str, str | None]]
+
+
+def month_of(row: dict) -> str:
+    """A run's UTC month (`YYYY-MM`), by its start."""
+    return datetime.fromtimestamp(row['run']['started_ts'], timezone.utc).strftime('%Y-%m')
+
+
+def _ym(month: str) -> tuple[int, int]:
+    y, m = month.split('-')
+    return int(y), int(m)
+
+
+def prior(month: str) -> str:
+    y, m = _ym(month)
+    return f"{y - (m == 1):04d}-{(m - 2) % 12 + 1:02d}"
+
+
+def following(month: str) -> str:
+    y, m = _ym(month)
+    return f"{y + (m == 12):04d}-{m % 12 + 1:02d}"
+
+
+def month_end(month: str) -> float:
+    """The first second after `month` (UTC)."""
+    y, m = _ym(following(month))
+    return datetime(y, m, 1, tzinfo=timezone.utc).timestamp()
+
+
+def month_name(month: str) -> str:
+    y, m = _ym(month)
+    return f"{date(y, m, 1):%B %Y}"
+
+
+def week_of(row: dict) -> str:
+    """A run's ISO week (`2026-W48`), by its start (UTC)."""
+    year, week, _ = datetime.fromtimestamp(row['run']['started_ts'], timezone.utc).isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def week_label(week: str) -> str:
+    """`wk of 11/23`: an ISO week's Monday."""
+    year, w = week.split('-W')
+    return f"wk of {date.fromisocalendar(int(year), int(w), 1):%m/%d}"
+
+
+def week_sender(cfg: Config, week: str) -> dict[str, str] | None:
+    """A weekly runs reply's sender (`Config.senders`; None when off): `wk of 11/23 · runs` under the app's own icon
+    (`avatar('runs')`)."""
+    return {'username': f"{week_label(week)} · runs", **cfg.avatar('runs')} if cfg.senders else None
+
+
+def week_text(cfg: Config, week: str, runs: list[dict], urls: Mapping[str, str]) -> str:
+    """A week's rolling runs reply: each run's line in `trail`'s format (`reply`; a live run's `running`), oldest first,
+    a run with a reply of its own (`urls`) linking it. With senders off, headed by the week, which the sender says."""
+    lines = [running(cfg, r) if live(r) else reply(cfg, r) + (f" · [reply]({urls[r['run']['run_id']]})" if r['run']['run_id'] in urls else '')
+             for r in runs]
+    return '\n'.join(([] if cfg.senders else [f"**{week_label(week)} · runs**"]) + lines)
+
+
+def split(text: str, limit: int = SECTION_MAX) -> list[str]:
+    """`text`'s lines packed in order into sections of at most `limit` characters (a longer line clipped, …): one message's
+    `section` blocks (`Transport.post_sections`)."""
+    out: list[list[str]] = []
+    size = 0
+    for line in text.split('\n'):
+        line = line if len(line) <= limit else line[:limit - 1] + '…'
+        if out and size + 1 + len(line) <= limit:
+            out[-1].append(line)
+            size += 1 + len(line)
+        else:
+            out.append([line])
+            size = len(line)
+    return ['\n'.join(s) for s in out]
+
+
+def relink_op(text: str, month: str, prev_url: str | None, next_url: str | None) -> str:
+    """A closed month's OP `text` with its month-link line (its last: `digest.month_links`, the site's `linkLine`)
+    replaced by one linking `prev_url` / `next_url`, else that line appended; nothing else changes (the digest's
+    `relink_text`, over the text nominal posted and keeps rather than Slack's stored wire form)."""
+    from .digest import month_links
+
+    line = month_links(date(*_ym(month), 1), prev_url, next_url)
+    lines = text.split('\n')
+    at = [i for i, s in enumerate(lines) if _MONTHS_LINE.fullmatch(s)]
+    if at:
+        lines[at[-1]] = line
+    else:
+        lines.append(line)
+    return '\n'.join(lines)
+
+
+def cutover_head(body: str, month: str, url: str) -> str:
+    """An open status thread's head as the cutover leaves it: as last written, without its card (its signed URL
+    expires), linking the month thread."""
+    return _CARD_LINE.sub('', body) + f"\n\nRuns now report in the monthly thread: [{month_name(month)}]({url})."
+
+
+def cutover_start(state: dict, at: float) -> None:
+    """The first monthly report's state: the status threads' set aside (`legacy`, for `finish_legacy`), but `MONTH_KEPT`;
+    `months` empty; `since` the cutover's time (`SEED_GRACE`)."""
+    legacy = {k: state.pop(k) for k in [k for k in state if k not in ('namespace', 'pending', 'operator_required', *MONTH_KEPT)]}
+    state.update(months={}, since=at)
+    if legacy.get('parent') or legacy.get('running') or legacy.get('rolling'):
+        state['legacy'] = legacy
+
+
+def finish_legacy(cfg: Config, state: dict, slack: Transport, check: Callable[[], None], persist: Callable[[], None],
+                  month: str, url: str) -> None:
+    """The cutover's end of the status threads, each step persisted (an interrupted report resumes): the open thread's
+    head edited a last time to link the month thread (`cutover_head`; a closed thread's is left as it ended), a quiet
+    thread's rolling reply without its runs going now (the month thread lists them), every ⏳ reply deleted; then only
+    the last head's ts is kept (`status_thread`)."""
+    legacy = state['legacy']
+    if legacy.get('parent') and legacy.get('parent_body') and not legacy.get('closed') and not legacy.get('final'):
+        check()
+        slack.edit(legacy['parent'], cutover_head(legacy['parent_body'], month, url))
+        legacy['final'] = True
+        persist()
+    if legacy.get('rolling') and legacy.get('rolling_body'):
+        lines = '\n'.join(s for s in legacy['rolling_body'].split('\n') if not s.startswith(cfg.mark('running')))
+        if lines and lines != legacy['rolling_body']:
+            check()
+            slack.edit(legacy['rolling'], lines)
+            legacy['rolling_body'] = lines
+            persist()
+    for rid in list(legacy.get('running') or {}):
+        check()
+        slack.delete(legacy['running'][rid]['ts'])
+        del legacy['running'][rid]
+        persist()
+    if legacy.get('parent'):
+        state['status_thread'] = legacy['parent']
+    del state['legacy']
+    persist()
+
+
+def converge_monthly(
+    cfg: Config,
+    rows: list[dict],
+    state: dict,
+    slack: Transport,
+    save: Callable[[dict], None],
+    check: Callable[[], None],
+    month_op: MonthOp,
+    now: Callable[[], float] = time.time,
+) -> dict:
+    """`Config.monthly`'s report (the caller holds the generation lease; `rows` newest first). The newest run's month
+    opens a thread when it has none: its OP (`month_op`'s text, under `<title> · runs`, the card under it), linking the
+    month before's thread. Each open month then converges: a reply for each finished failed run or run with issues
+    (`run_post`, its step alerts folded in, also sent to the channel), one rolling runs reply per ISO week (`week_text`,
+    edited in place, in sections past `SECTION_MAX`), the OP as the site renders it now with the months either side
+    linked; once past its end with no run going, the month closes (the site's closed render: no status line, no card)
+    and its OP is never re-rendered again, only relinked when the next month opens (`relink_op`). `posted` maps each of
+    those months' runs to its line's reply (its own reply, else its week's), for `link_threads`. Every post is a
+    persisted send intent (`recover`) and every edit is made only when its text changed, so a report with nothing new
+    writes nothing. The deployment's first monthly report is its cutover (`cutover_start`, `finish_legacy`).
+
+    State: `months` = `{YYYY-MM: {op_ts, op_url, op_text, op_card, weeks: {iso_week: ts}, week_bodies: {iso_week: text},
+    failures: {run_id: ts}, failure_urls: {run_id: permalink}, prev_url, next_url, closed}}`, `since`, `posted`."""
+    if state.get('namespace') != cfg.namespace:
+        raise ValueError('nominal: state belongs to another site/store/channel')
+
+    def persist() -> None:
+        check()
+        save(state)
+
+    def received(pending: dict, ts: str) -> None:
+        kind, _, rest = pending['key'].partition(':')
+        month, _, item = rest.partition(':')
+        ms = (state.get('months') or {}).get(month)
+        # A status-thread post's intent (from before the cutover) names no month: it stands in that thread
+        if ms is not None and kind == 'op':
+            ms.update(op_ts=ts, op_text=pending['body'], op_card=pending['card'], prev_url=pending['prev_url'], next_url=None)
+        elif ms is not None and kind == 'week':
+            ms['weeks'][item] = ts
+            ms['week_bodies'][item] = pending['body']
+        elif ms is not None and kind == 'fail':
+            ms['failures'][item] = ts
+        state.pop('pending', None)
+        state.pop('operator_required', None)
+        persist()
+
+    def send(key: str, body: str, parent: str | None, post: Callable[[str], str], **extra: object) -> None:
+        operation = str(uuid5(NAMESPACE_URL, f'{cfg.namespace}|monthly|{key}'))
+        pending = {'key': key, 'body': body, 'parent': parent, 'operation': operation, 'since': now() - 1, **extra}
+        state['pending'] = pending
+        persist()
+        check()
+        received(pending, post(operation))
+
+    def op_body(text: str, card: str | None, runs: list[dict]) -> str:
+        return with_card(cfg, text, card, runs[-1]) if runs else text
+
+    recover(state, slack, check, persist, received)
+    if 'months' not in state:
+        cutover_start(state, now())
+        persist()
+    if not rows:
+        return state
+    months: dict[str, dict] = state['months']
+    by_month: dict[str, list[dict]] = {}
+    for r in sorted(rows, key=lambda r: (r['run']['started_ts'], r['run']['run_id'])):
+        by_month.setdefault(month_of(r), []).append(r)
+    newest = max(by_month)
+    todo = sorted(m for m in {newest, *months} if not months.get(m, {}).get('closed'))
+    for m in todo:
+        ms = months.setdefault(m, {'weeks': {}, 'week_bodies': {}, 'failures': {}, 'failure_urls': {}})
+        if not ms.get('op_ts'):
+            prev = months.get(prior(m), {}).get('op_url')
+            text, card = month_op(m, prev, None)
+            first = op_body(text, card, by_month.get(m, []))
+            send(f'op:{m}', text, None, lambda op: slack.post(first, None, op, cfg.sender('runs')), card=first != text, prev_url=prev)
+        if not ms.get('op_url'):
+            ms['op_url'] = slack.permalink(ms['op_ts'])
+            persist()
+    if 'legacy' in state:
+        finish_legacy(cfg, state, slack, check, persist, newest, months[newest]['op_url'])
+    posted: dict[str, str] = {}
+    for m in todo:
+        ms, runs = months[m], by_month.get(m, [])
+        for r in runs:
+            rid = r['run']['run_id']
+            if live(r) or grade(r) not in OWN_REPLY or rid in ms['failures']:
+                continue
+            fresh = r['run']['finished_ts'] >= state['since'] - SEED_GRACE
+            alerts, extra = fold(cfg, slack, r) if fresh else ([], '')
+            text, sender = run_post(cfg, r)
+            body = text + extra
+            send(f'fail:{m}:{rid}', body, ms['op_ts'], lambda op: slack.post_sections(split(body), ms['op_ts'], op, sender, fresh))
+            if alerts:
+                folded(slack, alerts, ms['failures'][rid], 'month thread')
+        urls = ms['failure_urls']
+        if new := {rid: slack.permalink(ts) for rid, ts in ms['failures'].items() if rid not in urls}:
+            urls.update(new)
+            persist()
+        weeks: dict[str, list[dict]] = {}
+        for r in runs:
+            weeks.setdefault(week_of(r), []).append(r)
+        for wk, wruns in weeks.items():
+            text = week_text(cfg, wk, wruns, urls)
+            if wk not in ms['weeks']:
+                send(f'week:{m}:{wk}', text, ms['op_ts'], lambda op: slack.post_sections(split(text), ms['op_ts'], op, week_sender(cfg, wk)))
+            elif ms['week_bodies'].get(wk) != text:
+                check()
+                slack.edit_sections(ms['weeks'][wk], split(text))
+                ms['week_bodies'][wk] = text
+                persist()
+            posted.update({r['run']['run_id']: ms['failures'].get(r['run']['run_id']) or ms['weeks'][wk] for r in wruns})
+        prev, nxt = months.get(prior(m), {}).get('op_url'), months.get(following(m), {}).get('op_url')
+        text, card = month_op(m, prev, nxt)
+        body = op_body(text, card, runs)
+        # A card that didn't come this time (the route failing it) is no reason to drop the one posted
+        if text != ms['op_text'] or (body != text and not ms['op_card']):
+            check()
+            slack.edit(ms['op_ts'], body)
+            ms.update(op_text=text, op_card=body != text)
+            persist()
+        if (ms['prev_url'], ms['next_url']) != (prev, nxt):
+            ms.update(prev_url=prev, next_url=nxt)
+            persist()
+        if now() >= month_end(m) and not any(live(r) for r in runs):
+            ms['closed'] = True
+            persist()
+    for m, ms in sorted(months.items()):
+        nxt = months.get(following(m), {}).get('op_url')
+        if ms.get('closed') and nxt and ms['next_url'] != nxt:
+            text = relink_op(ms['op_text'], m, ms['prev_url'], nxt)
+            check()
+            slack.edit(ms['op_ts'], text)
+            ms.update(op_text=text, next_url=nxt)
+            persist()
+    if state.get('posted') != posted:
+        state['posted'] = posted
+        persist()
+    return state
+
+
+def pin_month(state: dict, slack: Transport, save: Callable[[dict], None]) -> None:
+    """Pin the newest month's OP, unpinning what was pinned before it: the month before's OP, or at the cutover the
+    status thread's head (`move_pin`)."""
+    ops = [ms['op_ts'] for _, ms in sorted((state.get('months') or {}).items()) if ms.get('op_ts')]
+    move_pin(state, slack, save, ops[-1] if ops else None)
+
+
+def month_url(state: dict) -> str | None:
+    """The newest month thread's permalink (the canvas's thread link), or None."""
+    urls = [ms['op_url'] for _, ms in sorted((state.get('months') or {}).items()) if ms.get('op_url')]
+    return urls[-1] if urls else None
+
+
+def site_month_op(cfg: Config, token: str) -> MonthOp:
+    """`POST /api/scan-runs/month-op[?store=]` as the job's grant (`token`): the OP's text, and its card's URL only when
+    it is the site's signed status card (`signed_card`) and `Config.card` is on. The route's errors raise (`SiteError`):
+    the report fails, never the job."""
+    from .site import post_json
+
+    path = '/api/scan-runs/month-op?' + urlencode({'store': cfg.store})
+
+    def call(month: str, prev_url: str | None, next_url: str | None) -> tuple[str, str | None]:
+        body = {'month': month, 'prev_url': prev_url, 'next_url': next_url,
+                **({'color': cfg.color} if cfg.color else {}), **({'emoji': dict(cfg.emoji)} if cfg.emoji else {})}
+        out = json.loads(post_json(cfg.site, token, path, body))
+        url = out.get('card_url')
+        return out['text'], signed_card(cfg, url, 'month-op') if cfg.card and url is not None else None
+
+    return call
+
+
+def month_preview(cfg: Config, rows: list[dict], month_op: MonthOp) -> str:
+    """What the newest run's month would post, as a month's first report (no state: no months either side, no reply
+    links): its OP (`shown` under its sender), each week's runs reply, then each failure reply."""
+    if not rows:
+        return 'nominal: waiting for a run'
+    month = max(month_of(r) for r in rows)
+    runs = sorted((r for r in rows if month_of(r) == month), key=lambda r: (r['run']['started_ts'], r['run']['run_id']))
+    text, card = month_op(month, None, None)
+    weeks: dict[str, list[dict]] = {}
+    for r in runs:
+        weeks.setdefault(week_of(r), []).append(r)
+    posts = [shown(cfg.sender('runs'), with_card(cfg, text, card, runs[-1]))]
+    posts += [shown(week_sender(cfg, wk), week_text(cfg, wk, wruns, {})) for wk, wruns in weeks.items()]
+    posts += [shown(run_post(cfg, r)[1], run_post(cfg, r)[0]) for r in runs if not live(r) and grade(r) in OWN_REPLY]
+    return '\n\n+++\n\n'.join(posts)
+
+
 def face(sender: Mapping[str, str] | None) -> str | None:
     """A sender's icon (`icon_emoji` or `icon_url`; None: the app's)."""
     return (sender.get('icon_emoji') or sender.get('icon_url')) if sender else None
@@ -1322,6 +1725,8 @@ def run(
             series[name] = json.loads(response.body) if response.status == 200 else response.status
         return series
 
+    if not execute and cfg.monthly:
+        return month_preview(cfg, read_rows(), site_month_op(cfg, token))
     if not execute:
         rows = read_rows()
         live_rows = [r for r in rows if live(r)]
@@ -1374,13 +1779,17 @@ def run(
         check()
         save(state)
         series = read_series()
-        state = converge(cfg, rows, state, slack, save, check, stores=stores_text(cfg, series), card=read_card())
+        if cfg.monthly:
+            state = converge_monthly(cfg, rows, state, slack, save, check, site_month_op(cfg, token))
+        else:
+            state = converge(cfg, rows, state, slack, save, check, stores=stores_text(cfg, series), card=read_card())
         if cfg.pin:
             check()
-            pin_head(state, slack, save)
+            (pin_month if cfg.monthly else pin_head)(state, slack, save)
         if cfg.canvas:
             check()
-            thread = slack.permalink(state['parent']) if state.get('parent') and not state.get('closed') else None
+            thread = (month_url(state) if cfg.monthly else
+                      slack.permalink(state['parent']) if state.get('parent') and not state.get('closed') else None)
             write_canvas(state, slack, canvas_text(cfg, rows, thread, series, time.time()), cfg.title, save)
         if sink is not None:
             from .scan_runs import thread_url_sql
@@ -1392,17 +1801,22 @@ def run(
                 print(f'nominal: thread links not recorded ({type(e).__name__}: {e})', file=sys.stderr)
     if final is not None:
         final.append(state)
+    if cfg.monthly:
+        month, ms = max((state.get('months') or {'none': {}}).items())
+        return (f"nominal: month {month} thread {ms.get('op_ts', 'none')}; {len(ms.get('weeks', {}))} weekly, "
+                f"{len(ms.get('failures', {}))} failure replies")
     return f"nominal: parent {state.get('parent', 'none')}; {len(state.get('posted', {}))} run replies"
 
 
 def defers_failures(job: JobRun) -> bool:
-    """Whether this run's `fail` alerts wait for its thread: a failure-grouping thread (`color`, `signature`) reports
-    this deployment's top-level runs of its kind and store, and nothing suppresses the report."""
+    """Whether this run's `fail` alerts wait for its thread: a failure-grouping thread (`color`, `signature`), or a
+    month thread (`monthly`: the run's own reply), reports this deployment's top-level runs of its kind and store, and
+    nothing suppresses the report."""
     if not job.profile.nominal or not job.recording or job.dry_run or (job.env.get('DT_ALERTS') or '').strip() in ('stderr', 'off', '0'):
         return False
     cfg = config(job.profile.nominal)
     facts = job.state()
-    return (cfg.group != 'clean' and not facts.get('parent') and facts.get('kind', 'scan') == cfg.kind
+    return ((cfg.monthly or cfg.group != 'clean') and not facts.get('parent') and facts.get('kind', 'scan') == cfg.kind
             and facts.get('store', job.profile.store) == cfg.store)
 
 
@@ -1452,7 +1866,8 @@ def report_job(job: JobRun) -> None:
         final: list[dict] = []
         err(run(job.profile.nominal, job.env, job.profile.project, job.run_id, execute=True, final=final, sink=job_sink(job)))
         state = final[0] if final else {}
-        threaded = state.get('key', 'clean') != 'clean' and job.run_id in state.get('posted', {})
+        threaded = (any(job.run_id in ms.get('failures', {}) for ms in (state.get('months') or {}).values()) if cfg.monthly
+                    else state.get('key', 'clean') != 'clean' and job.run_id in state.get('posted', {}))
     except (Exception, SystemExit) as exc:  # Reporting must not fail (or end) the job; its failure remains visible in the head log.
         err(job.redact(f'nominal report failed: {type(exc).__name__}: {exc}'))
     finally:
