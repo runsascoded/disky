@@ -355,7 +355,7 @@ def execute_plan(
     *,
     for_real: bool = False,
     client: "S3Client | None" = None,
-    delete_workers: int = 16,
+    delete_workers: int = 4,
     mtime_tol: int = 1,
     min_soft_delete_days: int = 0,
     progress_every: float = 30.0,
@@ -366,6 +366,12 @@ def execute_plan(
     manifest, and deletes only the reviewed keys whose (size, mtime) still match
     — new keys since the scan are left alone (drift), changed ones skipped
     (overwritten), vanished ones noted (gone). A dry run touches nothing.
+
+    Deletes go `DELETE_BATCH` keys per `DeleteObjects` call, `delete_workers` calls in flight, each item carrying its reviewed
+    ETag as a precondition (CAIOS enforces it per item: specs/delete-preconditions.md). An item refused on it
+    (`PreconditionFailed`: rewritten since the listing) is `skipped_overwritten`; any other item error, an item the reply
+    doesn't answer, or a call that fails outright (after botocore's retries) is `delete_failed`. Nothing is ever retried
+    without its ETag.
 
     `min_soft_delete_days` (`/admin`'s minimum): above 0, a real run refuses a bucket retaining less, or one it can't read.
     At 0 nothing is required of the bucket and a real deletion may be permanent: a key that can't read its versioning still
@@ -495,21 +501,25 @@ def execute_plan(
             band_rec(band)["gone"] += 1
             log_rows.append((key, size, mtime, "skipped_gone", _dir_of(key), band))
 
-    def _apply(item: tuple[str, int, str]) -> tuple[tuple[str, int, str], str]:
-        key = item[0]
+    def _apply(chunk: list[tuple[str, int, str]]) -> list[tuple[tuple[str, int, str], str]]:
         try:
-            client.delete_object(Bucket=bucket, Key=key, IfMatch=manifest[key][2])
+            resp = client.delete_objects(Bucket=bucket, Delete={
+                "Objects": [{"Key": key, "ETag": manifest[key][2]} for key, _, _ in chunk], "Quiet": False,
+            })
         except ClientError as e:
-            code = e.response["Error"]["Code"]
-            return item, "skipped_overwritten" if code in ("PreconditionFailed", "412") else "delete_failed"
-        return item, "delete"
+            print(f"WARN: delete batch of {len(chunk)} failed: {e.response['Error'].get('Code')}", file=sys.stderr)
+            return [(item, "delete_failed") for item in chunk]
+        deleted = {d["Key"] for d in resp.get("Deleted", [])}
+        errors = {e["Key"]: str(e.get("Code", "")) for e in resp.get("Errors", [])}
+        return [(item, "skipped_overwritten" if errors.get(item[0]) in ("PreconditionFailed", "412")
+                 else "delete_failed" if item[0] in errors or item[0] not in deleted else "delete") for item in chunk]
 
     with prog_lock:
         prog["decisions"].update(skipped_gone=counters["skipped_gone"], skipped_overwritten=counters["skipped_overwritten"])
 
     if for_real and to_delete:
         with ThreadPoolExecutor(max_workers=delete_workers) as ex:
-            for (key, size, band), decision in ex.map(_apply, to_delete):
+            for (key, size, band), decision in (r for rs in ex.map(_apply, _chunks(to_delete, DELETE_BATCH)) for r in rs):
                 with prog_lock:
                     prog["decisions"][decision] += 1
                     if decision == "delete":

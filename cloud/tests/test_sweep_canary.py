@@ -37,6 +37,24 @@ class _Store:
         self.versions.append((Key, f"v{len(self.versions)}", etag))
         return {"ETag": etag}
 
+    def create_multipart_upload(self, Bucket: str, Key: str) -> dict:  # noqa: N803
+        self.uploads = {**getattr(self, "uploads", {}), "u": []}
+        return {"UploadId": "u"}
+
+    def upload_part(self, Bucket: str, Key: str, UploadId: str, PartNumber: int, Body: bytes) -> dict:  # noqa: N803
+        self.uploads[UploadId].append(hashlib.md5(Body).digest())
+        return {"ETag": f'"{hashlib.md5(Body).hexdigest()}"'}
+
+    def complete_multipart_upload(self, Bucket: str, Key: str, UploadId: str, MultipartUpload: dict) -> dict:  # noqa: N803
+        parts = self.uploads.pop(UploadId)
+        etag = f'"{hashlib.md5(b"".join(parts)).hexdigest()}-{len(parts)}"'
+        self.versions.append((Key, f"v{len(self.versions)}", etag))
+        return {"ETag": etag}
+
+    def abort_multipart_upload(self, Bucket: str, Key: str, UploadId: str) -> dict:  # noqa: N803
+        self.uploads.pop(UploadId, None)
+        return {}
+
     def head_object(self, Bucket: str, Key: str) -> dict:  # noqa: N803
         etag = self._live(Key)
         if etag is None:
@@ -80,7 +98,7 @@ def _summary(store: _Store) -> list[dict]:
 @pytest.mark.parametrize("single,batch", [(True, True), (True, False), (False, True), (False, False)])
 def test_canary_reports_what_the_store_enforces_and_leaves_nothing(single: bool, batch: bool) -> None:
     expect = []
-    for kind, on in (("single", single), ("batch", batch)):
+    for kind, on in (("single", single), ("batch", batch), ("multipart", batch), ("mixed", batch)):
         expect.append({
             "kind": kind, "stale": "PreconditionFailed" if on else "ok", "survived_stale": on,
             "current": "ok", "removed_by_current": True, "enforced": on,

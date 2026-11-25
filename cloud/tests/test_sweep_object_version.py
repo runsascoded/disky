@@ -31,23 +31,32 @@ class ConditionalStore:
         return {"Contents": [{"Key": "p/f", "Size": 7, "ETag": '"reviewed"',
                               "LastModified": dt.datetime.fromtimestamp(100, dt.timezone.utc)}]}
 
-    def delete_object(self, **kwargs) -> dict:
+    def delete_objects(self, **kwargs) -> dict:
         self.calls.append(kwargs)
+        keys = [o["Key"] for o in kwargs["Delete"]["Objects"]]
+        if self.code == "InternalError":
+            raise ClientError({"Error": {"Code": self.code}}, "DeleteObjects")
         if self.code:
-            raise ClientError({"Error": {"Code": self.code}}, "DeleteObject")
-        return {}
+            return {"Deleted": [], "Errors": [{"Key": k, "Code": self.code} for k in keys]}
+        return {"Deleted": [{"Key": k} for k in keys], "Errors": []}
+
+
+def _deleted(*keys: str) -> list[dict]:
+    """The one `DeleteObjects` call that names each key with its reviewed ETag."""
+    return [{"Bucket": "b", "Delete": {"Objects": [{"Key": k, "ETag": '"reviewed"'} for k in keys], "Quiet": False}}]
 
 
 @pytest.mark.parametrize("code,decision,counts", [
     (None, "delete", (1, 0, 0)),
     ("PreconditionFailed", "skipped_overwritten", (0, 1, 0)),
     ("AccessDenied", "delete_failed", (0, 0, 1)),
+    ("InternalError", "delete_failed", (0, 0, 1)),
 ])
 def test_reviewed_token_is_the_atomic_delete_precondition(tmp_path: Path, code, decision, counts) -> None:
     out = run_dir(tmp_path)
     store = ConditionalStore(code)
     summary = execute_plan(str(out), for_real=True, client=store)
-    assert store.calls == [{"Bucket": "b", "Key": "p/f", "IfMatch": '"reviewed"'}]
+    assert store.calls == _deleted("p/f")
     assert tuple(summary[k] for k in ("deleted_objects", "skipped_overwritten", "delete_failed")) == counts
     assert pq.read_table(out / "deleted/b/part-00000.parquet")["decision"].to_pylist() == [decision]
 
@@ -98,4 +107,4 @@ def test_preserved_analytics_distinguishes_new_changed_and_post_scan_keys(tmp_pa
     result = execute_plan(str(out), for_real=True, client=store)
     assert result["preserved_breakdown"] == {"new_since_review": 1, "changed_since_review": 1, "new_since_scan": 1, "unclassified": 0}
     assert (result["deleted_objects"], result["drift_new"], result["delete_failed"]) == (1, 3, 0)
-    assert store.calls == [{"Bucket": "b", "Key": "p/f", "IfMatch": '"reviewed"'}]
+    assert store.calls == _deleted("p/f")

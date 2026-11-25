@@ -160,13 +160,17 @@ class _FakeStore:
     """A minimal in-memory S3 for the executor: versioning, paginated list, batch delete."""
 
     def __init__(self, objects: dict[str, tuple[int, int]], versioning: str | None = "Enabled",
-                 page: int = 2, fail_keys: set[str] | None = None) -> None:
-        # objects: key -> (size, mtime_epoch)
+                 page: int = 2, fail_keys: set[str] | None = None, raced: set[str] | None = None,
+                 fail_requests: bool = False) -> None:
+        # objects: key -> (size, mtime_epoch); `raced`: keys rewritten between the listing and the delete
         self.objects = dict(objects)
         self._versioning = versioning
         self._page = page
         self._fail = fail_keys or set()
+        self._raced = raced or set()
+        self._fail_requests = fail_requests
         self.delete_calls = 0
+        self.batches: list[list[str]] = []
 
     def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803
         return {"Status": self._versioning} if self._versioning else {}
@@ -192,26 +196,23 @@ class _FakeStore:
                 **({"NextContinuationToken": str(nxt)} if truncated else {})}
 
     def delete_objects(self, Bucket: str, Delete: dict) -> dict:  # noqa: N803
+        from botocore.exceptions import ClientError
+
         self.delete_calls += 1
+        self.batches.append([o["Key"] for o in Delete["Objects"]])
+        if self._fail_requests:
+            raise ClientError({"Error": {"Code": "InternalError"}}, "DeleteObjects")
         deleted, errors = [], []
         for o in Delete["Objects"]:
             k = o["Key"]
             if k in self._fail:
                 errors.append({"Key": k, "Code": "AccessDenied"})
+            elif k in self._raced or o["ETag"] != f'"{k}"':
+                errors.append({"Key": k, "Code": "PreconditionFailed"})
             else:
                 self.objects.pop(k, None)
                 deleted.append({"Key": k})
         return {"Deleted": deleted, "Errors": errors}
-
-    def delete_object(self, Bucket: str, Key: str, IfMatch: str) -> dict:  # noqa: N803
-        from botocore.exceptions import ClientError
-
-        assert IfMatch == f'"{Key}"'
-        self.delete_calls += 1
-        if Key in self._fail:
-            raise ClientError({"Error": {"Code": "AccessDenied"}}, "DeleteObject")
-        self.objects.pop(Key, None)
-        return {}
 
 
 def _run_with_manifest(tmp_path: Path) -> Path:
@@ -317,6 +318,31 @@ def test_execute_records_delete_failure(tmp_path: Path) -> None:
     ]
 
 
+def test_execute_deletes_in_batches_with_each_reviewed_etag(tmp_path: Path, monkeypatch) -> None:
+    """`DELETE_BATCH` keys a call; a key rewritten after the listing is refused on its ETag and left, as overwritten."""
+    monkeypatch.setattr("dt_cloud.sweep.DELETE_BATCH", 2)
+    l2 = tmp_path / "l2.parquet"
+    _write_l2(l2, [(f"marin/ckpt/k{i}", 10, 111, "file") for i in range(5)])
+    run = tmp_path / "run"
+    build_manifest(str(l2), Plan(name="p", bucket=BUCKET, sweep=["marin/ckpt/"], plan_id=3), str(run))
+    store = _FakeStore({f"marin/ckpt/k{i}": (10, 111) for i in range(5)}, raced={"marin/ckpt/k3"})
+    s = execute_plan(str(run), for_real=True, client=store)
+    assert sorted(store.batches) == [["marin/ckpt/k0", "marin/ckpt/k1"], ["marin/ckpt/k2", "marin/ckpt/k3"], ["marin/ckpt/k4"]]
+    assert store.objects == {"marin/ckpt/k3": (10, 111)}
+    assert (s["deleted_objects"], s["deleted_bytes"], s["skipped_overwritten"], s["delete_failed"]) == (4, 40, 1, 0)
+    assert duckdb.connect().execute(
+        f"SELECT name, decision FROM read_parquet('{s['log_dir']}/part-00000.parquet') ORDER BY name"
+    ).fetchall() == [(f"marin/ckpt/k{i}", "skipped_overwritten" if i == 3 else "delete") for i in range(5)]
+
+
+def test_execute_counts_a_failed_batch_call_as_failed(tmp_path: Path) -> None:
+    run = _run_with_manifest(tmp_path)
+    store = _FakeStore(_LIVE, fail_requests=True)
+    s = execute_plan(str(run), for_real=True, client=store)
+    assert (s["deleted_objects"], s["delete_failed"], store.delete_calls) == (0, 1, 1)
+    assert store.objects == _LIVE
+
+
 @pytest.mark.parametrize("has_preservation_sidecar", [True, False])
 def test_preserved_keys_keep_their_review_reason(
     tmp_path: Path,
@@ -386,10 +412,6 @@ class _FakeVersionedStore:
         ]
         return {"Contents": contents, "IsTruncated": False}
 
-    def delete_object(self, Bucket: str, Key: str, IfMatch: str) -> dict:  # noqa: N803
-        assert IfMatch == f'"{Key}"'
-        return self.delete_objects(Bucket=Bucket, Delete={"Objects": [{"Key": Key}]})
-
     def list_object_versions(self, Bucket: str, Prefix: str = "",  # noqa: N803
                              KeyMarker: str | None = None, VersionIdMarker: str | None = None) -> dict:
         versions, markers = [], []
@@ -410,6 +432,7 @@ class _FakeVersionedStore:
         deleted = []
         for o in Delete["Objects"]:
             k, vid = o["Key"], o.get("VersionId")
+            assert o.get("ETag", f'"{k}"') == f'"{k}"'
             vs = self.versions.get(k)
             if vs is None:
                 continue
