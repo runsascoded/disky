@@ -3,6 +3,7 @@ import { buildTree, diffLoadingLabel, diffMiss } from './diffModel'
 import type { DiffData, DiffRow } from './diffModel'
 import { deltaPct, diffCellAction, diffCellHref, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow } from './diffRows'
+import { diffRoot } from './diffStyle'
 
 const row = (path: string, status: DiffRow['status'], bytes_before: number, bytes_after: number, objects_before: number, objects_after: number, expanded?: true, kind: DiffRow['kind'] = 'dir'): DiffRow =>
   ({ path, depth: path.split('/').length, kind, status, bytes_before, bytes_after, objects_before, objects_after, ...(expanded ? { expanded } : {}) })
@@ -79,6 +80,36 @@ describe('diffTableRows', () => {
       { key: 'ckpt/model.safetensors', kind: 'file', status: 'added', synthetic: false, segs: ['ckpt', 'model.safetensors'], a: 0, b: 300, delta: 300, pct: null, oa: 0, ob: 1, odelta: 1 },
       { key: 'ckpt/run-1', kind: 'dir', status: 'unchanged', synthetic: false, segs: ['ckpt', 'run-1'], a: 1000, b: 1000, delta: 0, pct: 0, oa: 10, ob: 10, odelta: 0 },
     ])
+  })
+})
+
+describe('buildTree table', () => {
+  it('Δ mode: an unchanged child is no map cell but a table row (`unchanged`, Δ 0, last under the Δ sort) that drills', () => {
+    const { cells, table } = buildTree(data(ROWS), 'delta', false)
+    expect(cells.map(c => c.key)).toEqual(['logs', 'ckpt', 'new', 'gone', '(other)'])
+    expect(table.map(c => c.key)).toEqual(['logs', 'ckpt', 'new', 'gone', '(other)', 'static'])
+    expect(diffRoot(data(ROWS), 'delta', false, false, 'bucket')!.table.map(c => c.key)).toEqual(['logs', 'ckpt', 'new', 'gone', '(other)', 'static'])
+    expect(strip(sortDiffRows(diffTableRows(table), 'delta', false))).toEqual([
+      { key: 'logs', kind: 'dir', status: 'changed', synthetic: false, segs: ['logs'], a: 800, b: 200, delta: -600, pct: -0.75, oa: 80, ob: 20, odelta: -60 },
+      { key: 'ckpt', kind: 'dir', status: 'changed', synthetic: false, segs: ['ckpt'], a: 1000, b: 1500, delta: 500, pct: 0.5, oa: 10, ob: 12, odelta: 2 },
+      { key: 'new', kind: 'dir', status: 'added', synthetic: false, segs: ['new'], a: 0, b: 300, delta: 300, pct: null, oa: 0, ob: 3, odelta: 3 },
+      { key: 'gone', kind: 'dir', status: 'removed', synthetic: false, segs: ['gone'], a: 250, b: 0, delta: -250, pct: -1, oa: 5, ob: 0, odelta: -5 },
+      { key: '(other)', kind: 'dir', status: 'changed', synthetic: true, segs: [], a: 90, b: 100, delta: 10, pct: 10 / 90, oa: 900, ob: 950, odelta: 50 },
+      { key: 'static', kind: 'dir', status: 'unchanged', synthetic: false, segs: ['static'], a: 700, b: 700, delta: 0, pct: 0, oa: 7, ob: 7, odelta: 0 },
+    ])
+    expect(table.map(n => [n.key, diffCellAction(n)])).toEqual([
+      ['logs', 'drill'],
+      ['ckpt', 'drill'],
+      ['new', 'drill'],
+      ['gone', 'drill'],
+      ['(other)', 'remainder'],
+      ['static', 'drill'],
+    ])
+  })
+  it('max mode: the table is the map’s cells, as before', () => {
+    const { cells, table } = buildTree(data(ROWS), 'max', true)
+    expect(table).toEqual(cells)
+    expect(table.map(c => c.key)).toEqual(['ckpt', 'new', '(other)', 'static', 'gone', 'logs'])
   })
 })
 

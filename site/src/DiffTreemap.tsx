@@ -22,6 +22,9 @@ const { abs, min } = Math
 export type DiffModel = {
   data: DiffData
   root: DiffNode
+  /** The table's rows: `root`'s children, then the top-level nodes the map
+   *  leaves undrawn (an unchanged child in Δ mode; `buildTree`'s `table`). */
+  table: DiffNode[]
   areaMode: AreaMode
   setAreaMode: (m: AreaMode) => void
   label: string
@@ -72,14 +75,14 @@ export function useDiffModel(data: DiffData | null, atRoot: boolean, label: stri
     // the two scans), draw the sizes in `max` instead of a bare "no changes".
     const built = diffRoot(data, dmP === 'max' ? 'max' : 'delta', dmP === 'max', atRoot, label)
     if (!built) return null
-    const { root, mode } = built
+    const { root, mode, table } = built
     const { added, removed, n_added, n_removed } = root
     // Roots that entered the scan in this interval: shown apart from the
     // interval's writes (`⊕ first scanned`), so the day's growth stays readable.
     const firstScanned = (root.children ?? []).filter(c => c.first).reduce((s, c) => s + c.added, 0)
     const firstScannedN = (root.children ?? []).filter(c => c.first).reduce((s, c) => s + c.n_added, 0)
     return {
-      root, areaMode: mode, added, removed, n_added, n_removed,
+      root, table, areaMode: mode, added, removed, n_added, n_removed,
       firstScanned, firstScannedN, grew: added - firstScanned, grewN: n_added - firstScannedN,
       fmtBytes, fmtDelta, fmtN, fmtNDelta, fmtC, fmtCDelta,
     }

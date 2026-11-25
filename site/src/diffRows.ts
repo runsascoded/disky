@@ -1,6 +1,7 @@
-// The diff table's row model: the diff map's cells (one drilled node's
-// children, as `buildTree` laid them out — named dirs, the `(other)` fold and
-// any `(unchanged)` filler) → one flat row each, with the before/after/Δ
+// The diff table's row model: one drilled node's children (`buildTree`'s
+// `table`: the map's cells — named dirs, the `(other)` fold and any
+// `(unchanged)` filler — then the children the map leaves undrawn, an
+// unchanged one in Δ mode) → one flat row each, with the before/after/Δ
 // numbers the map's tooltip shows, plus the column sorts. Pure, so the
 // derivation and every sort order are unit-tested (`diffRows.test.ts`).
 import { isSynthetic, type DiffNode } from './diffModel'

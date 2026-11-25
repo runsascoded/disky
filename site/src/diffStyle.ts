@@ -64,12 +64,13 @@ export function diffCellStyle(n: DiffNode, areaMode: AreaMode): DiffCellStyle {
 
 /** The diff's tree under one synthetic root labelled `label`, in `mode`
  *  (falling back to `max` when Δ has nothing to show and `mode` wasn't
- *  pinned), or null when nothing moved. */
-export function diffRoot(data: DiffData, mode: AreaMode, pinned: boolean, atRoot: boolean, label: string): { root: DiffNode; mode: AreaMode } | null {
-  let { cells } = buildTree(data, mode, atRoot)
+ *  pinned), or null when nothing moved. `table` is the root's children for the
+ *  diff table: its cells, then any the map leaves undrawn (`buildTree`). */
+export function diffRoot(data: DiffData, mode: AreaMode, pinned: boolean, atRoot: boolean, label: string): { root: DiffNode; mode: AreaMode; table: DiffNode[] } | null {
+  let { cells, table } = buildTree(data, mode, atRoot)
   if (!pinned && mode === 'delta' && cells.length === 0) {
     const alt = buildTree(data, 'max', atRoot)
-    if (alt.cells.length) { mode = 'max'; cells = alt.cells }
+    if (alt.cells.length) { mode = 'max'; cells = alt.cells; table = alt.table }
   }
   if (!cells.length) return null
   const root: DiffNode = {
@@ -90,7 +91,7 @@ export function diffRoot(data: DiffData, mode: AreaMode, pinned: boolean, atRoot
     n_removed: cells.reduce((s, c) => s + c.n_removed, 0),
     children: cells,
   }
-  return { root, mode }
+  return { root, mode, table }
 }
 
 /** The borders: a fat gutter at the top level, a clear line one down,

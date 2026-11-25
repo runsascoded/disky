@@ -2069,7 +2069,6 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   .st-unchanged { color: var(--ink-3); }
   td.first { color: var(--s1); }
   td.zero { color: var(--ink-3); }
-  .tbl-note { margin: 6px 0 0; font-size: 12px; color: var(--ink-3); }
 }
 // Row selection (rowSelection.ts) on the children table: the checkbox
 // column, the cursor / selected row tints, and the bulk bar docked below.

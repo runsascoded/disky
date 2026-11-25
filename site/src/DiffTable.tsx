@@ -11,11 +11,11 @@ import { pathText } from './pathCrumbs'
 import { StickyTable } from './stickyHead'
 
 // The diff map's tabular twin (like ChildrenTable under the main map): one
-// row per cell of the drilled node — before / after / Δ bytes and objects,
+// row per child of the drilled node — before / after / Δ bytes and objects,
 // every column sortable, a named row acting exactly as its cell does (a
-// directory drills the page, an object opens in the leaf viewer). Rows are the map's cells, so the two always agree: a fold or a
-// filler is listed (and never drills); a depth-1 row the map dropped (an
-// unchanged directory in Δ mode, weight 0) is counted in the footer instead.
+// directory drills the page, an object opens in the leaf viewer). Rows are the map's cells, then every child the
+// map leaves undrawn (an unchanged one in Δ mode, weight 0: `unchanged`, Δ 0, last under the Δ sort), so the rows
+// partition the totals: a fold or a filler is listed too (and never drills).
 
 const PAGE_SIZES = [20, 50, 100, 200]
 const NAME_MAX = 60
@@ -36,18 +36,13 @@ export function DiffTable({ model, scheme, segs, onDrill, onOpen }: {
   onOpen: (segs: string[]) => void
 }) {
   usePerfCommit('dtable')
-  const { root, data, fmtBytes, fmtDelta, fmtN, fmtNDelta } = model
+  const { root, table, fmtBytes, fmtDelta, fmtN, fmtNDelta } = model
   const [sort, setSort] = useState<{ k: SortKey; asc: boolean }>({ k: 'delta', asc: false })
   const [page, setPage] = useState(0)
   const [nP, setNP] = useUrlState('n', intParam(20))
   const PAGE = PAGE_SIZES.includes(nP) ? nP : 20
 
-  const rows = useMemo(() => sortDiffRows(diffTableRows(root.children ?? []), sort.k, sort.asc), [root, sort])
-  // Depth-1 rows (objects or directories) the map left undrawn (weight 0: unchanged, in Δ mode).
-  const unlisted = useMemo(() => {
-    const listed = new Set(rows.map(r => r.key))
-    return data.rows.filter(r => r.depth === 1 && !listed.has(r.path)).length
-  }, [rows, data])
+  const rows = useMemo(() => sortDiffRows(diffTableRows(table), sort.k, sort.asc), [table, sort])
   useEffect(() => setPage(0), [root, sort])
 
   const pages = Math.max(1, Math.ceil(rows.length / PAGE))
@@ -149,9 +144,6 @@ export function DiffTable({ model, scheme, segs, onDrill, onOpen }: {
         </tfoot>
       </StickyTable>
       {pager && <div className="pager">{pager}</div>}
-      {/* The map draws only what moved (Δ mode): say what the table is
-          leaving out, so the rows and the totals agree. */}
-      {unlisted > 0 && <p className="tbl-note">{fmtN(unlisted)} unchanged {unlisted === 1 ? 'path' : 'paths'} not listed</p>}
     </section>
   )
 }
