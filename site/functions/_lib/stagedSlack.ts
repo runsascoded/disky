@@ -843,13 +843,15 @@ const SETTLE_ROUNDS = 3
  * whose parent carries a ✅ (or a stage into an emptied queue) moves the plan
  * to a new thread: a new parent, a pointer in the old thread, and the old
  * parent marked done. A thread in another channel than `SLACK_ADMIN_CHANNEL`
- * is left alone and a new one starts there. Best-effort; never throws. */
-export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number; quiet?: boolean } = {}): Promise<void> {
-  if (!slackReady(env)) return
+ * is left alone and a new one starts there. Best-effort; never throws.
+ * Returns the event reply's id (`<channel>/<ts>`) when it posted, else null. */
+export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number; quiet?: boolean } = {}): Promise<string | null> {
+  if (!slackReady(env)) return null
+  let replied: string | null = null
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   try {
     const v = await loadView(db, planId, siteUrl, !!env.GCP_SA_KEY)
-    if (!v) return
+    if (!v) return null
     const full = env as NotifyEnv & Env
     const stage = ev && 'stage' in ev ? ev.stage : null
     const runEv = ev && 'run' in ev ? ev : null
@@ -918,7 +920,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const first = renderParent({ ...view, done: undefined, stagedBy: undefined })
     if (!ts) {
       const p = await sendParent(env, channel, null, first)
-      if (!p.ok || !p.ts) return
+      if (!p.ok || !p.ts) return null
       // Two concurrent first events would each post a parent: the claim is
       // the tiebreak, and the loser deletes its own.
       const claim = await db.prepare('UPDATE plans SET slack_channel = ?, slack_ts = ? WHERE id = ? AND slack_ts IS NULL').bind(channel, p.ts, planId).run()
@@ -926,7 +928,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       else {
         await slackApi(env, 'chat.delete', { channel, ts: p.ts })
         const row = await db.prepare('SELECT slack_channel, slack_ts FROM plans WHERE id = ?').bind(planId).first<{ slack_channel: string; slack_ts: string }>()
-        if (!row?.slack_ts || row.slack_channel !== channel) return
+        if (!row?.slack_ts || row.slack_channel !== channel) return null
         ts = row.slack_ts
         await sendParent(env, channel, ts, first)
       }
@@ -949,7 +951,8 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         sender: personSender(stage.by, people[stage.by.toLowerCase()], 'staged'),
       })
     } else if (event) {
-      await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text as string, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ? await senderFields(env, db, siteUrl, event.sender) : PLAN_SENDER), unfurl_links: false })
+      const r = await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text as string, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ? await senderFields(env, db, siteUrl, event.sender) : PLAN_SENDER), unfurl_links: false })
+      if (r.ok && typeof r.ts === 'string') replied = `${channel}/${r.ts}`
     }
     // A run starting or ending shows or hides each stage reply's Reject.
     if (runEv) await updateReplies(env, db, planId, siteUrl).catch(e => console.log(`staged slack replies refresh failed for plan ${planId}: ${(e as Error).message}`))
@@ -975,6 +978,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
   } catch (e) {
     console.log(`staged slack notify failed for plan ${planId}: ${(e as Error).message}`)
   }
+  return replied
 }
 
 /** Re-render stage replies in place (`chat.update`: no one is notified): the
@@ -1045,13 +1049,52 @@ export async function refreshStagedCard(env: NotifyEnv, db: D1Database, siteUrl:
 
 /** Announce runs that just finished (an executor's reflection) in their
  * plans' threads: the totals, or that the run ended without a result. */
-export async function announceFinished(env: NotifyEnv, db: D1Database, runs: readonly FinishedRun[], siteUrl: string): Promise<void> {
+/** Where a run's end is posted (`deletion_run_posts.target`): the platform, not its channel, so a deployment that moves
+ *  channels never re-posts old runs into the new one. `*` is a row recorded before targets were (`run-posts.sql`'s
+ *  backfill): it covers every target. */
+export const runPostTarget = (env: SlackEnv): string | null => slackReady(env) ? 'slack' : null
+/** A run finished at least this long ago with no post is one whose own announcement never landed. */
+export const MISSED_AFTER_S = 120
+/** A claim (`post_id` NULL) older than this is a notify that died mid-post: its run is announced again. */
+export const CLAIM_GRACE_S = 600
+/** The retry reaches back this far, and announces at most `MISSED_MAX` runs a sweep. */
+export const MISSED_WINDOW_S = 14 * 86400
+export const MISSED_MAX = 3
+
+/** Announce each finished run in its plan's thread (`notifyPlan`), once per target: a claimed `deletion_run_posts` row
+ *  (`post_id` NULL) before posting, so concurrent refreshes post it once; the reply's id after; the claim dropped when
+ *  the post fails, so `missedRuns` finds it again. */
+export async function announceFinished(env: NotifyEnv, db: D1Database, runs: readonly FinishedRun[], siteUrl: string, now: number = Math.floor(Date.now() / 1000)): Promise<void> {
+  const target = runPostTarget(env)
   for (const { run_id, ok, reason, outcome } of runs) {
     const r = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(run_id).first<RunRow & { plan_id: number | null }>()
     if (r?.plan_id == null) continue
     // What the run deleted leaves the queue before the thread re-renders; the run event then re-renders every stage reply
     // (`notifyPlan` → `updateReplies`), so each shows what was deleted and what is left, and gets its Reject back.
     if (ok) await unstageDeleted(db, r.plan_id, [run_id])
-    await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed', reason, outcome })
+    if (!target) continue
+    const claim = await db.prepare('INSERT OR IGNORE INTO deletion_run_posts (run_id, target, post_id, posted_ts) VALUES (?, ?, NULL, ?)').bind(run_id, target, now).run()
+    if (!claim.meta.changes) continue
+    const posted = await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed', reason, outcome })
+    if (posted) await db.prepare('UPDATE deletion_run_posts SET post_id = ? WHERE run_id = ? AND target = ?').bind(posted, run_id, target).run()
+    else await db.prepare('DELETE FROM deletion_run_posts WHERE run_id = ? AND target = ? AND post_id IS NULL').bind(run_id, target).run()
   }
+}
+
+/** Finished runs whose end was never posted to this deployment's target (their own announcement died, or failed to
+ *  post): reflected (`plan_digest` set), finished `MISSED_AFTER_S`–`MISSED_WINDOW_S` ago, no row for the target or `*`;
+ *  a claim older than `CLAIM_GRACE_S` is dropped first. Oldest first, at most `MISSED_MAX`; `ok` as the reflect
+ *  recorded it (a failure's `plan_digest` is ''). `skip`: runs the caller is announcing already. */
+export async function missedRuns(env: SlackEnv, db: D1Database, now: number = Math.floor(Date.now() / 1000), skip: readonly string[] = []): Promise<FinishedRun[]> {
+  const target = runPostTarget(env)
+  if (!target) return []
+  await db.prepare('DELETE FROM deletion_run_posts WHERE target = ? AND post_id IS NULL AND posted_ts < ?').bind(target, now - CLAIM_GRACE_S).run()
+  const { results } = await db.prepare(`
+    SELECT r.run_id, r.plan_digest FROM deletion_runs r
+    WHERE r.plan_id IS NOT NULL AND r.finished_ts IS NOT NULL AND r.plan_digest IS NOT NULL AND r.finished_ts < ? AND r.finished_ts >= ?
+      AND NOT EXISTS (SELECT 1 FROM deletion_run_posts p WHERE p.run_id = r.run_id AND p.target IN ('*', ?))
+    ORDER BY r.finished_ts, r.run_id LIMIT ?
+  `).bind(now - MISSED_AFTER_S, now - MISSED_WINDOW_S, target, MISSED_MAX + skip.length).all<{ run_id: string; plan_digest: string }>()
+  const seen = new Set(skip)
+  return results.filter(r => !seen.has(r.run_id)).slice(0, MISSED_MAX).map(r => ({ run_id: r.run_id, ok: r.plan_digest !== '' }))
 }

@@ -313,6 +313,14 @@ CREATE TABLE deletion_progress (
   PRIMARY KEY (run_id, bucket, ts)
 );
 
+CREATE TABLE deletion_run_posts (
+  run_id TEXT NOT NULL REFERENCES deletion_runs(run_id),
+  target TEXT NOT NULL,
+  post_id TEXT,
+  posted_ts INTEGER NOT NULL,
+  PRIMARY KEY (run_id, target)
+);
+
 CREATE TABLE profiles (
   email       TEXT PRIMARY KEY,
   avatar      TEXT,

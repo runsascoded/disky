@@ -19,7 +19,7 @@ import { type ExecEnv, type Expected, expectedOfVars, sweepsOff } from '../../_l
 import { type BatchConfig, batchConfig, notConfigured } from '../../_lib/batchConfig.js'
 import { batchLogsUrl, gcpToken } from '../../_lib/gcp.js'
 import { runDir } from '../../_lib/sweepDispatch.js'
-import { announceFinished } from '../../_lib/stagedSlack.js'
+import { announceFinished, missedRuns } from '../../_lib/stagedSlack.js'
 import { isSweepJob, isUndoJob, jobIdOf, listSweepJobs, reflectSweepRuns, settleSweepJobs, type SweepBatchJob } from '../../_lib/sweepReflect.js'
 import { S3Store } from '@rdub/file-tree/stores/s3'
 import { storeCreds, storeReady, storeTarget, withPathStore } from '../../_lib/index.js'
@@ -112,9 +112,11 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
   if (db && !sweepsOff(ctx.env)) {
     const finished = await reflectSweepRuns(cfg, db, jobs, undefined, reason, undefined, outcomeReader(ctx.env), totalsReader(ctx.env))
     await settleSweepJobs(cfg, db, jobs)
-    if (finished.length) {
+    // With any earlier run whose own announcement never posted (`missedRuns`).
+    const announce = [...finished, ...await missedRuns(ctx.env, db, undefined, finished.map(f => f.run_id))]
+    if (announce.length) {
       // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
-      const p = withPathStore(ctx).then(c => announceFinished(c.env, db, finished, new URL(ctx.request.url).origin))
+      const p = withPathStore(ctx).then(c => announceFinished(c.env, db, announce, new URL(ctx.request.url).origin))
       if (ctx.waitUntil) ctx.waitUntil(p)
       else await p
     }

@@ -18,7 +18,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Expected, refuse, sweepsOff, SWEEPS_OFF } from './dispatch.js'
 import { NotInPlan, planDigest, planRuns, realRun, type RunRow } from './plans.js'
 
-import { announceFinished, notifyPlan } from './stagedSlack.js'
+import { announceFinished, missedRuns, notifyPlan } from './stagedSlack.js'
 import { planSweep } from './planDispatch.js'
 import { sweep } from './sweepDispatch.js'
 
@@ -60,10 +60,11 @@ export interface DispatchOk {
 }
 export type DispatchResult = DispatchOk | DispatchErr
 
-/** Bring runs up to date and announce any that just finished. */
+/** Bring runs up to date and announce any that just finished, and any earlier one whose announcement never posted. */
 export async function refreshRuns(env: ExecEnv, db: D1Database, siteUrl: string, ex: Executor): Promise<void> {
   const done = await ex.refresh(env, db)
-  if (done.length) await announceFinished(env, db, done, siteUrl)
+  const announce = [...done, ...await missedRuns(env, db, undefined, done.map(d => d.run_id))]
+  if (announce.length) await announceFinished(env, db, announce, siteUrl)
 }
 
 export async function dispatchPlan(

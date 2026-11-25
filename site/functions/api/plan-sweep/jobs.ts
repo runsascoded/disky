@@ -14,7 +14,7 @@ import { runGsPath } from "../../_lib/cwBatch.js"
 import { batchLogsUrl, gcpToken } from "../../_lib/gcp.js"
 import { NO_SHAPE, prefixShape, settleOpenPlan } from "../../_lib/plans.js"
 import { jobIdOf, listBatchJobs, reflectRuns, sweepJobs } from "../../_lib/runReflect.js"
-import { announceFinished, type NotifyEnv } from "../../_lib/stagedSlack.js"
+import { announceFinished, missedRuns, type NotifyEnv } from "../../_lib/stagedSlack.js"
 import { withPathStore } from "../../_lib/index.js"
 import { expectedOfVars, sweepsOff } from "../../_lib/dispatch.js"
 
@@ -39,9 +39,11 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
   if (db && !sweepsOff(ctx.env)) {
     const finished = await reflectRuns(cfg, db, token, jobs, shape.buckets[0])
     await settleOpenPlan(db, sweepJobs(jobs).filter(j => j.status?.state === 'SUCCEEDED').map(jobIdOf))
-    if (finished.length) {
+    // With any earlier run whose own announcement never posted (`missedRuns`).
+    const announce = [...finished, ...await missedRuns(ctx.env, db, undefined, finished.map(f => f.run_id))]
+    if (announce.length) {
       // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
-      const p = withPathStore(ctx).then(c => announceFinished(c.env, db, finished, new URL(ctx.request.url).origin))
+      const p = withPathStore(ctx).then(c => announceFinished(c.env, db, announce, new URL(ctx.request.url).origin))
       if (ctx.waitUntil) ctx.waitUntil(p)
       else await p
     }

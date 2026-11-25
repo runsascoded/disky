@@ -34,7 +34,7 @@ vi.mock('./identity.js', async orig => ({
   loadRegistry: async () => ({ 'ann-bee': { name: 'Ann Bee' }, kai: { u: 'kai', name: 'Kai', github: 'kai-gh' } }),
 }))
 
-const { announceFinished, notifyPlan, refreshStagedCard, refreshThread } = await import('./stagedSlack.js')
+const { announceFinished, missedRuns, notifyPlan, refreshStagedCard, refreshThread } = await import('./stagedSlack.js')
 const { onRequestPost: slackActions } = await import('../slack/actions.js')
 
 const SITE = 'https://site.example.org'
@@ -180,6 +180,70 @@ describe('D1', () => {
       raw.prepare("INSERT INTO deletion_bands (run_id, prefix, bytes, objects, undone_objects) VALUES ('r1', 'gs://b/a/', ?, 10, 0)").run(TiB)
       await announceFinished(env as Parameters<typeof announceFinished>[0], db, [{ run_id: 'r1', ok: true }], SITE)
       expect(calls.filter(c => c.method === 'chat.postMessage').map(c => [c.body.username, c.body.icon_url])).toEqual([['Ann Bee · finished', 'https://img/ann.png']])
+    })
+  })
+
+  describe('a run whose end never posted is announced by a later refresh (`missedRuns`)', () => {
+    const NOW = 2_000_000
+    /** Plan 1's runs, each a case: past the 14-day window, covered by a `*` backfill row, finished too recently (its own
+     *  announcement may be under way), already posted, never posted (ok, and failed), still running, not yet reflected
+     *  (gcs: `plan_digest` NULL), claimed a minute ago, and claimed long enough ago that the notify must have died. */
+    async function runs() {
+      const { db, raw } = await planDb({ seed: false })
+      const run = (id: string, finished: number | null, digest: string | null) => raw.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, plan_digest, log_dir, plan_id)
+        VALUES (?, 'p', ?, 0, 0, ?, 'dry', 10, ?, ?, 'd', 1)`).run(id, SCAN, ANN, finished, digest)
+      const post = (id: string, target: string, postId: string | null, ts: number) => raw.prepare('INSERT INTO deletion_run_posts (run_id, target, post_id, posted_ts) VALUES (?, ?, ?, ?)').run(id, target, postId, ts)
+      run('old', NOW - 15 * 86400, 'D')
+      run('starred', NOW - 3600, 'D'); post('starred', '*', null, 1)
+      run('fresh', NOW - 60, 'D')
+      run('posted', NOW - 3600, 'D'); post('posted', 'slack', `${CH}/1.000001`, NOW - 3600)
+      run('missed', NOW - 3600, 'D')
+      run('failed', NOW - 1800, '')
+      run('running', null, 'D')
+      run('unreflected', NOW - 3600, null)
+      run('claimed', NOW - 7200, 'D'); post('claimed', 'slack', null, NOW - 60)
+      run('abandoned', NOW - 7200, 'D'); post('abandoned', 'slack', null, NOW - 700)
+      return { db, raw }
+    }
+    const rows = (raw: Awaited<ReturnType<typeof sqliteD1>>['raw']) =>
+      raw.prepare("SELECT run_id, post_id FROM deletion_run_posts WHERE target = 'slack' ORDER BY run_id").all().map(r => [r.run_id, r.post_id])
+    const threadPosts = (calls: Call[]) => calls.filter(c => c.method === 'chat.postMessage' && c.body.thread_ts === PARENT).map(c => String(c.body.text).split(' finished')[0])
+
+    it('finds the unposted ones, oldest first (an abandoned claim dropped); `ok` as reflected', async () => {
+      const { db } = await runs()
+      expect(await missedRuns(env, db, NOW)).toEqual([{ run_id: 'abandoned', ok: true }, { run_id: 'missed', ok: true }, { run_id: 'failed', ok: false }])
+      expect(await missedRuns(env, db, NOW, ['abandoned'])).toEqual([{ run_id: 'missed', ok: true }, { run_id: 'failed', ok: false }])
+      expect(await missedRuns({}, db, NOW)).toEqual([])
+    })
+
+    it('posts each once, records its message, and the next sweep finds none', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await runs()
+      await announceFinished(env, db, await missedRuns(env, db, NOW), SITE, NOW)
+      await announceFinished(env, db, await missedRuns(env, db, NOW), SITE, NOW)
+      expect([threadPosts(calls).length, rows(raw), await missedRuns(env, db, NOW)]).toEqual([3, [
+        ['abandoned', `${CH}/200.000001`], ['claimed', null], ['failed', `${CH}/200.000003`], ['missed', `${CH}/200.000002`], ['posted', `${CH}/1.000001`],
+      ], []])
+    })
+
+    it('two refreshes announcing the same run at once post it once', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await runs()
+      const once = () => announceFinished(env, db, [{ run_id: 'missed', ok: true }], SITE, NOW)
+      await Promise.all([once(), once()])
+      expect([threadPosts(calls).length, rows(raw).filter(([id]) => id === 'missed')]).toEqual([1, [['missed', `${CH}/200.000001`]]])
+    })
+
+    it('a post Slack refuses leaves no row, so the next sweep tries again', async () => {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: false, error: 'ratelimited' }))))
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+      const { db, raw } = await runs()
+      await announceFinished(env, db, await missedRuns(env, db, NOW), SITE, NOW)
+      log.mockRestore()
+      expect([rows(raw), await missedRuns(env, db, NOW)]).toEqual([
+        [['claimed', null], ['posted', `${CH}/1.000001`]],
+        [{ run_id: 'abandoned', ok: true }, { run_id: 'missed', ok: true }, { run_id: 'failed', ok: false }],
+      ])
     })
   })
 
