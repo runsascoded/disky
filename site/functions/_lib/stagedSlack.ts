@@ -1056,7 +1056,7 @@ export const runPostTarget = (env: SlackEnv): string | null => slackReady(env) ?
 /** A run finished at least this long ago with no post is one whose own announcement never landed. */
 export const MISSED_AFTER_S = 120
 /** A claim (`post_id` NULL) older than this is a notify that died mid-post: its run is announced again. */
-export const CLAIM_GRACE_S = 600
+export const RUN_CLAIM_GRACE_S = 600
 /** The retry reaches back this far, and announces at most `MISSED_MAX` runs a sweep. */
 export const MISSED_WINDOW_S = 14 * 86400
 export const MISSED_MAX = 3
@@ -1083,12 +1083,12 @@ export async function announceFinished(env: NotifyEnv, db: D1Database, runs: rea
 
 /** Finished runs whose end was never posted to this deployment's target (their own announcement died, or failed to
  *  post): reflected (`plan_digest` set), finished `MISSED_AFTER_S`–`MISSED_WINDOW_S` ago, no row for the target or `*`;
- *  a claim older than `CLAIM_GRACE_S` is dropped first. Oldest first, at most `MISSED_MAX`; `ok` as the reflect
+ *  a claim older than `RUN_CLAIM_GRACE_S` is dropped first. Oldest first, at most `MISSED_MAX`; `ok` as the reflect
  *  recorded it (a failure's `plan_digest` is ''). `skip`: runs the caller is announcing already. */
 export async function missedRuns(env: SlackEnv, db: D1Database, now: number = Math.floor(Date.now() / 1000), skip: readonly string[] = []): Promise<FinishedRun[]> {
   const target = runPostTarget(env)
   if (!target) return []
-  await db.prepare('DELETE FROM deletion_run_posts WHERE target = ? AND post_id IS NULL AND posted_ts < ?').bind(target, now - CLAIM_GRACE_S).run()
+  await db.prepare('DELETE FROM deletion_run_posts WHERE target = ? AND post_id IS NULL AND posted_ts < ?').bind(target, now - RUN_CLAIM_GRACE_S).run()
   const { results } = await db.prepare(`
     SELECT r.run_id, r.plan_digest FROM deletion_runs r
     WHERE r.plan_id IS NOT NULL AND r.finished_ts IS NOT NULL AND r.plan_digest IS NOT NULL AND r.finished_ts < ? AND r.finished_ts >= ?
