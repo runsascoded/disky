@@ -940,13 +940,16 @@ def status(cfg: Config, done: list[dict]) -> str:
     return f"{cfg.mark(grade(done[0]))} {cfg.title}: latest run {describe(done[0])}" if done else f"{cfg.title}: no finished runs yet"
 
 
-def canvas_text(cfg: Config, rows: list[dict], thread: str | None, series: Mapping[str, dict | int], now: float) -> str:
+def canvas_text(cfg: Config, rows: list[dict], thread: str | None, series: Mapping[str, dict | int]) -> str:
     """The channel canvas: the deployment's `status`, each store, the latest finished run's outcome and longest phases,
-    the last ten finished runs, and the site's pages. `rows` newest first; `thread` the open thread head's permalink."""
+    the last ten finished runs, and the site's pages. `rows` newest first; `thread` the open thread head's permalink.
+    Its Updated line is the newest finished run's end, so the text is a function of the runs and a report with nothing
+    new leaves it as it was (`write_canvas` then writes nothing)."""
     done = [r for r in rows if not live(r)]
     title = status(cfg, done)
-    at = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-    out = [f"{title}" + (f" · [thread]({thread})" if thread else '') + f"\n\nUpdated {at}."]
+    at = max((r['run']['finished_ts'] for r in done), default=None)
+    out = [f"{title}" + (f" · [thread]({thread})" if thread else '')
+           + (f"\n\nUpdated {datetime.fromtimestamp(at, timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}." if at is not None else '')]
     if cfg.stores:
         out += ['## Stores', '\n'.join(f"- {store_line(cfg, label, store, series[store])}" for label, store in cfg.stores)]
     if done:
@@ -963,7 +966,7 @@ def canvas_text(cfg: Config, rows: list[dict], thread: str | None, series: Mappi
 
 def write_canvas(state: dict, slack: Transport, body: str, title: str, save: Callable[[dict], None]) -> None:
     """Create the channel's canvas titled `title` (its tab's label), or replace its content when the body changed and
-    its title when that did. The canvas's Updated line changes every run, so this writes once per report."""
+    its title when that did; nothing when neither changed."""
     if state.get('canvas_body') == body and state.get('canvas_title') == title:
         return
     slack.join()
@@ -1776,7 +1779,7 @@ def run(
             check()
             thread = (month_url(state) if cfg.monthly else
                       slack.permalink(state['parent']) if state.get('parent') and not state.get('closed') else None)
-            write_canvas(state, slack, canvas_text(cfg, rows, thread, series, time.time()), cfg.title, save)
+            write_canvas(state, slack, canvas_text(cfg, rows, thread, series), cfg.title, save)
         if sink is not None:
             from .scan_runs import thread_url_sql
 

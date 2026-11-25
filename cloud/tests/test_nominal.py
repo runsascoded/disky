@@ -905,10 +905,10 @@ def test_canvas_names_the_status_stores_latest_run_and_its_longest_phases_and_re
               'spans': [dict(phase='list a', start=0, end=562), dict(phase='index', start=600, end=624),
                         dict(phase='static-names', start=700, end=1176), dict(phase='open', start=1200, end=None)]}
     rows = [row(3, 'running', finished_ts=None), latest, row(1, 'failed', failed_phase='index', error='boom')]
-    text = N.canvas_text(cfg, rows, 'https://slack.test/p1.0', {'meta': 503}, N.series_ts('2026-11-03T0900'))
+    text = N.canvas_text(cfg, rows, 'https://slack.test/p1.0', {'meta': 503})
     assert text.split('\n\n') == [
         '✅ Test scans: 1 consecutive clean run · [thread](https://slack.test/p1.0)',
-        'Updated 2026-11-03 09:00 UTC.',
+        'Updated 2026-11-03 08:01 UTC.',
         '## Stores',
         '- [Meta](https://site.test/meta): size unavailable (HTTP 503).',
         '## Latest run',
