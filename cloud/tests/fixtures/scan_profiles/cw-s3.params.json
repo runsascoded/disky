@@ -56,7 +56,8 @@
   "stack": "prod",
   "team": "x",
   "component": "scan",
-  "scan_id": "2026-10-16t1200"
+  "scan_id": "2026-10-16t1200",
+  "scan_run": "run-1"
  },
  "cache": true,
  "queue_size": 20,
