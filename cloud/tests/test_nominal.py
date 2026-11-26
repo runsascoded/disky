@@ -1755,6 +1755,23 @@ def test_a_replys_sections_are_expanded_so_slack_shows_every_line():
     ]
 
 
+def test_a_section_messages_text_fallback_is_its_first_lines_under_chat_updates_limit():
+    """`chat.update` refuses a `text` near 4,000 characters (`msg_too_long`: gcs's W47 reply, 30 runs and 4 failure
+    links, 2026-11-26); the blocks carry the whole body, the `text` fallback its lines up to `FALLBACK_MAX`, then `…`."""
+    lines = [f'line {i:02d} ' + 'x' * 60 for i in range(60)]  # 68 characters a line, 4,139 in all
+    wire = '\n'.join(lines)
+    assert [N.fallback_text(wire), N.fallback_text(wire[:3000]), N.fallback_text('y' * 3001)] == [
+        '\n'.join(lines[:43]) + '\n…', wire[:3000], 'y' * 2998 + '\n…']
+    calls = []
+    slack = N.Slack.__new__(N.Slack)
+    slack._have = None  # the workspace unknown: `have` reads it before asking Slack
+    slack.client = SimpleNamespace(channel='C123', _request=lambda api, args: calls.append((api, args)) or {'ts': '9.0'})
+    slack.edit_sections('2.0', wire)
+    [(api, args)] = calls
+    assert (api, args['ts'], args['text'], [b['text']['text'] for b in args['blocks']]) == (
+        'chat.update', '2.0', '\n'.join(lines[:43]) + '\n…', ['\n'.join(lines[:43]), '\n'.join(lines[43:])])
+
+
 def test_a_weeks_runs_reply_past_a_sections_limit_is_one_message_of_several_sections():
     """cw's 4 runs a day pass a `section`'s 3,000 characters within a week: one reply of lines, which thrds'
     `section_blocks(lines=True)` splits between lines into several sections of the one message."""

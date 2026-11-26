@@ -56,6 +56,10 @@ WORDS = {'clean': 'clean', 'issues': 'phase issues', 'failed': 'failing', 'runs'
 TRIGGERS = {'schedule': 'schedule', 'manual': 'manual', None: 'unknown'}
 #: Slack's longest sender name
 USERNAME_MAX = 80
+#: A `section` message's `text` (the notification and search fallback; the blocks carry the body): `chat.update` refuses
+#: one near 4,000 characters (`msg_too_long`), though `chat.postMessage` takes 40,000 (gcs's W47 reply, 30 runs and 4
+#: failure links, 2026-11-26)
+FALLBACK_MAX = 3000
 
 
 @dataclass(frozen=True)
@@ -475,6 +479,16 @@ def expanded_sections(wire: str) -> list[dict]:
     return [{**b, 'expand': True} for b in section_blocks(wire, lines=True)]
 
 
+def fallback_text(wire: str, limit: int = FALLBACK_MAX) -> str:
+    """`wire` as a `section` message's `text`: whole within `limit` characters, else its lines up to the last that fits
+    (a line past `limit` cut there), then `…` (`FALLBACK_MAX`)."""
+    if len(wire) <= limit:
+        return wire
+    head = wire[:limit - 2]
+    cut = head.rfind('\n')
+    return (head[:cut] if cut > 0 else head) + '\n…'
+
+
 def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
     """A run reply's sender (Ryan, 2026-11-22): its line's facts as the name, `<stamp> · <duration> · <outcome>`
     (`OUTCOME_WORD`; a live run's `<stamp> · running`), clipped (…) to Slack's 80 characters; its icon the outcome, with
@@ -818,12 +832,12 @@ class Slack:
 
     def _sections(self, body: str) -> dict:
         """`body` (markdown, converted as thrds converts a post, a missing vocabulary emoji as its stock one) as one
-        message's `section` blocks (`expanded_sections`); the whole text as the notification fallback."""
+        message's `section` blocks (`expanded_sections`); its first lines as the notification fallback (`fallback_text`)."""
         from thrds.mrkdwn import to_slack
 
         wire = to_slack(V.fallback(body, self.have))
         unfurl = not getattr(self.client, '_suppress_unfurls', False)
-        return {'channel': self.client.channel, 'text': wire, 'unfurl_links': unfurl, 'unfurl_media': unfurl,
+        return {'channel': self.client.channel, 'text': fallback_text(wire), 'unfurl_links': unfurl, 'unfurl_media': unfurl,
                 'blocks': expanded_sections(wire)}
 
     def post_sections(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
