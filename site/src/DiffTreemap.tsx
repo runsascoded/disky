@@ -1,4 +1,6 @@
 import { Explain } from './Help'
+import { Tooltip } from './Tooltip'
+import { fmtRate, fmtSpan, RATE_UNITS, rateUnit } from './windowSpan'
 import { useMemo } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { Treemap as DtTreemap } from '@disk-tree/react'
@@ -42,6 +44,8 @@ export type DiffModel = {
   fmtNDelta: (d: number) => string
   fmtC: (n: number) => string
   fmtCDelta: (d: number) => string
+  /** The window's length (ms), when both ends' times are known: each movement row then shows its Δ as a rate. */
+  spanMs?: number
 }
 
 /** A diff cell's size text, longest first (`formatCell` candidates): `+grew −shrank = ±net` when the cell both grew
@@ -52,7 +56,7 @@ export function diffCellText(n: { added: number; removed: number; delta: number 
   return n.added > 0 && n.removed > 0 && fmtDelta(n.added - n.removed) === net ? [`+${fmtBytes(n.added)} −${fmtBytes(n.removed)} = ${net}`, net] : [net]
 }
 
-export function useDiffModel(data: DiffData | null, atRoot: boolean, label: string): DiffModel | null {
+export function useDiffModel(data: DiffData | null, atRoot: boolean, label: string, spanMs?: number): DiffModel | null {
   const { fmtBytes } = useUnits()
   // Area mode is shareable state: `?dm=max` switches to max(old,new) areas; Δ
   // (area = |delta|) is the default — the movement is what a diff view is for —
@@ -88,7 +92,7 @@ export function useDiffModel(data: DiffData | null, atRoot: boolean, label: stri
     }
   }, [data, dmP, atRoot, label, fmtBytes])
   if (!derived || !data) return null
-  return { data, label, setAreaMode, ...derived }
+  return { data, label, setAreaMode, spanMs: spanMs && spanMs > 0 ? spanMs : undefined, ...derived }
 }
 
 /** The 2-row header band above the diff map: scan pickers + presets (passed in
@@ -125,13 +129,33 @@ interface MoveRow {
   label: string
   old: number; removed: number; added: number; neu: number; delta: number; first?: number
   fmt: (n: number) => string; fmtD: (n: number) => string
+  /** The rate's format (default `fmtD`): an exact count's would print a rate's fractions. */
+  fmtR?: (n: number) => string
   eq?: string; suffix?: string
+}
+
+/** A row's Δ as a rate over the window, in the unit fitted to it (`rateUnit`); with `units`, a tooltip gives it per
+ *  hour, day, month and year (the resting card, which can be hovered; a hovered cell's card can't). */
+function Rate({ r, spanMs, units }: { r: MoveRow; spanMs: number; units?: boolean }) {
+  const fmt = r.fmtR ?? r.fmtD
+  const text = fmtRate(r.delta, spanMs, rateUnit(spanMs), fmt)
+  return (
+    <td className={`rate ${r.delta >= 0 ? 'grew' : 'shrank'}`}>
+      {units
+        ? <Tooltip content={<>{RATE_UNITS.map(([u]) => <div key={u}>{fmtRate(r.delta, spanMs, u, fmt)}</div>)}
+            <div style={{ opacity: 0.6, marginTop: 2 }}>over the window's {fmtSpan(spanMs)}</div></>}>
+            <span tabIndex={0}>{text}</span>
+          </Tooltip>
+        : text}
+    </td>
+  )
 }
 
 /** The movement table (bytes + objects), used for both the whole-diff totals
  *  (resting drawer) and a hovered cell — one format + font everywhere. Columns
- *  are always shown (even a `− 0`), so a cell reads the same as the root. */
-function MoveTable({ rows, showFirst }: { rows: MoveRow[]; showFirst?: boolean }) {
+ *  are always shown (even a `− 0`), so a cell reads the same as the root. With
+ *  `spanMs`, each row ends in its Δ's rate over the window. */
+function MoveTable({ rows, showFirst, spanMs, units }: { rows: MoveRow[]; showFirst?: boolean; spanMs?: number; units?: boolean }) {
   return (
     <table className="diff-move">
       <tbody>
@@ -144,6 +168,7 @@ function MoveTable({ rows, showFirst }: { rows: MoveRow[]; showFirst?: boolean }
             {showFirst && <td className="first">{r.first ? `⊕ ${r.fmt(r.first)}` : ''}</td>}
             <td className="eq">{r.eq ?? '='} {r.fmt(r.neu)}{r.suffix ?? ''}</td>
             <td className={r.delta >= 0 ? 'grew' : 'shrank'}>({r.fmtD(r.delta)})</td>
+            {spanMs !== undefined && <Rate r={r} spanMs={spanMs} units={units} />}
           </tr>
         ))}
       </tbody>
@@ -154,11 +179,11 @@ function MoveTable({ rows, showFirst }: { rows: MoveRow[]; showFirst?: boolean }
 /** The root movement table: bytes and objects (compact sig-figs). */
 function DiffStats({ model }: { model: DiffModel }) {
   const { data, root, added, removed, n_added, n_removed, grew, grewN, firstScanned, firstScannedN,
-    fmtBytes, fmtDelta, fmtC, fmtCDelta } = model
+    fmtBytes, fmtDelta, fmtC, fmtCDelta, spanMs } = model
   const bEq = data.truncated || added - removed !== root.delta ? '≈' : '='
   const nEq = data.truncated || n_added - n_removed !== root.n_desc_delta ? '≈' : '='
   return (
-    <MoveTable showFirst={firstScanned > 0} rows={[
+    <MoveTable showFirst={firstScanned > 0} spanMs={spanMs} units rows={[
       { label: 'bytes', old: root.size_old, removed, added: grew, neu: root.size_new, delta: root.delta, first: firstScanned, fmt: fmtBytes, fmtD: fmtDelta, eq: bEq },
       { label: 'objects', old: root.n_old, removed: n_removed, added: grewN, neu: root.n_new, delta: root.n_desc_delta, first: firstScannedN, fmt: fmtC, fmtD: fmtCDelta, eq: nEq },
     ]} />
@@ -200,7 +225,7 @@ export function DiffTreemap({ model, onDrill, onOpen, hrefs }: {
   hrefs?: CellHrefs
 }) {
   usePerfCommit('dtm')
-  const { data, root, areaMode, label, fmtBytes, fmtDelta, fmtN, fmtNDelta } = model
+  const { data, root, areaMode, label, fmtBytes, fmtDelta, fmtN, fmtNDelta, fmtCDelta } = model
   // The main map's renderer / tiling prefs apply here too.
   const [tiling] = useTiling()
   const [renderer] = useRenderer()
@@ -259,10 +284,10 @@ export function DiffTreemap({ model, onDrill, onOpen, hrefs }: {
         renderTooltip={n => (
           <>
             <div style={{ fontWeight: 500 }}>{n.key}{n.first ? ' (first scanned)' : ''}</div>
-            <MoveTable rows={[
+            <MoveTable spanMs={model.spanMs} rows={[
               { label: 'bytes', old: n.size_old, removed: n.removed, added: n.added, neu: n.size_new, delta: n.delta, fmt: fmtBytes, fmtD: fmtDelta },
               ...(n.status !== 'filler'
-                ? [{ label: 'objects', old: n.n_old, removed: n.n_removed, added: n.n_added, neu: n.n_new, delta: n.n_desc_delta, fmt: fmtN, fmtD: fmtNDelta, suffix: ' obj' }]
+                ? [{ label: 'objects', old: n.n_old, removed: n.n_removed, added: n.n_added, neu: n.n_new, delta: n.n_desc_delta, fmt: fmtN, fmtD: fmtNDelta, fmtR: fmtCDelta, suffix: ' obj' }]
                 : []),
             ]} />
             <div style={{ opacity: 0.5, fontSize: '0.75em', marginTop: 2 }}>

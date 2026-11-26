@@ -339,8 +339,9 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     () => (seriesQ.data?.points ?? []).filter(p => manual.has(p.date)).map(p => xOfScan(p.date, times)),
     [seriesQ.data, manual, times],
   )
-  // the legend names the mark while one is drawn in view
+  // the legend names the mark while one is drawn in view; hovering or focusing it picks the manual scans out
   const manualLegend = manualMark !== 'off' && manualXs.some(x => inXDomain(xRange, x))
+  const [manualLit, setManualLit] = useState(false)
   // The roots' traces (split mode), keyed by bucket, in the map's colours: slot by size at the latest scan (largest =
   // slot 0; a root that scan doesn't hold ranks last), each slot's `slotColor`, as the map colours the root's children.
   const roots = useMemo(() => {
@@ -581,6 +582,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           formatTipX={x => fmt(idOfX(x)) + (manual.has(idOfX(x)) ? ' · manual' : '')}
           hollowXs={manualMark === 'hollow' ? manualXs : undefined}
           tickXs={manualMark === 'tick' ? manualXs : undefined}
+          highlightXs={manualLegend && manualLit ? manualXs : undefined}
           yTickValues={yTickValues}
           yFrom={relative ? 'zero' : yFrom}
           yLabel={values === 'pct' ? 'growth' : relative ? `${noun} since start` : metric === 'objects' ? 'objects' : 'stored bytes'}
@@ -622,8 +624,15 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
             </span>
           ))}
           {manualLegend && (
-            <Explain text="Started by hand, not by the schedule (⚙ changes the mark)">
-              <span className="li manual">
+            <Explain text="Started by hand, not by the schedule: hover to pick them out on the chart (⚙ changes the mark)">
+              <span
+                className={`li manual${manualLit ? ' lit' : ''}`}
+                tabIndex={0}
+                onMouseEnter={() => setManualLit(true)}
+                onMouseLeave={() => setManualLit(false)}
+                onFocus={() => setManualLit(true)}
+                onBlur={() => setManualLit(false)}
+              >
                 <svg width="10" height="10" aria-hidden="true">
                   {manualMark === 'tick'
                     ? <path d="M5,2l4,7h-8z" fill="var(--dt-ts-tick, rgba(139,148,158,0.9))" />

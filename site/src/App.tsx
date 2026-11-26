@@ -38,6 +38,7 @@ import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
+import { fmtSpan, spanUnits } from './windowSpan'
 import { indexingScans, searchOff } from './defaultScan'
 import { SearchOffNote, SearchOffTip } from './SearchCatchUp'
 import { scansHref, useScanRunOf } from './scanRunsUi'
@@ -1031,7 +1032,9 @@ function AppContent() {
   // Diff model (built tree + movement totals + formatters), shared by the diff
   // header band and the diff map. Built here so the header stays mounted while a
   // diff is loading/errored (the map isn't rendered then).
-  const diffModel = useDiffModel(diff, !diffPath, scopeDesc)
+  // The window's length, between its two scans' times: stated beside the pickers, and each movement row's rate
+  const diffSpanMs = asof && diffPrev ? scanInstant(asof, times) - scanInstant(diffPrev, times) : undefined
+  const diffModel = useDiffModel(diff, !diffPath, scopeDesc, diffSpanMs)
   // Controlled treemap drill path, resolved against the (possibly filtered/
   // scoped) tree each render: `?p=` survives scope toggles, filters, and scan
   // switches by re-walking the new tree; a vanished path truncates to its
@@ -1741,6 +1744,14 @@ function AppContent() {
                     fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
                 : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
             </>)}
+            {diffSpanMs !== undefined && diffSpanMs > 0 && (
+              <Tooltip content={<>
+                <div>{fmtS(diffPrev)} → {fmtS(asof)}</div>
+                {spanUnits(diffSpanMs).map(u => <div key={u}>{u}</div>)}
+              </>}>
+                <span className="d-span" tabIndex={0} aria-label={`diff window: ${fmtSpan(diffSpanMs)}`}>{fmtSpan(diffSpanMs)}</span>
+              </Tooltip>
+            )}
             <span className="d-modes">
               <span className="gran d-mode" role="radiogroup" aria-label="Diff start">
                 <span className="d-mode-lbl">start</span>

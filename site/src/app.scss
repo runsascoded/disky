@@ -2780,7 +2780,19 @@ select.assign-sel {
   .li { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); font-size: 12px; }
   .sw { width: 10px; height: 10px; border-radius: 3px; }
   .since { color: var(--ink-3); }
+  // hovering or focusing it picks the manual scans out on the chart (`highlightXs`)
+  .li.manual { cursor: default; border-radius: 4px; padding: 1px 5px; margin: -1px -5px; outline: none; }
+  .li.manual.lit, .li.manual:focus-visible { color: var(--ink); background: color-mix(in oklab, #f0b72f 18%, transparent); }
 }
+// The diff window's length beside its pickers (`fmtSpan`; its tooltip gives other units)
+.d-span {
+  margin-left: 8px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap;
+  cursor: default; text-decoration: underline dotted var(--ink-3); text-underline-offset: 3px;
+  &:focus-visible { outline: 1px solid var(--ink-3); outline-offset: 2px; }
+}
+.diff-move td.rate span { text-decoration: underline dotted var(--ink-3); text-underline-offset: 3px; cursor: default; }
+// A movement row's rate over the window (`Rate`)
+.diff-move td.rate { padding-left: 10px; font-variant-numeric: tabular-nums; opacity: 0.85; white-space: nowrap; }
 // The diff crumb's "⊕ first scanned" term: a root that entered the scan.
 .diff-move .first { color: var(--ink-3); }
 

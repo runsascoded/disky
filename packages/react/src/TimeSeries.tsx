@@ -204,6 +204,9 @@ export interface TimeSeriesProps<T> {
   hollowXs?: number[]
   /** x's marked by a small tick under the x-axis (the same scans, styled apart from the dots). */
   tickXs?: number[]
+  /** x's picked out for now (e.g. while a legend item naming them is hovered): a line through the plot at each, its
+   *  dots ringed and its tick enlarged. */
+  highlightXs?: number[]
   /** Vertical markers (`placeMarkers`): those inside the x-span get a line and a lane label above the plot. */
   markers?: Marker[]
   /** Wrap a marker's lane label (e.g. in a tooltip); `node` is the label (or a compact handle) as drawn. */
@@ -334,6 +337,7 @@ export function TimeSeries<T>({
   gaps,
   hollowXs,
   tickXs,
+  highlightXs,
   markers,
   renderMarker,
   className,
@@ -388,6 +392,7 @@ export function TimeSeries<T>({
 
   // Collect all distinct x's across series for hover snapping.
   const hollow = useMemo(() => new Set(hollowXs ?? []), [hollowXs])
+  const lit = useMemo(() => new Set(highlightXs ?? []), [highlightXs])
   const allXs = useMemo(() => {
     const s = new Set<number>()
     for (const ser of series) for (const p of ser.points) s.add(getX(p))
@@ -822,16 +827,32 @@ export function TimeSeries<T>({
                 {(s.dots ?? true) && sortedPts.map((p, i) => hollow.has(getX(p))
                   ? <circle key={i} className="dt-ts-dot-hollow" cx={xToPx(getX(p))} cy={yToPx(getY(p))} r={3.5} fill="var(--dt-ts-bg, #0d1117)" stroke={color} strokeWidth={2} />
                   : <circle key={i} cx={xToPx(getX(p))} cy={yToPx(getY(p))} r={2.5} fill={color} />)}
+                {lit.size > 0 && sortedPts.filter(p => lit.has(getX(p))).map(p => (
+                  <circle key={`h${getX(p)}`} className="dt-ts-dot-lit" cx={xToPx(getX(p))} cy={yToPx(getY(p))} r={6} fill="none"
+                    stroke="var(--dt-ts-highlight, #f0b72f)" strokeWidth={2} pointerEvents="none" />
+                ))}
               </g>
             )
           })}
           </g>
-          {/* Ticks: a small triangle under the x-axis at each `tickXs` x. */}
+          {/* Highlights: a line through the plot at each `highlightXs` x. */}
+          {lit.size > 0 && (
+            <g pointerEvents="none" className="dt-ts-highlights">
+              {[...lit].filter(x => x >= xMin && x <= xMax).map(x => {
+                const px = xToPx(x)
+                return <line key={`hl${x}`} className="dt-ts-highlight" x1={px} x2={px} y1={pad.top} y2={pad.top + plotH}
+                  stroke="var(--dt-ts-highlight, #f0b72f)" strokeWidth={1.5} strokeOpacity={0.6} />
+              })}
+            </g>
+          )}
+          {/* Ticks: a small triangle under the x-axis at each `tickXs` x (larger, in the highlight colour, when lit). */}
           {tickXs && tickXs.length > 0 && (
             <g pointerEvents="none" className="dt-ts-ticks">
               {tickXs.filter(x => x >= xMin && x <= xMax).map(x => {
                 const px = xToPx(x), y = pad.top + plotH + 1
-                return <path key={`t${x}`} className="dt-ts-tick" d={`M${px},${y}l3.5,6h-7z`} fill="var(--dt-ts-tick, rgba(139,148,158,0.9))" />
+                return lit.has(x)
+                  ? <path key={`t${x}`} className="dt-ts-tick dt-ts-tick-lit" d={`M${px},${y}l5.5,9h-11z`} fill="var(--dt-ts-highlight, #f0b72f)" />
+                  : <path key={`t${x}`} className="dt-ts-tick" d={`M${px},${y}l3.5,6h-7z`} fill="var(--dt-ts-tick, rgba(139,148,158,0.9))" />
               })}
             </g>
           )}
