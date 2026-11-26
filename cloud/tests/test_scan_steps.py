@@ -2094,3 +2094,23 @@ def test_vm_pack_batch_profile_check():
         "  options.vm-pack.batch.env: a mapping of strings",
         "profile: options.vm-pack.batch: a mapping",
     ]
+
+
+def test_run_cost_saves_the_runs_report_beside_the_cost_snapshots(tmp_path, env):
+    """`run-cost` (listed in `steps`): `dt-cloud scan-run cost -O` for the run (`$SCAN_RUN_ID`, else `$DT_RUN_ID`) into
+    the data store's `snapshots/cost/runs` and the R2 archive's; skipped without a run id, nothing on REPROC."""
+    opts = {"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}}
+    runs = []
+    for e in ({**env, "SCAN_RUN_ID": "cw-usage-1", "R2_ARCHIVE": "r2://arch"}, {**env, "DT_RUN_ID": "r2"}, env,
+              {**env, "SCAN_RUN_ID": "x", "REPROC": "1"}):
+        c = ctx(tmp_path, e, steps=["run-cost"], options=opts)
+        c.run = Notes()
+        S.run_cost(c, None)
+        runs.append((c.sh_impl.calls, c.run.calls))
+    done = [("begin", "run-cost"), ("end", "run-cost", 0, False, None, None)]
+    assert runs == [
+        (["dt-cloud scan-run cost -s 2026-10-16T1200 -r 7 -O <tmp>/data/snapshots/cost/runs -O r2://arch/snapshots/cost/runs cw-usage-1"], done),
+        (["dt-cloud scan-run cost -s 2026-10-16T1200 -r 7 -O <tmp>/data/snapshots/cost/runs r2"], done),
+        ([], []),
+        ([], []),
+    ]

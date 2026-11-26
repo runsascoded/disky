@@ -178,3 +178,35 @@ def test_cli_json_saved_read_only(tmp_path, monkeypatch):
     assert (result.exit_code, result.output) == (0, "")
     saved = json.loads(out.read_text())
     assert (saved["estimated_compute_usd"], saved["components"], saved["ongoing_jobs"], saved["unpriced_jobs"]) == (0.3, {"scan": .3}, [], [])
+
+
+def test_cli_saves_the_run_and_rereads_unsettled_reports(tmp_path, monkeypatch):
+    """`-O ROOT`: the run's report as `<ROOT>/<scan>/<root uid>.json` in every root, and an earlier scan's saved report
+    that still listed a job running (its head, a detached fold) reread from the same listing, now settled, into every
+    root; a settled report, or one older than `-r` days, is left as saved."""
+    from dt_cloud import scan_cost
+
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"project": "p", "regions": ["us-east1"], "prices": {"n2-highmem-16": 1}, "spot_factor": .3}))
+    earlier = job("earlier", "earlier-uid", {"scan_id": "2026-10-13t0700"})
+    monkeypatch.setattr(gcp, "batch_jobs", lambda project, region: [job(), earlier])
+    monkeypatch.setattr(gcp, "batch_tasks", lambda j: [hour_task()])
+    monkeypatch.setattr(scan_cost, "_now", lambda: NOW)
+    a, b = tmp_path / "a", tmp_path / "b"
+    for name, doc in (("2026-10-13T0700/earlier-uid.json", {"ongoing_jobs": ["earlier"], "estimated_compute_usd": 0.1}),
+                      ("2026-10-13T0100/settled-uid.json", {"ongoing_jobs": [], "estimated_compute_usd": 0.2}),
+                      ("2026-10-01T0700/old-uid.json", {"ongoing_jobs": ["old"], "estimated_compute_usd": 0.4})):
+        (a / name).parent.mkdir(parents=True, exist_ok=True)
+        (a / name).write_text(json.dumps(doc))
+    result = CliRunner().invoke(main, ["scan-run", "cost", "-c", str(profile), "-s", "2026-10-13T1300", "-r", "7",
+                                       "-O", str(a), "-O", str(b), "root-uid"])
+    assert result.exit_code == 0, result.output
+
+    def saved(root):
+        return {p.relative_to(root).as_posix(): (json.loads(p.read_text())["estimated_compute_usd"], json.loads(p.read_text())["ongoing_jobs"])
+                for p in sorted(root.rglob("*.json"))}
+    assert (saved(a), saved(b)) == (
+        {"2026-10-01T0700/old-uid.json": (0.4, ["old"]), "2026-10-13T0100/settled-uid.json": (0.2, []),
+         "2026-10-13T0700/earlier-uid.json": (0.3, []), "2026-10-13T1300/root-uid.json": (0.3, [])},
+        {"2026-10-13T0700/earlier-uid.json": (0.3, []), "2026-10-13T1300/root-uid.json": (0.3, [])},
+    )
