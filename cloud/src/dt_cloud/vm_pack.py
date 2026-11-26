@@ -247,9 +247,10 @@ def submit(root: str, *, image: str, service_account: str, region: str, project:
            env: Mapping[str, str] | None = None, secrets: Mapping[str, str] | None = None, cross_region: bool = False,
            dry_run: bool = False, environ: Mapping[str, str] | None = None) -> dict:
     """Submit the job writing `root`'s pack (`job_spec`), unless `vm-pack/CURRENT.json` already names the store's
-    current generation and newest manifest (`{…pointer, "skipped": true}`, no job). Through `batch.submit_job`: the
-    cost labels and, for a `gs://` store, its bucket's region checked against the job's (unless `cross_region`); a job
-    of that id already there counts as submitted. Not waited on. `dry_run`: the id and spec, nothing submitted."""
+    current generation and newest manifest (`{…pointer, "skipped": true}`, no job). Through the deployment's job
+    backend (`job_backend.resolve`; on Batch, `batch.submit_job`): the cost labels and, for a `gs://` store, its
+    bucket's region checked against the job's (unless `cross_region`); a job of that id already there counts as
+    submitted. Not waited on. `dry_run`: the id and spec, nothing submitted."""
     store = Store(store_url(root))
     gen, manifest = newest(store)
     if cur := published(store, gen, manifest):
@@ -265,11 +266,11 @@ def submit(root: str, *, image: str, service_account: str, region: str, project:
     out = {"job": jid, "region": region, "gen": gen, "manifest": manifest or ""}
     if dry_run:
         return {**out, "spec": spec}
-    from .batch import submit_job
+    from .job_backend import resolve
 
     bucket = gcs_bucket(root)
-    submit_job(spec, jid, region, project, buckets=[bucket] if bucket else [], cross_region=cross_region, exists_ok=True,
-               retry_for=SUBMIT_RETRY_S)
+    resolve(region, project).submit(spec, jid, buckets=[bucket] if bucket else [], cross_region=cross_region, exists_ok=True,
+                                    retry_for=SUBMIT_RETRY_S)
     err(f"vm-pack: job {jid} [{region}] submitted for {gen} / {manifest}")
     return {**out, "submitted": True}
 

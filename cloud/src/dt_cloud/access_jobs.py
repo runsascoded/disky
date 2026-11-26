@@ -94,9 +94,9 @@ def submit(root: str, days: Sequence[str], *, image: str, service_account: str, 
            machine: str = MACHINE, spot: bool = True, env: Mapping[str, str] | None = None,
            secrets: Mapping[str, str] | None = None, cross_region: bool = False, dry_run: bool = False,
            environ: Mapping[str, str] | None = None, now: dt.datetime | None = None) -> dict:
-    """Submit the job for `days`' missing ones (`plan`); none missing: no job. Through `batch.submit_job` (cost labels;
-    a `gs://` root's bucket region checked against the job's unless `cross_region`; a job of that id already there
-    counts as submitted). Not waited on. Returns `{missing, overdue, job?, submitted?, spec? (dry_run)}`."""
+    """Submit the job for `days`' missing ones (`plan`); none missing: no job. Through the deployment's job backend
+    (`job_backend.resolve`; on Batch, `batch.submit_job`: cost labels; a `gs://` root's bucket region checked against
+    the job's unless `cross_region`; a job of that id already there counts as submitted). Not waited on. Returns `{missing, overdue, job?, submitted?, spec? (dry_run)}`."""
     missing, overdue = plan(root, days)
     out: dict = {"missing": missing, "overdue": overdue}
     if not missing:
@@ -111,11 +111,11 @@ def submit(root: str, days: Sequence[str], *, image: str, service_account: str, 
     out["job"] = jid
     if dry_run:
         return {**out, "spec": spec}
-    from .batch import submit_job
+    from .job_backend import resolve
 
     bucket = gcs_bucket(root)
-    submit_job(spec, jid, region, project, buckets=[bucket] if bucket else [], cross_region=cross_region, exists_ok=True,
-               retry_for=SUBMIT_RETRY_S)
+    resolve(region, project).submit(spec, jid, buckets=[bucket] if bucket else [], cross_region=cross_region, exists_ok=True,
+                                    retry_for=SUBMIT_RETRY_S)
     err(f"{COMPONENT}: job {jid} [{region}] submitted for {', '.join(missing)}")
     return {**out, "submitted": True}
 

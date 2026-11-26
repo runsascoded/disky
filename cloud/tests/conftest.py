@@ -92,7 +92,8 @@ def _deployment_env(monkeypatch):
     monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=test")
     monkeypatch.setenv("BATCH_REGION", "my-region")
     # Deployment config the generic code requires (no defaults): unset unless a test sets it.
-    for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID", "BATCH_CROSS_REGION", "LISTING_REGIONS"):
+    for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID", "BATCH_CROSS_REGION", "LISTING_REGIONS",
+              "DISKY_JOB_BACKEND"):
         monkeypatch.delenv(v, raising=False)
     # the cw digest's scan triggers come from the site (`/api/scan-runs`): none recorded, unless a test says otherwise
     from dt_cloud import digest_quota

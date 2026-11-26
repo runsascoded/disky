@@ -1,0 +1,13 @@
+# The VM pilot's serving budget (specs/vm-pilot.md "The box"): `vmd` and its mapped packs.
+# Install: copy to /etc/systemd/system/, `systemctl daemon-reload`; `vmd`'s unit names `Slice=serve.slice`.
+# Values are placeholders until the box is sized (the spec's "Slices" table): MemoryMin = the packs + headroom.
+[Unit]
+Description=disky VM pilot: serving (vmd + packs)
+Before=slices.target
+
+[Slice]
+# Protected from reclaim: scan page cache never evicts the packs.
+MemoryMin=3G
+# A request never waits on a scan for CPU or disk (scan.slice: CPUWeight=100, IOWeight=100).
+CPUWeight=10000
+IOWeight=1000

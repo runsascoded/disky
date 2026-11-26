@@ -203,7 +203,7 @@ def _poll(monkeypatch, outcomes: list) -> tuple[list, list]:
             raise o
         return {"status": {"state": o}}
 
-    monkeypatch.setattr(batch, "submit_job", lambda spec, name, region: None)
+    monkeypatch.setattr(batch, "submit_job", lambda spec, name, region, project, **kw: None)
     monkeypatch.setattr(gcp, "batch_job", job)
     monkeypatch.setattr(ar.time, "sleep", sleeps.append)
     return sleeps, logs
