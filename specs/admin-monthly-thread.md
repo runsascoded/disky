@@ -109,8 +109,10 @@ The brief's shape plus the text last written to each message (`op_text` without 
 
 **Each report:**
 1. If the newest run's month has no thread, it opens. The OP comes from `POST /api/scan-runs/month-op` (`site_month_op`, the job's grant, `?store=`, body `{month, prev_url, next_url, color?, emoji?}`), is posted under `<title> · runs` (`Config.sender('runs')`), and carries the card when the route signs one (`signed_card`: only the site's own `/og/deploy.png`).
-2. Each open month then converges, in this order:
-   - Failure replies: one for each finished `failed` or `issues` run, as `run_post` (under `run_sender`) with its step alerts folded in (`fold`; each alert is left as a pointer to the "month thread"). Each is posted with `reply_broadcast`.
+2. Each open month then converges, week by week (oldest first), so the thread reads in time order (cw's cutover, 2026-11-26, posted all 27 failure replies above every weekly reply):
+   - The week's runs reply, posted if new.
+   - Its failure replies: one for each finished `failed` or `issues` run, as `run_post` (under `run_sender`: `<stamp> · <duration> · <failed | phase issues | cancelled>`, with the failed phase and error or the phases with issues in the text, since Slack's client cuts long sender names) with its step alerts folded in (`fold`; each alert is left as a pointer to the "month thread"). Each is posted with `reply_broadcast`.
+   - The week's runs reply edited when its text changed, which links the failure replies just posted. A cutover seeding a week with failures costs that week one edit.
    - Weekly replies: one per ISO week, under `wk of MM/DD · runs` with the app's icon (`week_sender`). Each holds `trail`'s line format, oldest first, a live run's `⏳ running` line in place, and a failed run's line ending ` · [reply](…)`. A reply always posts as `section` blocks (`Transport.post_sections` / `edit_sections`, thrds' `section_blocks`), so it's one message whatever its length: past 3,000 characters `section_blocks(lines=True)` splits its sections between lines.
    - The OP, re-requested with the months either side's permalinks and edited if its text changed. A new card alone isn't an edit: the signed URL changes on every request.
 3. A month closes when the report's time is past its end and none of its runs is still going. The OP's last edit is the route's closed render: no status line and no card (`card_url` is null). After that the OP is never requested again.

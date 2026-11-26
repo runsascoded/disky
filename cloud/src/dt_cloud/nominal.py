@@ -460,13 +460,18 @@ def running(cfg: Config, row: dict) -> str:
     return f"{cfg.mark('running')} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
 
 
+#: A sender name's outcome word (`run_sender`); the phases and error go in the reply's text (`record`)
+OUTCOME_WORD = {'failed': 'failed', 'issues': 'phase issues', 'cancelled': 'cancelled'}
+
+
 def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
-    """A run reply's sender (Ryan, 2026-11-22): its line's facts as the name, `<stamp> · <duration> · <outcome>` (`short`;
-    a live run's `<stamp> · running`), the outcome clipped (…) to Slack's 80 characters; its icon the outcome, with the
-    trigger as a corner badge where `badges` names images, else the outcome's icon alone (`avatar`)."""
+    """A run reply's sender (Ryan, 2026-11-22): its line's facts as the name, `<stamp> · <duration> · <outcome>`
+    (`OUTCOME_WORD`; a live run's `<stamp> · running`), clipped (…) to Slack's 80 characters; its icon the outcome, with
+    the trigger as a corner badge where `badges` names images, else the outcome's icon alone (`avatar`). The failed
+    phase and the phases with issues are in the text (`record`): Slack's client cuts a long name well short of 80."""
     outcome = 'running' if live else grade(row)
     head = f"{stamp(row)} · " + ('' if live else f"{took(row)} · ")
-    what = 'running' if live else 'clean' + deferred(row) if outcome == 'clean' else short(row)
+    what = 'running' if live else 'clean' + deferred(row) if outcome == 'clean' else OUTCOME_WORD[outcome]
     if len(head + what) > USERNAME_MAX:
         what = what[:USERNAME_MAX - len(head) - 1] + '…'
     icon = ({'icon_url': cfg.badges.format(outcome=outcome, trigger=TRIGGERS[row['run']['trigger']])} if cfg.badges
@@ -476,10 +481,11 @@ def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
 
 def record(cfg: Config, row: dict) -> str:
     """A run reply's text under its sender (`run_sender`, which says when, how long and how it ended): the trigger
-    (`starter`) and its scan record's link, who started it, and a failure's error."""
+    (`starter`) and its scan record's link, who started it, and a failed or issues run's `describe` (the failed phase and
+    its error, or the phases with issues) when that says more than the sender's word."""
     emoji, by = starter(row)
     return (f"{emoji} [record]({cfg.link(row['run'])})" + (f" · {by}" if by else '')
-            + (f" · {d}" if not live(row) and (d := detail(row)) else ''))
+            + (f" · {d}" if not live(row) and (g := grade(row)) in OWN_REPLY and (d := describe(row)) != OUTCOME_WORD[g] else ''))
 
 
 def run_post(cfg: Config, row: dict) -> tuple[str, dict[str, str] | None]:
@@ -1540,29 +1546,32 @@ def converge_monthly(
     posted: dict[str, str] = {}
     for m in todo:
         ms, runs = months[m], by_month.get(m, [])
-        for r in runs:
-            rid = r['run']['run_id']
-            if live(r) or grade(r) not in OWN_REPLY or rid in ms['failures']:
-                continue
-            fresh = r['run']['finished_ts'] >= state['since'] - SEED_GRACE
-            alerts, extra = fold(cfg, slack, r) if fresh else ([], '')
-            text, sender = run_post(cfg, r)
-            body = text + extra
-            send(f'fail:{m}:{rid}', body, ms['op_ts'], lambda op: slack.post_sections(body, ms['op_ts'], op, sender, fresh))
-            if alerts:
-                folded(slack, alerts, ms['failures'][rid], 'month thread')
         urls = ms['failure_urls']
-        if new := {rid: slack.permalink(ts) for rid, ts in ms['failures'].items() if rid not in urls}:
-            urls.update(new)
-            persist()
         weeks: dict[str, list[dict]] = {}
         for r in runs:
             weeks.setdefault(week_of(r), []).append(r)
+        # Thread order is time order: each week's runs reply, then that week's failure replies (a cutover seeds every
+        # week at once), then the week's reply edited to link them, as a steady report links a new failure
         for wk, wruns in weeks.items():
-            text = week_text(cfg, wk, wruns, urls)
             if wk not in ms['weeks']:
-                send(f'week:{m}:{wk}', text, ms['op_ts'], lambda op: slack.post_sections(text, ms['op_ts'], op, week_sender(cfg, wk)))
-            elif ms['week_bodies'].get(wk) != text:
+                first = week_text(cfg, wk, wruns, urls)
+                send(f'week:{m}:{wk}', first, ms['op_ts'], lambda op: slack.post_sections(first, ms['op_ts'], op, week_sender(cfg, wk)))
+            for r in wruns:
+                rid = r['run']['run_id']
+                if live(r) or grade(r) not in OWN_REPLY or rid in ms['failures']:
+                    continue
+                fresh = r['run']['finished_ts'] >= state['since'] - SEED_GRACE
+                alerts, extra = fold(cfg, slack, r) if fresh else ([], '')
+                text, sender = run_post(cfg, r)
+                body = text + extra
+                send(f'fail:{m}:{rid}', body, ms['op_ts'], lambda op: slack.post_sections(body, ms['op_ts'], op, sender, fresh))
+                if alerts:
+                    folded(slack, alerts, ms['failures'][rid], 'month thread')
+            if new := {rid: slack.permalink(ts) for rid, ts in ms['failures'].items() if rid not in urls}:
+                urls.update(new)
+                persist()
+            text = week_text(cfg, wk, wruns, urls)
+            if ms['week_bodies'].get(wk) != text:
                 check()
                 slack.edit_sections(ms['weeks'][wk], text)
                 ms['week_bodies'][wk] = text
@@ -1630,7 +1639,7 @@ def site_month_op(cfg: Config, token: str) -> MonthOp:
 
 def month_preview(cfg: Config, rows: list[dict], month_op: MonthOp) -> str:
     """What the newest run's month would post, as a month's first report (no state: no months either side, no reply
-    links): its OP (`shown` under its sender), each week's runs reply, then each failure reply."""
+    links): its OP (`shown` under its sender), then each week's runs reply followed by its failure replies."""
     if not rows:
         return 'nominal: waiting for a run'
     month = max(month_of(r) for r in rows)
@@ -1640,8 +1649,9 @@ def month_preview(cfg: Config, rows: list[dict], month_op: MonthOp) -> str:
     for r in runs:
         weeks.setdefault(week_of(r), []).append(r)
     posts = [shown(cfg.sender('runs'), with_card(cfg, text, card, runs[-1]))]
-    posts += [shown(week_sender(cfg, wk), week_text(cfg, wk, wruns, {})) for wk, wruns in weeks.items()]
-    posts += [shown(run_post(cfg, r)[1], run_post(cfg, r)[0]) for r in runs if not live(r) and grade(r) in OWN_REPLY]
+    for wk, wruns in weeks.items():
+        posts.append(shown(week_sender(cfg, wk), week_text(cfg, wk, wruns, {})))
+        posts += [shown(run_post(cfg, r)[1], run_post(cfg, r)[0]) for r in wruns if not live(r) and grade(r) in OWN_REPLY]
     return '\n\n+++\n\n'.join(posts)
 
 

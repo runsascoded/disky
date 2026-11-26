@@ -1190,20 +1190,20 @@ def test_sender_options_are_checked(raw, message):
 
 
 def test_a_run_replys_sender_is_its_line_and_its_text_the_record_link():
-    """Ryan, 2026-11-22: a run reply's first line is its sender, `<stamp> · <duration> · <outcome>` (≤ 80 characters,
-    the outcome clipped), the outcome its icon; the text keeps what a name can't: the record's link, who, the error."""
+    """Ryan, 2026-11-22: a run reply's first line is its sender, `<stamp> · <duration> · <outcome>`, the outcome its
+    icon; the text keeps what a name can't: the record's link, who, the failed phase and its error, the phases with issues
+    (Slack's client cuts a long name, 2026-11-26)."""
     runs = [row(1), F3, row(4, issues=[{'phase': 'static-names'}]), row(5, 'cancelled', trigger=None),
             row(6, 'running', finished_ts=None), row(7, 'failed', failed_phase='p' * 90)]
     assert [N.run_post(SENT, r) for r in runs] == [
         (':alarm_clock: [record](https://site.test/scans/r1)', {'username': '11/02 08:00Z · 1m 00s · clean', 'icon_emoji': ':white_check_mark:'}),
-        (':ada: [record](https://site.test/scans/r3) · boom', {'username': '11/04 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'}),
-        (':alarm_clock: [record](https://site.test/scans/r4)',
-         {'username': '11/05 08:00Z · 1m 00s · phase issues: static-names', 'icon_emoji': ':warning:'}),
+        (':ada: [record](https://site.test/scans/r3) · failed in index: boom', {'username': '11/04 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}),
+        (':alarm_clock: [record](https://site.test/scans/r4) · phase issues: static-names',
+         {'username': '11/05 08:00Z · 1m 00s · phase issues', 'icon_emoji': ':warning:'}),
         (':grey_question: [record](https://site.test/scans/r5)', {'username': '11/06 08:00Z · 1m 00s · cancelled', 'icon_emoji': ':no_entry_sign:'}),
         (':alarm_clock: [record](https://site.test/scans/r6)', {'username': '11/07 08:00Z · running', 'icon_emoji': ':hourglass_flowing_sand:'}),
-        (':alarm_clock: [record](https://site.test/scans/r7)', {'username': '11/08 08:00Z · 1m 00s · failed in ' + 'p' * 45 + '…', 'icon_emoji': ':x:'}),
+        (':alarm_clock: [record](https://site.test/scans/r7) · failed in ' + 'p' * 90, {'username': '11/08 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}),
     ]
-    assert len(N.run_post(SENT, runs[-1])[1]['username']) == 80
     badged = replace(SENT, badges='https://icons.test/run-{outcome}-{trigger}.png')
     assert [N.run_post(badged, r)[1]['icon_url'] for r in runs[:5]] == [
         'https://icons.test/run-clean-schedule.png', 'https://icons.test/run-failed-manual.png', 'https://icons.test/run-issues-schedule.png',
@@ -1337,7 +1337,7 @@ def red_writer():
         ('edit', '1.0', None, '**2 consecutive clean runs (ended)**\n\n'
                               'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
                               'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed · [next thread](https://slack.test/p3.0). [All scans](https://site.test/scans).'),
-        ('post', '4.0', {'username': '11/04 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'}, ':ada: [record](https://site.test/scans/r3) · boom'),
+        ('post', '4.0', {'username': '11/04 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}, ':ada: [record](https://site.test/scans/r3) · failed in index: boom'),
     ]
     assert (w.saved['parent'], w.saved['posted'], w.saved['opener'], w.saved['head_sender']) == ('3.0', {'r3': '4.0'}, 'r3', 'Test scans · failing')
     return w
@@ -1353,8 +1353,8 @@ def test_a_red_threads_run_posts_its_hourglass_reply_then_deletes_it_and_posts_i
     w.run([row(4, issues=[{'phase': 'probe'}]), F3, *history(2)])
     assert sent(w.slack) == [
         ('delete', '5.0', None, None),
-        ('post', '6.0', {'username': '11/05 08:00Z · 1m 00s · phase issues: probe', 'icon_emoji': ':warning:'},
-         ':alarm_clock: [record](https://site.test/scans/r4)'),
+        ('post', '6.0', {'username': '11/05 08:00Z · 1m 00s · phase issues', 'icon_emoji': ':warning:'},
+         ':alarm_clock: [record](https://site.test/scans/r4) · phase issues: probe'),
         ('edit', '3.0', None, '**2 consecutive runs failed or with phase issues**\n\n'
                               'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean) · [previous thread](https://slack.test/p1.0).\n\n'
                               'Latest: [11/05 08:00Z](https://site.test/scans/r4): phase issues: probe.\n\n'
@@ -1706,8 +1706,8 @@ def test_a_month_thread_opens_on_its_first_run_and_keeps_a_reply_a_week_and_one_
     assert writes == [[('r0', 'https://slack.test/p2.0'), ('r1', 'https://slack.test/p3.0')]]
     m.run([F1, row(0)], T0 + 86400 + 120)
     assert thread(m.slack) == [
-        ('post', '4.0', '1.0', {'username': '11/02 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'},
-         ':alarm_clock: [record](https://site.test/scans/r1) · boom', True),
+        ('post', '4.0', '1.0', {'username': '11/02 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'},
+         ':alarm_clock: [record](https://site.test/scans/r1) · failed in index: boom', True),
         ('edit', '3.0', '❌ :alarm_clock: [11/02 08:00Z](https://site.test/scans/r1) · 1m 00s · failed in index: boom · [reply](https://slack.test/p4.0)'),
         ('edit', '1.0', 'status\nThis month: 2 runs' + card_line(CARD1, '11/02 08:00Z')),
     ]
@@ -1731,16 +1731,18 @@ def test_a_month_thread_opens_on_its_first_run_and_keeps_a_reply_a_week_and_one_
 
 
 def test_a_month_posts_lost_response_is_recovered_not_posted_again():
+    """A failure reply Slack accepted but whose response was lost is found by its intent on the next report, not posted
+    again; that report then links it from its week's reply."""
     m = Monthly()
-    m.run([row(0)], T0 + 120)
+    m.run([row(1, 'running', finished_ts=None), row(0)], T0 + 86400 + 10)
     m.slack.calls.clear()
     m.slack.timeout = True
     with pytest.raises(TimeoutError, match='response lost after Slack accepted the post'):
         m.run([F1, row(0)], T0 + 86400 + 120)
     assert m.saved['pending']['key'] == 'fail:2026-11:r1'
     m.run([F1, row(0)], T0 + 86400 + 120)
-    assert [c[:2] for c in m.slack.calls] == [('post', '3.0'), ('post', '4.0'), ('edit', '1.0')]
-    assert (m.saved['months']['2026-11']['failures'], m.slack.messages_by_id['3.0']['broadcast'], 'pending' in m.saved) == ({'r1': '3.0'}, True, False)
+    assert [c[:2] for c in m.slack.calls] == [('post', '4.0'), ('edit', '3.0'), ('edit', '1.0')]
+    assert (m.saved['months']['2026-11']['failures'], m.slack.messages_by_id['4.0']['broadcast'], 'pending' in m.saved) == ({'r1': '4.0'}, True, False)
 
 
 def test_a_weeks_runs_reply_past_a_sections_limit_is_one_message_of_several_sections():
@@ -1852,17 +1854,19 @@ def test_the_cutover_from_a_quiet_thread_links_it_seeds_the_month_and_repoints_i
         ('post', '3.0', None, RUNS, 'status\nThis month: 4 runs · 1 running' + card_line(CARD1, '11/04 08:00Z'), False),
         ('edit', '1.0', head + '\n\nRuns now report in the monthly thread: [November 2026](https://slack.test/p3.0).'),
         ('edit', '2.0', TRAIL),
-        ('post', '4.0', '3.0', {'username': '11/01 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}, ':alarm_clock: [record](https://site.test/scans/r0)', False),
-        ('post', '5.0', '3.0', week('10/26'), '❌ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s · failed · [reply](https://slack.test/p4.0)', False),
+        # time order: each week's runs reply, then its failures' replies, then the week's reply linking them
+        ('post', '4.0', '3.0', week('10/26'), '❌ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s · failed', False),
+        ('post', '5.0', '3.0', {'username': '11/01 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}, ':alarm_clock: [record](https://site.test/scans/r0)', False),
+        ('edit', '4.0', '❌ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s · failed · [reply](https://slack.test/p5.0)'),
         ('post', '6.0', '3.0', week('11/02'), f'{TRAIL}\n{R3_RUNNING}', False),
     ]
     assert (sorted(m.saved), m.saved['status_thread'], m.saved['posted']) == (
         ['linked', 'months', 'namespace', 'pinned', 'posted', 'since', 'status_thread'], '1.0',
-        {'r0': '4.0', 'r1': '6.0', 'r2': '6.0', 'r3': '6.0'})
+        {'r0': '5.0', 'r1': '6.0', 'r2': '6.0', 'r3': '6.0'})
     N.pin_month(m.saved, m.slack, m.save)
     assert (thread(m.slack), m.slack.pinned) == ([('join',), ('pin', '3.0'), ('unpin', '1.0')], ['3.0'])
     N.link_threads(m.saved, m.slack, writes.append, m.save)
-    assert writes[1:] == [[('r0', 'https://slack.test/p4.0'), ('r1', 'https://slack.test/p6.0'), ('r2', 'https://slack.test/p6.0'),
+    assert writes[1:] == [[('r0', 'https://slack.test/p5.0'), ('r1', 'https://slack.test/p6.0'), ('r2', 'https://slack.test/p6.0'),
                            ('r3', 'https://slack.test/p6.0')]]
     m.run(rows, T0 + 3 * 86400 + 10)
     N.pin_month(m.saved, m.slack, m.save)
@@ -1880,28 +1884,33 @@ def test_the_cutover_from_a_failure_thread_finishes_it_and_a_new_failure_folds_i
     w.slack.calls.clear()
     m = Monthly(slack=w.slack, saved=w.saved)
     m.run([row(4, 'running', finished_ts=None), F3, *history(2)], T0 + 4 * 86400 + 10)
-    f3 = '❌ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom · [reply](https://slack.test/p8.0)'
+    f3 = '❌ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom'
+    r0 = '❌ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s · failed'
+    r4 = '⏳ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · running'
     assert thread(m.slack) == [
         ('post', '6.0', None, RUNS, 'status\nThis month: 5 runs · 1 running' + card_line(CARD1, '11/05 08:00Z'), False),
         ('edit', '3.0', head + '\n\nRuns now report in the monthly thread: [November 2026](https://slack.test/p6.0).'),
         ('delete', '5.0', None),
-        ('post', '7.0', '6.0', {'username': '11/01 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}, ':alarm_clock: [record](https://site.test/scans/r0)', False),
-        ('post', '8.0', '6.0', {'username': '11/04 08:00Z · 1m 00s · failed in index', 'icon_emoji': ':x:'}, ':ada: [record](https://site.test/scans/r3) · boom', False),
-        ('post', '9.0', '6.0', week('10/26'), '❌ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s · failed · [reply](https://slack.test/p7.0)', False),
-        ('post', '10.0', '6.0', week('11/02'), f'{TRAIL}\n{f3}\n⏳ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · running', False),
+        ('post', '7.0', '6.0', week('10/26'), r0, False),
+        ('post', '8.0', '6.0', {'username': '11/01 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}, ':alarm_clock: [record](https://site.test/scans/r0)', False),
+        ('edit', '7.0', r0 + ' · [reply](https://slack.test/p8.0)'),
+        ('post', '9.0', '6.0', week('11/02'), f'{TRAIL}\n{f3}\n{r4}', False),
+        ('post', '10.0', '6.0', {'username': '11/04 08:00Z · 1m 00s · failed', 'icon_emoji': ':x:'}, ':ada: [record](https://site.test/scans/r3) · failed in index: boom', False),
+        ('edit', '9.0', f'{TRAIL}\n{f3} · [reply](https://slack.test/p10.0)\n{r4}'),
     ]
+    f3 += ' · [reply](https://slack.test/p10.0)'
     assert (sorted(m.saved), m.saved['status_thread'], m.saved['posted']) == (
-        ['months', 'namespace', 'posted', 'since', 'status_thread'], '3.0', {'r0': '7.0', 'r1': '10.0', 'r2': '10.0', 'r3': '8.0', 'r4': '10.0'})
+        ['months', 'namespace', 'posted', 'since', 'status_thread'], '3.0', {'r0': '8.0', 'r1': '9.0', 'r2': '9.0', 'r3': '10.0', 'r4': '9.0'})
     link = 'https://site.test/scans/r4'
     alert = m.slack.top_alert(link, f'*⚠️ Test scans 2026-11-05T0800*\nprobe failed (exit 1): 4 failed\n<https://logs.test/u2|task logs> · <{link}|scan>')
     assert alert == '11.0'
     r4 = row(4, issues=[{'phase': 'probe'}])
     m.run([r4, F3, *history(2)], T0 + 4 * 86400 + 120)
     assert thread(m.slack) == [
-        ('post', '12.0', '6.0', {'username': '11/05 08:00Z · 1m 00s · phase issues: probe', 'icon_emoji': ':warning:'},
-         ':alarm_clock: [record](https://site.test/scans/r4)\nprobe failed (exit 1): 4 failed · [task logs](https://logs.test/u2)', True),
+        ('post', '12.0', '6.0', {'username': '11/05 08:00Z · 1m 00s · phase issues', 'icon_emoji': ':warning:'},
+         ':alarm_clock: [record](https://site.test/scans/r4) · phase issues: probe\nprobe failed (exit 1): 4 failed · [task logs](https://logs.test/u2)', True),
         ('edit', '11.0', '↪ ⚠️ Test scans 2026-11-05T0800: in the [month thread](https://slack.test/p12.0)'),
-        ('edit', '10.0', f'{TRAIL}\n{f3}\n⚠️ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s · phase issues: probe · [reply](https://slack.test/p12.0)'),
+        ('edit', '9.0', f'{TRAIL}\n{f3}\n⚠️ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s · phase issues: probe · [reply](https://slack.test/p12.0)'),
         ('edit', '6.0', 'status\nThis month: 5 runs' + card_line(CARD1, '11/05 08:00Z')),
     ]
     m.run([r4, F3, *history(2)], T0 + 4 * 86400 + 120)
@@ -1948,18 +1957,19 @@ def test_a_monthly_preview_shows_what_the_month_would_post_and_a_report_converge
         '[Test scans · runs]\nstatus\nThis month: 2 runs' + card_line(CARD1, '11/02 08:00Z'),
         '[wk of 10/26 · runs]\n✅ :alarm_clock: [11/01 08:00Z](https://site.test/scans/r0) · 1m 00s',
         '[wk of 11/02 · runs]\n❌ :alarm_clock: [11/02 08:00Z](https://site.test/scans/r1) · 1m 00s · failed in index: boom',
-        '[:x: 11/02 08:00Z · 1m 00s · failed in index]\n:alarm_clock: [record](https://site.test/scans/r1) · boom',
+        '[:x: 11/02 08:00Z · 1m 00s · failed]\n:alarm_clock: [record](https://site.test/scans/r1) · failed in index: boom',
     ])
     assert (sorted(tmp_path.iterdir()), slack.calls) == ([], [])
     env = {'SITE_TOKEN': 'viewer', 'SLACK_BOT_TOKEN': 'bot'}
     sink = SimpleNamespace(statements=[])
     sink.execute = sink.statements.extend
     assert N.run(asdict(cfg), env, 'project', 'r1', execute=True, sink=sink) == 'nominal: month 2026-11 thread 1.0; 2 weekly, 1 failure replies'
-    # a first report seeds the month: the failure's reply first, so its week's line can link it
-    assert [(c[0], c[1]) for c in slack.calls] == [('post', '1.0'), ('post', '2.0'), ('post', '3.0'), ('post', '4.0')]
+    # a first report seeds the month in time order: each week's runs reply, then its failure's reply, then the week's
+    # reply edited to link it
+    assert [(c[0], c[1]) for c in slack.calls] == [('post', '1.0'), ('post', '2.0'), ('post', '3.0'), ('post', '4.0'), ('edit', '3.0')]
     assert sink.statements == [
-        "UPDATE scan_runs SET thread_url = 'https://slack.test/p3.0' WHERE run_id = 'r0'",
-        "UPDATE scan_runs SET thread_url = 'https://slack.test/p2.0' WHERE run_id = 'r1'",
+        "UPDATE scan_runs SET thread_url = 'https://slack.test/p2.0' WHERE run_id = 'r0'",
+        "UPDATE scan_runs SET thread_url = 'https://slack.test/p4.0' WHERE run_id = 'r1'",
     ]
     slack.calls.clear()
     assert N.run(asdict(cfg), env, 'project', 'r1', execute=True, sink=sink) == 'nominal: month 2026-11 thread 1.0; 2 weekly, 1 failure replies'
