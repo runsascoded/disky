@@ -78,13 +78,37 @@ The step finished: 2,096 directories, 137.7M prior roots in 1283 s, the drill's 
 4. **It follows the data, not the machine**: 56–70 GiB here, ~68 on the highmem-16. DuckDB gets half the machine (`drill_duckdb_args`); on an n2-highmem-16 that's 60 GB, and 60 GB + ~68 GiB doesn't fit 128 GB. That was the OOM, more than the per-chunk climb.
 5. **It lives across the long kind**: anon fell 173 → 133 GiB once the step's tables dropped (`newh_today`, `nhr`), and to 103 during `write`.
 
-Next: **find the stage that forms the gap**, then bound it. Each long-drill stage boundary (`delta roots`, `touched`, each `settle` chunk, `settled`, `newly-heavy sums`, `newly-heavy start`, each chunk, `write`) now logs `memory_breakdown` on the owning thread: DuckDB's buffer bytes, spill, limit and allocator (its own jemalloc, or glibc); pyarrow's bytes; glibc's in use (`mallinfo2` `uordblks` + `hblkhd`) and free (`fordblks`); CPython's allocated blocks (a count); the tier reads' caches; and `unattributed_bytes`, what none of those accounts for (anon − pyarrow − glibc − DuckDB's bytes when they're jemalloc's: jemalloc's retained pages, DuckDB's allocations outside its buffer manager, pymalloc's arenas). The 15 s monitor lines add the thread-safe part (pyarrow, glibc, blocks, and anon less those as `outside_glibc_arrow_bytes`), so the growth inside `delta roots` shows too. The caches are listed, not subtracted: decoded groups are pyarrow's bytes, raw bytes glibc's. Lowering DuckDB's limit at a boundary to see whether anon follows was left out: it would spill ~50 GB there, minutes on the critical path.
+Each long-drill stage boundary then logged `memory_breakdown` (cloud `c88614f09`: DuckDB's bytes, spill, limit and allocator; pyarrow's; glibc's in use and free from `mallinfo2`; CPython's block count; the tier reads' caches). cw's 11-26T1203 drill (`sn-drill-2026-11-26-1203-135026`, highmem-32, DuckDB `-M` 111.7 GiB; GiB):
 
-Then, by holder: Python objects (blocks large through `delta roots` / `rollups`) → stream or drop them where they're built (a `tracemalloc` pass over one stage behind a flag, if the block count alone doesn't name them); DuckDB outside its buffer manager or jemalloc's retention → DuckDB's allocator settings (`allocator_flush_threshold`, `allocator_background_threads`) or a smaller `-M`; tables held across the kind (`newh_today`, `rup`) → write them out as parts. Interim, should the highmem-32 cost matter: an n2-highmem-16 with DuckDB at ~40 GB (40 + ~70 ≈ 110 of 128), trading spill for the box. Done when cw's drill runs `gov_reports`-sized scans on an n2-highmem-16 and `machines.drill` / `ssd_gbs.drill` leave cw's profile.
+| stage | anon | DuckDB | glibc used / free | Python blocks | index groups |
+|---|---|---|---|---|---|
+| `long: delta roots` | 12.5 | 1.9 | 7.0 / 0.2 | 0.6M | – |
+| `long: rollups` | 47.3 | 39.9 | 7.5 / 0.3 | 0.9M | 0 |
+| `long: touched` | 72.8 | 53.0 | 7.5 / 0.2 | 0.9M | 0 |
+| `long: settle` (after `_probe`) | 120.7 | 66.2 | 44.2 / 0.8 | 47.3M | 1,083 |
+| `long: settled` | 117.0 | 66.2 | 44.0 / 1.0 | 31.6M | 1,083 |
+| `long: newly-heavy start` | 135.8 | 83.9 | 47.7 / 0.6 | 41.3M | 1,430 |
+| newly-heavy chunk 19/19 | 166.1 | 95.0 | 61.3 / 1.1 | 77.2M | – |
+| `long: write` | 135.6 | 57.3 | 9.7 / 52.0 | 0.8M | – |
+
+**The cause: data files' footers, held for the whole kind.** glibc's in-use bytes went 9 → 46 GiB during `_probe` (13,406 probes in 110 s, 14:06:44–14:08:34) and stayed; the newly-heavy loop added 13.6 more as it opened more files. The tier reads kept every data file's footer they touched, as tail bytes (`GroupFile.foot`) and parsed `FileMetaData` (`CachedGroupFile._md`, C++ heap), never evicted within a kind. cw c003's long `roots`: the base's 126 files have ~6 MB footers (r0050: 6,121 row groups × 7 columns, 50.1M rows; parsed ~39 MB, 6.3× the serialized bytes, measured on macOS); its runs' 281 files have 20–25 MB footers, ~160 MB each held. The four big runs' 257 files alone are ~41 GB. The index entries and `_spans` (the 30M+ Python blocks) are pymalloc's small objects, a few GiB. And DuckDB's 95 GiB isn't in glibc's counters (61 at most): its Linux build links jemalloc statically while `duckdb_extensions()` reads it not loaded, so `unattributed_bytes` counted DuckDB twice; without it, ~3–8 GiB is unattributed.
+
+**The fix** (cloud, this commit):
+- `FooterCache`: one per drill's reads (`TierReads`), shared by its tiers' group files: footers' tail bytes and parsed metadata, least recently used evicted past min(`FOOTER_CACHE_BYTES` 8 GiB, RAM/16), a parsed one charged `META_PARSE_FACTOR` (7) × its serialized size. An evicted file's footer is fetched and parsed again when read, counted (`footer_refetches`, `meta_reparses`); `cache_stats` lists the files and bytes held, those counts and the first parse's measured glibc growth per serialized byte (`meta_parse_factor`, Linux's), on every stage line.
+- Index row groups kept per group file up to `INDEX_CACHE` (1,024), least recently used evicted, reads again counted (`index_reloads`).
+- DuckDB's bytes are outside glibc's when its jemalloc is loaded or statically linked (`install_mode`), or when glibc's in-use bytes couldn't hold them (`duckdb_allocator` `outside glibc`).
+- Tests: a run's drill is the same bytes with footers capped at 300 bytes and one index row group per file (forced evictions, refetches counted) as unbounded, with the cap holding after every probe pass; `FooterCache`'s eviction order and charges exactly.
+
+Next, by what the next drills show:
+1. **The highmem-16 trial:** cw's drill on an n2-highmem-16 with DuckDB at 60 GB (60 + footers 8 + a few GiB of Python ≈ 75 of 128). Watch `footer_refetches` per stage: a refetch is a GET and a parse (a run file's: ~22 MB, ~140 MB parsed); thousands of them mean raising the budget or ordering the probes by file.
+2. **No parsed metadata at all:** the two-level index already carries each group's offset, length and rows; read a group from those with one schema per tier, and `FileMetaData` goes. Bigger; if the refetches cost.
+3. **Smaller footers:** run files' footers are ~4× the base's: `RUN_RG` = 2,048-row groups and string min/max statistics on `q` / `path` per row group, which the index already holds. Statistics off for those columns, or bigger run row groups, shrink every reader's footer. It changes stored bytes: list every reader of the drill files (the site's static search; anything pruning by row-group statistics) and bench it first.
+
+Done when cw's drill runs `gov_reports`-sized scans on an n2-highmem-16 with DuckDB at 60 GB, and `machines.drill` / `ssd_gbs.drill` leave cw's profile.
 
 ## Order
 
 1. Ship the two fixes (done), watch cw's next compaction and the next scans' `anchors` timings.
-2. C: find the long-drill stage that forms the ~60 GiB outside DuckDB, bound it, then drop cw's `machines.drill` stopgap.
+2. C: the footers are bounded (above); a highmem-16 drill at DuckDB 60 GB, then drop cw's `machines.drill` stopgap.
 3. A, if the next fold still struggles, or as the backlog policy regardless (it's the escape valve).
 4. B, measured on cw against today's `anchors end` numbers (above).

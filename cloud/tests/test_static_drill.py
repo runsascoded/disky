@@ -10,6 +10,7 @@ import re
 import shutil
 from itertools import groupby
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -851,6 +852,56 @@ def test_span_cache_is_bounded(world, run_rg, tmp_path, monkeypatch, i):
     rebuild(tmp_path / "capped")
     assert _tree(tmp_path / "capped", drop={"s", "reads"}) == _tree(tmp_path / "unbounded", drop={"s", "reads"})
     assert (len(held) > 0, max(held, default=0) <= 2) == (True, True)
+
+
+@pytest.mark.parametrize("threads", [0, 8])
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_footer_and_index_caches_are_bounded(world, run_rg, tmp_path, monkeypatch, i, threads):
+    """A run's drill is the same files, byte for byte, with the data files' footers held to a few hundred bytes (each read
+    evicting the last: fetched and parsed again) and one index row group per group file, as unbounded; after each probe pass
+    the footers' charged bytes are within the cap (or one file's alone), and the refetches are counted."""
+    rebuild = world["rebuilds"][i]
+    rebuild(tmp_path / "unbounded", threads=threads)
+    seen: list[tuple] = []
+    probe = sd._probe
+
+    def spy(con, probes, reads, kind, log=sd.err):
+        probe(con, probes, reads, kind, log)
+        f = reads.footers
+        seen.append((f.size <= f.cap or len(f) == 1, f.cap, max((len(gf._entries) + len(gf._peeked) for _, gf in reads.items if gf is not None), default=0)))
+
+    monkeypatch.setattr(sd, "FOOTER_CACHE_BYTES", 300)
+    monkeypatch.setattr(sd, "INDEX_CACHE", 1)
+    monkeypatch.setattr(sd, "_probe", spy)
+    refetches = []
+    close = sd.TierReads.close
+
+    def counted(self):
+        refetches.append(self.footers.stats["footer_refetches"] + self.footers.stats["meta_reparses"])
+        close(self)
+
+    monkeypatch.setattr(sd.TierReads, "close", counted)
+    rebuild(tmp_path / "capped", threads=threads)
+    assert _tree(tmp_path / "capped", drop={"s", "reads"}) == _tree(tmp_path / "unbounded", drop={"s", "reads"})
+    assert [(ok, cap, n <= 1) for ok, cap, n in seen] == [(True, 300, True)] * len(seen)
+    assert (len(seen) > 0, sum(refetches) > 0) == (True, True)
+
+
+def test_footer_cache_evicts_least_recently_used_by_charged_bytes():
+    """Footers are charged their bytes, a parsed one `META_PARSE_FACTOR` × its serialized size more; past the cap the least
+    recently used go (never the newest), and reading one again is a counted refetch."""
+    c = sd.FooterCache(100)
+    for k in "abc":
+        c.put(k, (0, b"x" * 40))
+    assert (list(c._d), c.size, c.stats["footer_evictions"]) == (["b", "c"], 80, 1)
+    assert c.footer("b", lambda: (0, b"")) == (0, b"x" * 40)
+    assert c.footer("a", lambda: (0, b"y" * 40)) == (0, b"y" * 40)
+    assert (list(c._d), c.size, dict(c.stats)) == (["b", "a"], 80, {"footer_evictions": 2, "footer_refetches": 1, "footer_refetch_bytes": 40})
+    md = SimpleNamespace(serialized_size=2)
+    assert c.meta("b", lambda: (0, b""), lambda foot: md) is md
+    assert (list(c._d), c.size) == (["a", "b"], 80 + 2 * sd.META_PARSE_FACTOR)
+    c.put("d", (0, b"z" * 200))
+    assert (list(c._d), c.size) == (["d"], 200)
 
 
 def test_settle_chunks():

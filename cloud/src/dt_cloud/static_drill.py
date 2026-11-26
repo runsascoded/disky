@@ -49,6 +49,17 @@ STATE_BATCH_ROWS = 1_000_000
 GROUP_CACHE = 2048
 #: Index spans (`CachedGroupFile._span`: a run of index row groups' entries and key tuples) kept per group file.
 SPAN_CACHE = 512
+#: Index row groups (`CachedGroupFile._entries` / `_peeked`: ~1K entry dicts each) kept per group file, least recently used
+#: evicted (and read again when needed). cw's 11-26T1203 long drill held 1,430 across its 9 tiers.
+INDEX_CACHE = 1024
+#: Data files' footers, as tail bytes and parsed `FileMetaData`, held per drill's reads at most (`FooterCache`): the smaller
+#: of these bytes and `FOOTER_RAM_FRACTION` of the machine's RAM. Unbounded, cw's 11-26T1203 long drill held ~44 GiB of them
+#: (407 `roots` files across 9 tiers; a run file's footer 20–25 MB, parsed ~6×; specs/static-catch-up.md C).
+FOOTER_CACHE_BYTES = 8 << 30
+FOOTER_RAM_FRACTION = 1 / 16
+#: A parsed `FileMetaData`'s resident bytes per serialized byte, what `FooterCache` charges for it (6.3 measured on macOS;
+#: the drill logs the first parse's glibc growth as `meta_parse_factor` where `mallinfo2` reads it).
+META_PARSE_FACTOR = 7
 #: `dr` rows (at depth ≥ 2) per part of the aggregations over their ancestors (`_by_parts`).
 EXPLODE_PART_ROWS = 1 << 23
 #: Touched directories per part of the newly-heavy sums' join to a prior tier's `dcount` (by `hash(dir)`): the join's
@@ -181,18 +192,93 @@ class ByteCache:
             self.evicted += 1
 
 
+class FooterCache:
+    """Data files' footers, keyed `(group file, file)`: each one's tail bytes and, once read through, its parsed
+    `FileMetaData`, least recently used evicted past `cap` bytes; shared by a drill's group files (`TierReads`), touched by
+    the calling thread only (prefetch threads return footers, `put` stores them). A footer is charged its bytes, a parsed one
+    `META_PARSE_FACTOR` × its serialized size more. An evicted file's footer is fetched and parsed again when next read,
+    counted in `stats` (`footer_refetches` / `_bytes`, `meta_reparses`): what bounding it costs."""
+
+    def __init__(self, cap: int):
+        self.cap, self.size = cap, 0
+        self._d: OrderedDict[tuple, list] = OrderedDict()
+        self._seen: set[tuple] = set()
+        self._parsed: set[tuple] = set()
+        self.stats: Counter = Counter()
+        self.parse_factor: float | None = None
+
+    def __contains__(self, key) -> bool:
+        return key in self._d
+
+    def __len__(self) -> int:
+        return len(self._d)
+
+    def put(self, key, foot: tuple[int, bytes]) -> None:
+        if key in self._d:
+            self._d.move_to_end(key)
+            return
+        if key in self._seen:
+            self.stats["footer_refetches"] += 1
+            self.stats["footer_refetch_bytes"] += len(foot[1])
+        self._seen.add(key)
+        self._d[key] = [foot, None, len(foot[1])]
+        self.size += len(foot[1])
+        self._evict()
+
+    def footer(self, key, fetch) -> tuple[int, bytes]:
+        e = self._d.get(key)
+        if e is None:
+            self.put(key, fetch())
+            e = self._d[key]
+        else:
+            self._d.move_to_end(key)
+        return e[0]
+
+    def meta(self, key, fetch, parse) -> pq.FileMetaData:
+        """`key`'s parsed footer (`parse(footer)`), its footer fetched first if not held."""
+        foot = self.footer(key, fetch)
+        e = self._d[key]
+        if e[1] is None:
+            if key in self._parsed:
+                self.stats["meta_reparses"] += 1
+            self._parsed.add(key)
+            before = heap_snapshot().get("glibc_used_bytes") if self.parse_factor is None else None
+            md = e[1] = parse(foot)
+            if before is not None and md.serialized_size:
+                self.parse_factor = round((heap_snapshot()["glibc_used_bytes"] - before) / md.serialized_size, 2)
+            charge = META_PARSE_FACTOR * md.serialized_size
+            e[2] += charge
+            self.size += charge
+            self._evict()
+        return e[1]
+
+    def _evict(self) -> None:
+        while self.size > self.cap and len(self._d) > 1:
+            _, (_, _, charged) = self._d.popitem(last=False)
+            self.size -= charged
+            self.stats["footer_evictions"] += 1
+
+    def clear(self) -> None:
+        self._d.clear()
+        self.size = 0
+
+
 class CachedGroupFile(sr.GroupFile):
     """`static_roots.GroupFile` (two-level) with its index row groups, parsed footers and decoded data groups cached, and
     `rows_in` reading group by group: the builder probes many small ranges of the same files. With a `ByteCache` (`raw`),
     a fetch is first looked up there (`TierReads.prefetch` fills it); `io` counts the reads as without it (a decode of a
-    group not decoded, a load of index row groups), `fetch_io` the requests actually made."""
+    group not decoded, a load of index row groups), `fetch_io` the requests actually made. Footers go through `footers`
+    (a `FooterCache`, bounded when `TierReads` shares one), index row groups are kept up to `cache_index` (least recently
+    used evicted; `fetch_io` `index_reloads` counts those read again)."""
 
-    def __init__(self, *args, key: str, cache_groups: int = GROUP_CACHE, **kw):
+    def __init__(self, *args, key: str, cache_groups: int = GROUP_CACHE, cache_index: int | None = None, **kw):
         super().__init__(*args, **kw)
         self.key = key
-        self._entries: dict[int, list[dict]] = {}
-        self._peeked: dict[int, list[dict]] = {}
-        self._md: dict[str, pq.FileMetaData] = {}
+        self._entries: OrderedDict[int, list[dict]] = OrderedDict()
+        self._peeked: OrderedDict[int, list[dict]] = OrderedDict()
+        self._index_seen: set[int] = set()
+        self.cap_index = INDEX_CACHE if cache_index is None else cache_index
+        self.footers = FooterCache(1 << 62)
         self._groups: OrderedDict[tuple[str, int], tuple[pa.Table, list[tuple]]] = OrderedDict()
         self._spans: OrderedDict[tuple[int, int], tuple[list[dict], list[tuple], list[tuple]]] = OrderedDict()
         self.cap_groups = cache_groups
@@ -214,17 +300,40 @@ class CachedGroupFile(sr.GroupFile):
         self.fetch_io["miss_bytes"] += hi - lo
         return self.fetch(file, lo, hi)
 
+    def footer(self, file: str) -> tuple[int, bytes]:
+        return self.footers.footer((self, file), lambda: self._fetch_footer(file))
+
+    def has_footer(self, file: str) -> bool:
+        return (self, file) in self.footers
+
+    def put_footer(self, file: str, foot: tuple[int, bytes]) -> None:
+        self.footers.put((self, file), foot)
+
     def _meta(self, file: str) -> pq.FileMetaData:
-        if file not in self._md:
-            self._md[file] = pq.ParquetFile(self.Spans(self.size_of(file), [self.footer(file)])).metadata
-        return self._md[file]
+        return self.footers.meta((self, file), lambda: self._fetch_footer(file),
+                                 lambda foot: pq.ParquetFile(self.Spans(self.size_of(file), [foot])).metadata)
+
+    def _file(self, file: str, start: int, data: bytes) -> pq.ParquetFile:
+        md = self._meta(file)  # first: it leaves the file's footer the newest held, so `footer` finds it
+        return pq.ParquetFile(self.Spans(self.size_of(file), [self.footer(file), (start, data)]), metadata=md)
 
     def _read_rgs(self, file: str, start: int, data: bytes, rgs: list[int]) -> dict[int, list[dict]]:
-        pf = pq.ParquetFile(self.Spans(self.size_of(file), [self.footer(file), (start, data)]), metadata=self._meta(file))
+        pf = self._file(file, start, data)
         return {g: pf.read_row_group(g).to_pylist() for g in rgs}
 
     def _read_table(self, file: str, start: int, data: bytes, rg: int) -> pa.Table:
-        return pq.ParquetFile(self.Spans(self.size_of(file), [self.footer(file), (start, data)]), metadata=self._meta(file)).read_row_group(rg)
+        return self._file(file, start, data).read_row_group(rg)
+
+    def _keep_index(self, rgs) -> None:
+        """Index row groups `rgs` were just read: count the ones read before (evicted since), and evict the least recently
+        used past `cap_index`."""
+        for rg in rgs:
+            if rg in self._index_seen:
+                self.fetch_io["index_reloads"] += 1
+            self._index_seen.add(rg)
+        while len(self._entries) + len(self._peeked) > self.cap_index:
+            (self._peeked if self._peeked else self._entries).popitem(last=False)
+            self.fetch_io["index_evictions"] += 1
 
     def _load(self, tops: list[dict]) -> None:
         missing = [t for t in tops if t["rg"] not in self._entries]
@@ -237,11 +346,14 @@ class CachedGroupFile(sr.GroupFile):
             for t in missing:
                 self._entries[t["rg"]] = self._peek_top(t)
                 self._peeked.pop(t["rg"], None)
+            self._keep_index([])
             return
         self.fetch_io["miss_fetches"] += 1
         self.fetch_io["miss_bytes"] += end - start
         data = self.fetch(self.index_file, start, end)
-        self._entries.update(self._read_rgs(self.index_file, start, data, [t["rg"] for t in missing]))
+        got = self._read_rgs(self.index_file, start, data, [t["rg"] for t in missing])
+        self._entries.update(got)
+        self._keep_index(got)
 
     def tops(self, lo, hi) -> list[dict]:
         """The index row groups `select(lo, hi)` loads (no cap)."""
@@ -255,12 +367,15 @@ class CachedGroupFile(sr.GroupFile):
         return [t for t in self.tops(lo, hi) if t["rg"] not in self._entries and t["rg"] not in self._peeked]
 
     def _peek_top(self, t: dict) -> list[dict]:
-        if t["rg"] in self._entries:
-            return self._entries[t["rg"]]
-        if t["rg"] not in self._peeked:
-            data = self._get(self.index_file, t["offset"], t["offset"] + t["length"])
-            self._peeked[t["rg"]] = self._read_rgs(self.index_file, t["offset"], data, [t["rg"]])[t["rg"]]
-        return self._peeked[t["rg"]]
+        rg = t["rg"]
+        for held in (self._entries, self._peeked):
+            if rg in held:
+                held.move_to_end(rg)
+                return held[rg]
+        data = self._get(self.index_file, t["offset"], t["offset"] + t["length"])
+        entries = self._peeked[rg] = self._read_rgs(self.index_file, t["offset"], data, [rg])[rg]
+        self._keep_index([rg])
+        return entries
 
     def _span(self, a: int, b: int) -> tuple[list[dict], list[tuple], list[tuple]]:
         """The entries of index row groups `top[a:b]` and their last / first keys, built once per span (a per-call build
@@ -519,19 +634,23 @@ class TierReads:
     """A kind's roots across tiers, combined (smallest `vt` per `(path, usr, vf)`), through each tier's two-level index
     and its own canonical for the member."""
 
-    def __init__(self, tiers: list[Tier], kind: str, threads: int = 0, cache_bytes: int | None = None):
+    def __init__(self, tiers: list[Tier], kind: str, threads: int = 0, cache_bytes: int | None = None, footer_bytes: int | None = None):
         """`threads` > 1: `windows` prefetches the groups a loop will read, that many requests at once, into a byte cache of
-        `cache_bytes` (default: min(2 GiB, `CACHE_RAM_FRACTION` of the RAM)); else the loops fetch each miss in turn."""
+        `cache_bytes` (default: min(2 GiB, `CACHE_RAM_FRACTION` of the RAM)); else the loops fetch each miss in turn. The
+        tiers' data files' footers share one `FooterCache` of `footer_bytes` (default: min(`FOOTER_CACHE_BYTES`,
+        `FOOTER_RAM_FRACTION` of the RAM))."""
         self.kind = kind
         self.items = [(t, t.group_file(kind, "roots")) for t in tiers]
         self.stats: Counter = Counter()
         self.threads = threads
         self.fetch_io: Counter = Counter()
         self.raw = ByteCache(cache_bytes or min(MAX_CACHE_BYTES, int(ram_bytes() * CACHE_RAM_FRACTION))) if threads > 1 else None
+        self.footers = FooterCache(footer_bytes or min(FOOTER_CACHE_BYTES, int(ram_bytes() * FOOTER_RAM_FRACTION)))
         self.held = False
         for _, gf in self.items:
             if gf is not None:
                 gf.raw = self.raw
+                gf.footers = self.footers
 
     def rows(self, c: str, lo: str, hi: str, only: int | None = None) -> list[dict]:
         """Combined roots of member `c` with `lo ≤ path < hi` (`only`: one tier's)."""
@@ -596,12 +715,19 @@ class TierReads:
                                     yield matched
 
     def cache_stats(self) -> dict:
-        """What the reads' caches hold now: decoded groups (and their Arrow bytes), parsed index row groups, raw bytes."""
+        """What the reads' caches hold now: decoded groups (and their Arrow bytes), parsed index row groups, raw bytes, the
+        data files' footers (files held and their charged bytes); and what bounding them has cost so far (`FooterCache`'s
+        refetches and reparses, index row groups read again), with the first parse's measured `meta_parse_factor`."""
         groups = [v for _, gf in self.items if gf is not None for v in gf._groups.values()]
+        f = self.footers
         return {"decoded_groups": len(groups), "decoded_bytes": sum(t.nbytes for t, _ in groups),
                 "index_groups": sum(len(gf._entries) + len(gf._peeked) for _, gf in self.items if gf is not None),
                 "index_spans": sum(len(gf._spans) for _, gf in self.items if gf is not None),
-                "raw_bytes": self.raw.size if self.raw is not None else 0}
+                "raw_bytes": self.raw.size if self.raw is not None else 0,
+                "footer_files": len(f), "footer_bytes": f.size,
+                **{k: f.stats[k] for k in ("footer_refetches", "footer_refetch_bytes", "meta_reparses", "footer_evictions")},
+                "index_reloads": sum(gf.fetch_io["index_reloads"] for _, gf in self.items if gf is not None),
+                "meta_parse_factor": f.parse_factor}
 
     def hold(self, queries: list[tuple]):
         """Prefetch `(c, lo, hi)` `rows` plans in windows (`plan` / `windows`), yielding `(a, b)`, with `tables` under `held`;
@@ -630,6 +756,7 @@ class TierReads:
         if self.raw is not None:
             self.raw._d.clear()
             self.raw.size = 0
+        self.footers.clear()
         for _, gf in self.items:
             if gf is not None:
                 gf.raw = None
@@ -652,6 +779,7 @@ class TierReads:
         for _, gf in self.items:
             if gf is not None:
                 out.update(gf.fetch_io)
+        out.update(self.footers.stats)
         if self.raw is not None:
             out["evicted"] = self.raw.evicted
         return dict(out)
@@ -700,7 +828,7 @@ class TierReads:
         by_file: dict[tuple, list[tuple[int, int]]] = {}
         for gf, f, off, n in need:
             by_file.setdefault((gf, f), []).append((off, n))
-        feet = [(gf, f) for gf, f in by_file if f not in gf.foot]
+        feet = [(gf, f) for gf, f in by_file if not gf.has_footer(f)]
         runs = []
         for (gf, f), spans in by_file.items():
             spans = sorted(set(spans))
@@ -720,8 +848,8 @@ class TierReads:
             return run, lo, gf.fetch(f, lo, hi)
 
         with self._pool() as pool:
-            for (gf, f), foot in zip(feet, pool.map(lambda x: x[0].footer(x[1]), feet)):
-                gf.foot[f] = foot
+            for (gf, f), foot in zip(feet, pool.map(lambda x: x[0]._fetch_footer(x[1]), feet)):
+                gf.put_footer(f, foot)
             for (gf, f, spans), lo, data in pool.map(get, runs):
                 self.fetch_io["prefetch_fetches"] += 1
                 self.fetch_io["prefetch_bytes"] += len(data)
@@ -1391,7 +1519,8 @@ def newly_heavy_rollups(
             f"{len(old)} ranges read), {total:,} prior roots, {monotonic() - t0:.0f}s; RSS {gib('rss_anon_bytes')} GiB (DuckDB "
             f"{gib('duckdb_bytes')} {mem['duckdb_allocator']}, spill {gib('duckdb_spill_bytes')}, arrow {gib('arrow_bytes')} / peak "
             f"{gib('arrow_peak_bytes')}, glibc {gib('glibc_used_bytes')} used / {gib('glibc_free_bytes')} free, unattributed "
-            f"{gib('unattributed_bytes')}, {mem['py_blocks']:,} Python blocks, checkpoint {gib('parts_pending_bytes')}; freed: arrow "
+            f"{gib('unattributed_bytes')}, {mem['py_blocks']:,} Python blocks, checkpoint {gib('parts_pending_bytes')}, footers "
+            f"{gib('footer_bytes')} in {mem.get('footer_files', 0):,} files ({mem.get('footer_refetches', 0):,} refetched); freed: arrow "
             f"pool {gib('freed_arrow_bytes')}, C heap {gib('freed_trim_bytes')})")
     parts.flush(len(directories))
     con.execute("DROP TABLE newh_today; DROP TABLE nhr")
@@ -1426,8 +1555,10 @@ def _anon() -> int:
 
 
 def duckdb_jemalloc(con) -> bool:
-    """Whether DuckDB allocates through its own jemalloc (its built-in extension, Linux), outside glibc's heap."""
-    row = con.execute("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'jemalloc'").fetchone()
+    """Whether DuckDB allocates through its own jemalloc, outside glibc's heap: its extension loaded, or linked into the
+    build (Linux wheels: `install_mode` `STATICALLY_LINKED`, where `loaded` may read false)."""
+    row = con.execute("SELECT loaded OR coalesce(install_mode = 'STATICALLY_LINKED', false) FROM duckdb_extensions() "
+                      "WHERE extension_name = 'jemalloc'").fetchone()
     return bool(row and row[0])
 
 
@@ -1439,12 +1570,15 @@ def memory_breakdown(con, reads: TierReads | None = None) -> dict:
     are glibc's, so neither is subtracted again); and `unattributed_bytes`, what none of them accounts for (`outside_bytes`:
     jemalloc's retained pages, DuckDB's allocations outside its buffer manager, pymalloc's arenas)."""
     duck = duckdb_resources(con)
-    jemalloc = duckdb_jemalloc(con)
     limit = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
     anon, heap = _anon(), heap_snapshot()
-    return {"rss_anon_bytes": anon, **duck, "duckdb_allocator": "jemalloc" if jemalloc else "glibc", "duckdb_limit": limit, **heap,
+    # DuckDB's bytes are outside glibc's when it says so, or when glibc's in-use bytes couldn't hold them (cw 11-26T1203:
+    # 95 GiB of DuckDB's against 61 of glibc's in use, `duckdb_extensions()` reading jemalloc not loaded).
+    allocator = ("jemalloc" if duckdb_jemalloc(con) else
+                 "outside glibc" if duck["duckdb_bytes"] > heap.get("glibc_used_bytes", duck["duckdb_bytes"]) else "glibc")
+    return {"rss_anon_bytes": anon, **duck, "duckdb_allocator": allocator, "duckdb_limit": limit, **heap,
             **(reads.cache_stats() if reads is not None else {}),
-            "unattributed_bytes": outside_bytes(anon, heap, duck["duckdb_bytes"] if jemalloc else 0)}
+            "unattributed_bytes": outside_bytes(anon, heap, duck["duckdb_bytes"] if allocator != "glibc" else 0)}
 
 
 def chunk_memory(con, parts: Parts | None = None, reads: TierReads | None = None) -> dict:
