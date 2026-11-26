@@ -1147,9 +1147,14 @@ def with_events(spec: dict, topic: str, event: str, profile: str | None) -> dict
 
 
 def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merge_wait: float | None = 0) -> Runner:
-    """`Runner` over the profile's store (`blobstore.Store`), Batch, and this module's `prepare` / `prune`."""
+    """`Runner` over the profile's store (`blobstore.Store`), Batch, and this module's `prepare` / `prune`. Its image is
+    resolved to a digest first (`image_pin`): every job this run submits runs one code version."""
     from google.cloud import storage
 
+    from .image_pin import pin_profile
+
+    if not dry_run:
+        cfg = replace(cfg, p=pin_profile(cfg.p, log=err))
     p = cfg.p
     store = Store(store_url(p.bucket))
     client = storage.Client(project=p.project)

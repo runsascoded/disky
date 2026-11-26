@@ -434,8 +434,14 @@ class Runner(ar.Runner):
 
 def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None = None, merge: bool = True,
                merge_wait: float | None = 0) -> Runner:
-    """`Runner` over the real data bucket, Batch, and the `runs` CLI's `prepare` / `publish` / `prune`."""
+    """`Runner` over the real data bucket, Batch, and the `runs` CLI's `prepare` / `publish` / `prune`. Its image is
+    resolved to a digest first (`image_pin`): every job this run submits, and their own, runs one code version."""
     from google.cloud import storage
+
+    from .image_pin import pin_profile
+
+    if not dry_run:
+        cfg = pin_profile(cfg, log=err)
 
     from . import static_append as sa
     from .blobstore import Store

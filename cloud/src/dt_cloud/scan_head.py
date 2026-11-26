@@ -107,6 +107,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
     which labels, is the DAG's (`scan_dag.build`), rendered into `scan.nf` itself."""
     dag = dag or scan_dag.build(profile, reproc=reproc)
     task_labels = labels(profile, env, scan)
+    from .image_pin import IMAGE_ENVS
     if run_id:  # the run's tasks, so a scan's cost sums its runs' jobs by it (`scan_cost.select_jobs`)
         task_labels["scan_run"] = run_id.lower()
         check_label("scan_run", task_labels["scan_run"])
@@ -114,6 +115,11 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
     step_env.update({k: env[k] for k in profile.passthrough if k in env})
     # every step's Batch helpers (static names, the interval store, …) label themselves from it (`label_batch_spec`)
     step_env[LABELS_ENV] = env[LABELS_ENV]
+    if env.get(PIN_ENV):
+        # the run's digest reaches the tasks through `run.config`'s env scope (`run_config`), out of the task hash; a
+        # profile's tag here would be exported over it in each task's script
+        for k in IMAGE_ENVS:
+            step_env.pop(k, None)
     if reproc:
         step_env["REPROC"] = "1"
     if profile.executor.kind == "google-batch":
@@ -393,14 +399,38 @@ def _groovy(s: str) -> str:
     return "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
 
 
-def run_config(run_id: str, profile_json: str) -> str:
+#: The head's env var holding the run's image digest (`pin_image`), which `run_config` hands every task.
+PIN_ENV = "DT_IMAGE_PIN"
+
+
+def pin_image(profile: ScanProfile, image: str | None, dry_run: bool) -> str | None:
+    """The digest every job the run's tasks submit runs (`image_pin`): the head's own image when it's a digest
+    (`$DT_SCAN_IMAGE`), else a google-batch profile's `executor.image` tag resolved now; None for a dry run, a local
+    run, or an image that isn't an Artifact Registry tag. The tasks' own container stays as `executor_config` names it,
+    so a resume after a promote keeps its cache (a digest there is in each task's hash)."""
+    from .image_pin import DIGEST, is_tag, resolve
+
+    if image and DIGEST.search(image):
+        return image
+    ex = profile.executor
+    if dry_run or ex.kind != "google-batch" or not is_tag(ex.image):
+        return None
+    return resolve(ex.image)
+
+
+def run_config(run_id: str, profile_json: str, image: str | None = None) -> str:
     """The run's own task env, as a Nextflow `env` scope: this head's run id (as `DT_RUN_ID`, what the steps record
     under, and `SCAN_RUN_ID`, what the Batch jobs a step submits are labelled `scan_run` from: `cost_labels`) and the
     profile JSON. Nextflow's task hash leaves the `env` scope out (unlike anything in a task's script), so a resume from
     a new head job (a new `BATCH_JOB_UID`), or after a profile edit, still finds the finished tasks in the cache."""
     if not re.fullmatch(r"[A-Za-z0-9._-]*", run_id):  # empty: a local run that isn't recorded
         raise ValueError(f"run id {run_id!r}: Nextflow exports it into each task's script unescaped")
-    return (f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    SCAN_RUN_ID = {_groovy(run_id)}\n"
+    if image is not None and not re.fullmatch(r"[A-Za-z0-9._/@:-]+", image):
+        raise ValueError(f"image {image!r}: Nextflow exports it into each task's script unescaped")
+    from .image_pin import IMAGE_ENVS
+
+    pinned = "".join(f"    {k} = {_groovy(image)}\n" for k in IMAGE_ENVS) if image else ""
+    return (f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    SCAN_RUN_ID = {_groovy(run_id)}\n{pinned}"
             f"    DT_SCAN_PROFILE_JSON = {_groovy(profile_env_value(profile_json))}\n}}\n")
 
 
@@ -467,7 +497,7 @@ class NextflowBackend(Backend):
             params(profile, run.profile_json, run.scan, run.gen, run.job_start, run.run_id, run.session, run.env,
                    reproc=run.reproc, fresh=run.fresh, dag=run.dag), indent=1) + "\n")
         (launch / "executor.config").write_text(executor_config(profile, run.image))
-        (launch / "run.config").write_text(run_config(run.run_id, run.profile_json))
+        (launch / "run.config").write_text(run_config(run.run_id, run.profile_json, run.env.get(PIN_ENV)))
         for name in (*REPORTS, PREVIEW_DAG):
             (launch / name).unlink(missing_ok=True)
         self.argv = nextflow_argv(self.nf_dir, launch, run.session)
@@ -596,6 +626,10 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         launch = Path(profile.work) if profile.executor.kind == "local" else Path(env.get("TMPDIR") or "/tmp") / f"nf-{scan}"
     launch = launch.absolute()
     image = env.get("DT_SCAN_IMAGE") or None
+    # one digest for every job the run's tasks submit (`image_pin`): a promote mid-run can't split the run
+    if pin := pin_image(profile, image, dry_run):
+        env[PIN_ENV] = pin
+        err(f"scan head: the run's jobs run {pin}")
     backend = backend_for(profile, nf_dir)
     run = Run(profile, profile_json, scan_dag.build(profile, reproc=reproc), scan, gen, job_start, run_id, session, launch,
               dict(env), now, reproc=reproc, fresh=fresh, image=image, run_id_source=run_id_source)
