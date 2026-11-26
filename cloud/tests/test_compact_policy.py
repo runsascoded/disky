@@ -167,7 +167,8 @@ def test_runner_merge_stage_names_the_rule(compact, log):
     if log:
         assert [c[0] for c in f.calls()] == ["compact"]
     else:
-        assert f.calls() == [("merge", "carry -L none -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data")]
+        assert f.calls() == [("merge", "carry -L none -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data"),
+                             ("r2", "r2 -d 2026-08-07 -m 2026-08-07.m001 -b data -g g1 -R g0 -S scr")]
         assert f.stack("2026-08-07.m001.json") == [("deltas/2026-08-04_2026-08-07", 2)]
     assert ([m for m in f.log if m.startswith("merge: compaction")], r.compaction) == (
         ([log], log.split(" (", 1)[1].rsplit("): compact", 1)[0]) if log else ([], None))
