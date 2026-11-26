@@ -1,7 +1,8 @@
 /** In-flight marker for a widget that keeps showing its last content while
  * the next loads: centered over a dimmed host (`.busy-host.stale`), or a
  * small corner pill when the shown content is current and only a refresh or
- * fill-in is pending. The host is `position: relative`. */
+ * fill-in is pending (`corner`); over a tall host (a table) `top` puts it near the host's top, where it's seen. The host
+ * is `position: relative`. */
 /** A stand-in for a widget that has nothing to show yet: reserves its
  * height (so the page doesn't reflow when it lands) with the in-flight
  * marker centered. */
@@ -13,9 +14,9 @@ export function Skeleton({ height, label, className }: { height: number | string
   )
 }
 
-export function Busy({ label, corner = false }: { label?: string; corner?: boolean }) {
+export function Busy({ label, corner = false, top = false }: { label?: string; corner?: boolean; top?: boolean }) {
   return (
-    <div className={corner ? 'busy-overlay corner' : 'busy-overlay'} role="status" aria-live="polite">
+    <div className={corner ? 'busy-overlay corner' : top ? 'busy-overlay top' : 'busy-overlay'} role="status" aria-live="polite">
       <span className="pill"><span className="spin" aria-hidden="true" />{label ?? 'loading…'}</span>
     </div>
   )

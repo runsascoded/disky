@@ -4,7 +4,7 @@ import { Explain } from './Help'
 import { TimeSeries, XOverview } from '@disk-tree/react'
 import type { Annotation, Series as TsSeries } from '@disk-tree/react'
 import { slotColor } from './colors'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useMemo, useRef, useState } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
 import { shortName } from './UserChip'
@@ -20,6 +20,7 @@ import { SERIES_MAX_PATHS } from '../functions/_lib/seriesLimits'
 import { ApiError, apiError } from './filterCaps'
 import { LoadFailure } from './LoadFailure'
 import { SeriesEmpty } from './SeriesEmpty'
+import { Busy } from './Busy'
 import { SeriesMissingNote } from './UnionNotes'
 import { defaultNoteAt, noteMarkers, notesHere, type ChartAnnotation, type NoteMarker } from './chartNotes'
 import { NoteForm, NoteTip, useChartNotes, useNoteWrite } from './NoteWidgets'
@@ -293,6 +294,9 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     // what the page asked for.
     enabled: scopeReady && scans.length > 1 && !(filterLabel && !paths?.length && !((queryOnly || overMax) && filterQs)) && !(overMax && !filterQs),
     staleTime: 5 * 60_000,
+    // A drill keeps the last path's chart on screen, dimmed under a spinner, until this one's lands: the page doesn't
+    // collapse and reflow under the reader
+    placeholderData: keepPreviousData,
     queryFn: async () => {
       const pf = perf.start('series', `${prefix || '/'}${scope}|n${scans.length}`)
       const r = await pf.track(sfetch(`/api/series?path=${encodeURIComponent(prefix)}${scope}`, { credentials: 'include' }))
@@ -571,7 +575,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
               : <>nothing{prefix ? <> under <code>{prefix}</code></> : ''} in any scan</>}
         </p>
       ) : series.length > 0 ? (
-        <div onPointerDownCapture={e => { altRef.current = e.altKey }}>
+        <div className={seriesQ.isPlaceholderData ? 'busy-host stale' : 'busy-host'} onPointerDownCapture={e => { altRef.current = e.altKey }}>
         <TimeSeries<Pt>
           series={series}
           getX={p => p.x}
@@ -607,6 +611,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
             />
           </Explain>
         )}
+        {seriesQ.isPlaceholderData && <Busy label="loading series…" />}
         </div>
       ) : (
         <SeriesEmpty err={refused ?? (seriesQ.isError ? seriesQ.error : undefined)} loading={seriesQ.isLoading} onRetry={() => void seriesQ.refetch()} />
