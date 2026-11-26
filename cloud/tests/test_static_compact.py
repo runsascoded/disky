@@ -181,6 +181,44 @@ def test_the_floor_crossers_counted_on_worker_processes_measure_the_same(world, 
     assert sorted(p.name for p in (tmp_path / "procs").iterdir()) == ["dirs", "short"]
 
 
+def test_the_measurement_joined_in_q_ranges_is_one_joins(world, tmp_path, monkeypatch):
+    """`measure_kind` joining and writing one `q` range at a time (`MEASURE_CHUNK_ROWS` 1: a range per sampled value) writes
+    the measurement one join over every range does, md5 for md5."""
+    root = world["a_store"]
+    rec = json.loads((root / "g.c001" / ar.COMPACTION).read_text())
+    base = root / rec["from"]
+    tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
+    q_ranges, cuts = sme.q_ranges, []
+    monkeypatch.setattr(sme, "q_ranges", lambda *a: cuts.append(len(r := q_ranges(*a))) or r)
+    for name, rows in (("one", 10**9), ("ranges", 1)):
+        monkeypatch.setattr(sme, "MEASURE_CHUNK_ROWS", rows)
+        con = sn.connect(2, "1GB", tmp_path / f"duckdb-{name}")
+        sme.incremental_measure(con, tiers, base / "roots-measure", str(root / "g.c001" / "catalog" / "members.parquet"), tmp_path / name,
+                                floor=tiers[0].meta.get("floor", sl.FLOOR), log=lambda s: None)
+    assert cuts[:2] == [1, 1]
+    assert max(cuts[2:]) > 1
+    assert _md5s(tmp_path / "ranges") == _md5s(tmp_path / "one")
+
+
+@pytest.mark.parametrize("n", [0, 5, 2_100_003])
+def test_write_sorted_writes_write_tables_file(tmp_path, n):
+    """`write_sorted` over a sorted result cut into `q` ranges writes the bytes `pq.write_table` writes for the whole result
+    as DuckDB returns it: its 1M-row batches, pyarrow's 1Mi-row groups (two here, a batch spanning their boundary)."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute(f"""CREATE TABLE t AS SELECT ('q' || lpad((i * 7919 % {max(n, 1)})::VARCHAR, 9, '0'))::VARCHAR AS q, (i % 7)::INTEGER AS k,
+        ('d/' || (i % 1000)::VARCHAR)::VARCHAR AS dir, (i * 3)::BIGINT AS rows FROM range({n}) r(i)""")
+    pq.write_table(con.execute("SELECT * FROM t ORDER BY q, k, dir").to_arrow_table(), tmp_path / "one.parquet", compression=sn.CODEC)
+    ranges = sme.q_ranges(con, ["t"], 400_000)
+    empty = con.execute("SELECT * FROM t LIMIT 0").to_arrow_table()
+    written = sme.write_sorted((b for lo, hi in ranges for b in con.execute(
+        f"SELECT * FROM t WHERE {sme.q_range_sql('q', lo, hi)} ORDER BY q, k, dir").to_arrow_reader(sme.ARROW_BATCH_ROWS)), empty, tmp_path / "ranges.parquet")
+    assert (written, len(ranges) > 1) == (n, n > 400_000)
+    assert [pq.ParquetFile(tmp_path / f).metadata.num_row_groups for f in ("one.parquet", "ranges.parquet")] == [1 if n < 2_000_000 else 3] * 2
+    assert hashlib.md5((tmp_path / "ranges.parquet").read_bytes()).hexdigest() == hashlib.md5((tmp_path / "one.parquet").read_bytes()).hexdigest()
+
+
 def test_compactions_measure_and_roll_up_incrementally(world):
     """specs/static-incremental-compaction.md step 4: every fixture run counts only new roots (`dcount: fresh`), so each
     compaction above (whose bytes `test_compacted_generation_is_the_rebuild` checks) took its measurement and rollups from

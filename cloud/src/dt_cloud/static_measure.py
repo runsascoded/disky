@@ -36,6 +36,80 @@ from .static_names import CODEC, err, q
 #: `roots-measure/`'s per-kind subdirectories (`static_local.finish_drill`).
 SUBS = {"long": "dirs", "short": "short/dirs"}
 MEASURE_COLS = "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"
+#: Input rows (base measurement, run headers and counts) per `q` range `measure_kind` joins and writes at a time: cw's
+#: 2026-11-22..25 compactions, joining every range at once over `gov_reports`' growth, ran DuckDB out of 251 GiB.
+MEASURE_CHUNK_ROWS = 50_000_000
+#: The sampled `q` values the ranges are cut from
+RANGE_SAMPLE_ROWS = 100_000
+#: DuckDB's Arrow batch (`to_arrow_table`'s, `to_arrow_reader`'s default) and pyarrow's default row group: `write_sorted`
+#: re-cuts a stream to both, so it writes the file one `pq.write_table` of the whole result writes, byte for byte.
+ARROW_BATCH_ROWS = 1_000_000
+ROW_GROUP_ROWS = 1024 * 1024
+
+
+def q_ranges(con, tables: list[str], target: int) -> list[tuple[str | None, str | None]]:
+    """`[lo, hi)` ranges of the `q` column over `tables`, of about `target` rows each (cut at sampled values; None: open),
+    or one unbounded range when they hold fewer."""
+    union = " UNION ALL ".join(f"SELECT q FROM {t}" for t in tables)
+    n = con.execute(f"SELECT count(*) FROM ({union})").fetchone()[0]
+    parts = -(-n // target)
+    if parts <= 1:
+        return [(None, None)]
+    sample = [r[0] for r in con.execute(f"SELECT q FROM ({union}) USING SAMPLE reservoir({RANGE_SAMPLE_ROWS} ROWS) REPEATABLE (1) ORDER BY q").fetchall()]
+    cuts = sorted({sample[len(sample) * i // parts] for i in range(1, parts)})
+    bounds = [None, *cuts, None]
+    return list(zip(bounds[:-1], bounds[1:]))
+
+
+def q_range_sql(col: str, lo: str | None, hi: str | None) -> str:
+    """`col` in `[lo, hi)` (None: unbounded)."""
+    return " AND ".join([*([f"{col} >= {q(lo)}"] if lo is not None else []), *([f"{col} < {q(hi)}"] if hi is not None else [])]) or "true"
+
+
+def _rebatched(batches, rows: int):
+    """`batches` re-cut into batches of exactly `rows` (the last may be shorter)."""
+    buf, n = [], 0
+    for b in batches:
+        off = 0
+        while off < len(b):
+            take = min(rows - n, len(b) - off)
+            buf.append(b.slice(off, take))
+            n, off = n + take, off + take
+            if n == rows:
+                yield pa.concat_batches(buf)
+                buf, n = [], 0
+    if n:
+        yield pa.concat_batches(buf)
+
+
+def write_sorted(batches, empty: pa.Table, path: Path) -> int:
+    """Write `batches` (Arrow record batches, in order; `empty`: their schema, written when there are none) to `path` as
+    `pq.write_table` writes their concatenation as one DuckDB result: DuckDB's 1M-row batches, pyarrow's 1Mi-row groups.
+    Holds at most a row group. Returns the rows written."""
+    writer, pending, n, total = None, [], 0, 0
+
+    def flush(table: pa.Table) -> None:
+        nonlocal writer
+        if writer is None:
+            writer = pq.ParquetWriter(path, table.schema, compression=CODEC)
+        writer.write_table(table, row_group_size=ROW_GROUP_ROWS)
+
+    for b in _rebatched(batches, ARROW_BATCH_ROWS):
+        pending.append(b)
+        n += len(b)
+        total += len(b)
+        if n >= ROW_GROUP_ROWS:
+            t = pa.Table.from_batches(pending)
+            flush(t.slice(0, ROW_GROUP_ROWS))
+            rest = t.slice(ROW_GROUP_ROWS)
+            pending, n = rest.to_batches(), len(rest)
+    if pending and n:
+        flush(pa.Table.from_batches(pending))
+    if writer is None:
+        pq.write_table(empty, path, compression=CODEC)
+    else:
+        writer.close()
+    return total
 
 
 def _files(fs: list[str]) -> str:
@@ -178,18 +252,31 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
         sd.insert_rows(con, "im_bx", [(c, d, x) for (c, d), x in base_counts(tiers[0], kind, cands).items()])
     base_s = monotonic() - t0
     bc = "mt.c0" if long else "x.q"
-    con.execute(f"CREATE OR REPLACE TEMP TABLE im_out ({MEASURE_COLS})")
-    con.execute(f"""INSERT INTO im_out SELECT q, len(string_split(dir, '/')), dir, rows FROM (
-            SELECT q, dir, rows FROM im_h
-            UNION ALL SELECT x.q, x.dir, coalesce(b.rows, bx.rows, 0) + coalesce(d.rows, 0) AS rows
-            FROM (SELECT q, dir FROM im_b UNION SELECT q, dir FROM im_d) AS x ANTI JOIN im_h USING (q, dir)
-            LEFT JOIN im_b AS b USING (q, dir) LEFT JOIN im_d AS d USING (q, dir) {"JOIN im_mt AS mt USING (q)" if long else ""}
-            LEFT JOIN im_bx AS bx ON bx.c = {bc} AND bx.dir = x.dir)
-        WHERE rows >= {floor}""")
+    # One `q` range at a time (each member's rows lie in one): the ranges' joins, sorted and written in range order, are
+    # the whole set's, sorted, without holding it. A short literal's base count (`bx.c`) is its own `q`; a member's is its
+    # base canonical's (`im_mt.c0`), so a long range reads the counts of its members' canonicals.
+    ranges = q_ranges(con, ["im_h", "im_b", "im_d"], MEASURE_CHUNK_ROWS)
+
+    def part(lo: str | None, hi: str | None) -> str:
+        def of(t: str, col: str = "q") -> str:
+            return f"(SELECT * FROM {t} WHERE {q_range_sql(col, lo, hi)})"
+        bx = (f"(SELECT * FROM im_bx SEMI JOIN (SELECT c0 AS c FROM im_mt WHERE {q_range_sql('q', lo, hi)}) USING (c))" if long
+              else of("im_bx", "c"))
+        return f"""SELECT q::VARCHAR AS q, len(string_split(dir, '/'))::INTEGER AS k, dir::VARCHAR AS dir, rows::BIGINT AS rows FROM (
+                SELECT q, dir, rows FROM {of("im_h")}
+                UNION ALL SELECT x.q, x.dir, coalesce(b.rows, bx.rows, 0) + coalesce(d.rows, 0) AS rows
+                FROM (SELECT q, dir FROM {of("im_b")} UNION SELECT q, dir FROM {of("im_d")}) AS x ANTI JOIN {of("im_h")} AS h USING (q, dir)
+                LEFT JOIN {of("im_b")} AS b USING (q, dir) LEFT JOIN {of("im_d")} AS d USING (q, dir) {"JOIN im_mt AS mt USING (q)" if long else ""}
+                LEFT JOIN {bx} AS bx ON bx.c = {bc} AND bx.dir = x.dir)
+            WHERE rows >= {floor} ORDER BY q, k, dir"""
+
     out.mkdir(parents=True, exist_ok=True)
-    pq.write_table(con.execute("SELECT * FROM im_out ORDER BY q, k, dir").to_arrow_table(), out / "s0000.parquet", compression=CODEC)
-    doc = {k: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for k, t in (("headers", "im_h"), ("dcount", "im_d"), ("base", "im_b"),
-                                                                                  ("rows", "im_out"))}
+    con.execute(f"CREATE OR REPLACE TEMP TABLE im_out ({MEASURE_COLS})")
+    empty = con.execute("SELECT * FROM im_out").to_arrow_table()
+    written = write_sorted((b for lo, hi in ranges for b in con.execute(part(lo, hi)).to_arrow_reader(ARROW_BATCH_ROWS)),
+                           empty, out / "s0000.parquet")
+    doc = {k: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for k, t in (("headers", "im_h"), ("dcount", "im_d"), ("base", "im_b"))}
+    doc["rows"] = written
     doc["base_counted"] = n
     doc["base_count_s"] = round(base_s, 1)
     for t in ("im_h", "im_d", "im_b", "im_c", "im_bx", "im_out", "im_mt", *(f"im_a{i}" for i in range(len(tiers)))):
