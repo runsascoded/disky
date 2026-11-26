@@ -57,6 +57,17 @@ describe('runCost', () => {
     expect(costStages(report([job({ association: 'root' })])).upkeep).toBeNull()
   })
 
+  it('puts every job in exactly one group: the stages and upkeep together are the report’s total', () => {
+    const jobs = [
+      job({ association: 'root', estimated_compute_usd: 0.1979 }), job({ step: 'list_source', estimated_compute_usd: 0.5 }),
+      job({ component: 'anchors', stage: 'anchors', estimated_compute_usd: 0.9181 }), job({ component: 'mystery', estimated_compute_usd: 0.25 }),
+      job({ component: 'static-names', stage: 'merge', estimated_compute_usd: 2.621 }), job({ component: 'static-names', stage: 'r2', estimated_compute_usd: null }),
+    ]
+    const { stages, total, upkeep } = costStages(report(jobs))
+    expect([stages.reduce((n, s) => n + s.jobs.length, 0) + (upkeep?.jobs.length ?? 0), stages.map(s => s.stage)]).toEqual([6, ['head', 'list', 'static names', 'other']])
+    expect((total ?? 0) + (upkeep?.usd ?? 0)).toBeCloseTo(0.1979 + 0.5 + 0.9181 + 0.25 + 2.621, 10)
+  })
+
   it('reads a store’s merge or compaction job from before the upkeep label as upkeep', () => {
     expect([
       job({ component: 'static-names', stage: 'merge', upkeep: undefined }),
