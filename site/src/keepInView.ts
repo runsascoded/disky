@@ -10,19 +10,21 @@ export const HOLD_MS = 4000
  *  the page scrolls to put it back there, and keeps it there as the page above it resizes (the map reloading at the
  *  new path) until the reader scrolls, types or clicks, or `HOLD_MS` passes. Declare it after `useSectionSpy`, so
  *  its scroll runs after the spy's. */
-export function useKeepInView(id: string, key: string): () => void {
-  const want = useRef<number | null>(null)
-  const arm = useCallback(() => {
-    const el = document.getElementById(id)
-    want.current = el ? el.getBoundingClientRect().top : null
+export function useKeepInView(id: string, key: string): (which?: string | null) => void {
+  const want = useRef<{ id: string; top: number } | null>(null)
+  // `which`: another element to hold this time (a crumb holds the section being read: `sectionInView`); null: none
+  const arm = useCallback((which?: string | null) => {
+    const target = which === undefined ? id : which
+    const el = target ? document.getElementById(target) : null
+    want.current = target && el ? { id: target, top: el.getBoundingClientRect().top } : null
   }, [id])
   useEffect(() => {
-    const top = want.current
-    if (top == null) return
+    const held = want.current
+    if (held == null) return
     want.current = null
     const place = () => {
-      const el = document.getElementById(id)
-      if (el) window.scrollBy({ top: el.getBoundingClientRect().top - top, behavior: 'instant' })
+      const el = document.getElementById(held.id)
+      if (el) window.scrollBy({ top: el.getBoundingClientRect().top - held.top, behavior: 'instant' })
     }
     place()
     const ro = new ResizeObserver(place)
@@ -36,6 +38,21 @@ export function useKeepInView(id: string, key: string): () => void {
     const timer = setTimeout(stop, HOLD_MS)
     for (const e of events) window.addEventListener(e, stop, { passive: true })
     return stop
-  }, [key, id])
+  }, [key])
   return arm
+}
+
+/** The section being read: the last of `ids` whose top is at or above `line` (the sticky bar's bottom edge), on screen;
+ *  null at the page's top (nothing scrolled under the bar: a new path's top is where the reader already is). */
+export function sectionInView(ids: readonly string[], line: number): string | null {
+  if (window.scrollY <= 0) return null
+  let best: string | null = null
+  for (const id of ids) {
+    const r = document.getElementById(id)?.getBoundingClientRect()
+    if (r && r.top <= line + 1 && r.bottom > line) best = id
+  }
+  return best ?? ids.find(id => {
+    const r = document.getElementById(id)?.getBoundingClientRect()
+    return r && r.top > line && r.top < window.innerHeight
+  }) ?? null
 }
