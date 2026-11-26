@@ -42,17 +42,16 @@ export function useKeepInView(id: string, key: string): (which?: string | null) 
   return arm
 }
 
-/** The section being read: the last of `ids` whose top is at or above `line` (the sticky bar's bottom edge), on screen;
- *  null at the page's top (nothing scrolled under the bar: a new path's top is where the reader already is). */
+/** The section being read: the first of `ids` whose heading (its top) is on screen below `line` (the sticky bar's bottom
+ *  edge) in the upper half of the viewport; else the one the bar cuts across (it fills the screen). Null at the page's
+ *  top (nothing scrolled under the bar: a new path's top is where the reader already is). A section whose tail alone is
+ *  left under the bar isn't the one being read: on cw, the table's last 18 px above the size chart and the diff. */
 export function sectionInView(ids: readonly string[], line: number): string | null {
   if (window.scrollY <= 0) return null
-  let best: string | null = null
-  for (const id of ids) {
+  const rects = ids.flatMap(id => {
     const r = document.getElementById(id)?.getBoundingClientRect()
-    if (r && r.top <= line + 1 && r.bottom > line) best = id
-  }
-  return best ?? ids.find(id => {
-    const r = document.getElementById(id)?.getBoundingClientRect()
-    return r && r.top > line && r.top < window.innerHeight
-  }) ?? null
+    return r ? [{ id, top: r.top, bottom: r.bottom }] : []
+  })
+  const headed = rects.find(r => r.top >= line - 1 && r.top < line + (window.innerHeight - line) / 2)
+  return headed?.id ?? rects.find(r => r.top < line && r.bottom > line)?.id ?? null
 }
