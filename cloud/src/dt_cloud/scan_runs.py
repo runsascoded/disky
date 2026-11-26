@@ -2091,7 +2091,9 @@ def finish_cmd(dag_path, dag_engine, error, cost_labels, rc, profile_path, d1, d
 
         try:
             labels = dict(l.split("=", 1) for l in cost_labels)
-            extra = labelled_cost(j.profile, bf.fetch_jobs(j.profile.project or "", j.profile.regions), labels, _now())
+            # the run's own job is priced as the run's (`own`): never again as one of its labelled jobs
+            jobs = [x for x in bf.fetch_jobs(j.profile.project or "", j.profile.regions) if not run_id or x.get("uid") != run_id]
+            extra = labelled_cost(j.profile, jobs, labels, _now())
         except Exception as e:  # noqa: BLE001 — the cost is an estimate; the record must still finish
             report_failure(e)
     dag = None

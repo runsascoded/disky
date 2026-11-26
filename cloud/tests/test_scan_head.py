@@ -316,6 +316,37 @@ def test_head_takes_cost_labels_from_the_profiles_env(tmp_path):
         {"app": "disky", "deployment": "fix", "component": "scan", "scan_id": "2026-10-16t1200"}, "app=disky,deployment=fix")
 
 
+def test_a_batch_heads_tasks_carry_its_run(tmp_path):
+    """A head running as a Batch job labels its tasks `scan_run` (its job's uid, lowercased) and exports `SCAN_RUN_ID` into
+    their env, so the jobs a step submits (static names' append, drill, …: `cost_labels.label_batch_spec`) carry it too
+    and the run's cost sums them (specs/scan-cost-by-stage.md)."""
+    prof = tmp_path / "p.yml"
+    prof.write_text(f"deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
+                    "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\n"
+                    "skip: [static-names, digest, interval-store, warm-cache, probe]\n"
+                    "options: {list: {import: true}}\nenv: {DISKY_LABELS: 'app=disky,deployment=fix'}\n")
+    launch = tmp_path / "launch"
+    env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "100", "DT_RECORD": "off",
+           "BATCH_JOB_UID": "fix-usage-snapshot-2-5f3a1c9e-0b1d-4e7a0"}
+    assert H.head(prof, NF, launch, dry_run=True, env=env) == 0
+    params = json.loads((launch / "params.json").read_text())
+    assert params["labels"] == {"app": "disky", "deployment": "fix", "component": "scan", "scan_id": "2026-10-16t1200",
+                                "scan_run": "fix-usage-snapshot-2-5f3a1c9e-0b1d-4e7a0"}
+    assert (launch / "run.config").read_text().split("\n")[1:3] == [
+        "    DT_RUN_ID = 'fix-usage-snapshot-2-5f3a1c9e-0b1d-4e7a0'", "    SCAN_RUN_ID = 'fix-usage-snapshot-2-5f3a1c9e-0b1d-4e7a0'"]
+
+
+def test_a_runs_jobs_are_priced_by_its_scan_run():
+    """`finish -l`: a recorded google-batch run prices the jobs labelled with its run (its tasks and what they submitted);
+    an unrecorded one its session's tasks; a local executor none."""
+    from types import SimpleNamespace as NS
+
+    backend = H.NextflowBackend(NF)
+    run = lambda kind, run_id: NS(profile=NS(executor=NS(kind=kind)), run_id=run_id, session="s1")  # noqa: E731
+    assert [backend.cost(run("google-batch", "Fix-Usage-1")), backend.cost(run("google-batch", "")), backend.cost(run("local", "r"))] == [
+        ["-l", "scan_run=fix-usage-1"], ["-l", "nf-session=s1"], []]
+
+
 def test_a_tasks_labels_are_the_heads_on_its_job_and_its_allocation():
     """Nextflow builds each task's Batch job, so no spec of ours is asserted: `base.config` hands nf-google the head's
     `params.labels` (above) + the session + the step as `process.resourceLabels`, which the pinned plugin puts on the
@@ -561,6 +592,7 @@ def test_run_config_is_a_groovy_env_scope():
     assert H.run_config("oa-r2-scan-manual-c51e504f-ecbc-495200", profile_json) == (
         "env {\n"
         "    DT_RUN_ID = 'oa-r2-scan-manual-c51e504f-ecbc-495200'\n"
+        "    SCAN_RUN_ID = 'oa-r2-scan-manual-c51e504f-ecbc-495200'\n"
         f"    DT_SCAN_PROFILE_JSON = 'base64:{base64.b64encode(profile_json.encode()).decode()}'\n"
         "}\n"
     )

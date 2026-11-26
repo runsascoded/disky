@@ -107,6 +107,9 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
     which labels, is the DAG's (`scan_dag.build`), rendered into `scan.nf` itself."""
     dag = dag or scan_dag.build(profile, reproc=reproc)
     task_labels = labels(profile, env, scan)
+    if run_id:  # the run's tasks, so a scan's cost sums its runs' jobs by it (`scan_cost.select_jobs`)
+        task_labels["scan_run"] = run_id.lower()
+        check_label("scan_run", task_labels["scan_run"])
     step_env = dict(profile.env)
     step_env.update({k: env[k] for k in profile.passthrough if k in env})
     # every step's Batch helpers (static names, the interval store, …) label themselves from it (`label_batch_spec`)
@@ -391,12 +394,14 @@ def _groovy(s: str) -> str:
 
 
 def run_config(run_id: str, profile_json: str) -> str:
-    """The run's own task env, as a Nextflow `env` scope: this head's run id and the profile JSON. Nextflow's task hash
-    leaves the `env` scope out (unlike anything in a task's script), so a resume from a new head job (a new
-    `BATCH_JOB_UID`), or after a profile edit, still finds the finished tasks in the cache."""
+    """The run's own task env, as a Nextflow `env` scope: this head's run id (as `DT_RUN_ID`, what the steps record
+    under, and `SCAN_RUN_ID`, what the Batch jobs a step submits are labelled `scan_run` from: `cost_labels`) and the
+    profile JSON. Nextflow's task hash leaves the `env` scope out (unlike anything in a task's script), so a resume from
+    a new head job (a new `BATCH_JOB_UID`), or after a profile edit, still finds the finished tasks in the cache."""
     if not re.fullmatch(r"[A-Za-z0-9._-]*", run_id):  # empty: a local run that isn't recorded
         raise ValueError(f"run id {run_id!r}: Nextflow exports it into each task's script unescaped")
-    return f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    DT_SCAN_PROFILE_JSON = {_groovy(profile_env_value(profile_json))}\n}}\n"
+    return (f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    SCAN_RUN_ID = {_groovy(run_id)}\n"
+            f"    DT_SCAN_PROFILE_JSON = {_groovy(profile_env_value(profile_json))}\n}}\n")
 
 
 def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
@@ -545,7 +550,12 @@ class NextflowBackend(Backend):
             err(f"scan head: ownership receipt unavailable: {type(e).__name__}: {e}")
 
     def cost(self, run: Run) -> list[str]:
-        return ["-l", f"nf-session={run.session}"] if run.profile.executor.kind == "google-batch" else []
+        """The labels `finish -l` prices the run's other Batch jobs by: its `scan_run` (its tasks and every job they
+        submitted: static names' stages, the interval store's), else, unrecorded, the session's tasks (`nf-session`,
+        which a resume shares with the runs before it)."""
+        if run.profile.executor.kind != "google-batch":
+            return []
+        return ["-l", f"scan_run={run.run_id.lower()}"] if run.run_id else ["-l", f"nf-session={run.session}"]
 
     def dag_file(self, run: Run) -> Path:
         return run.launch / "dag.mmd"
