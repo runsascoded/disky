@@ -108,6 +108,9 @@ def test_newly_heavy_rollups_match_monolithic_combine(monkeypatch):
         def __init__(self):
             self.ranges = []
 
+        def cache_stats(self):
+            return {}
+
         def tables(self, c, lo, hi):
             assert c == "member"
             self.ranges.append((c, lo, hi))
@@ -189,6 +192,9 @@ def test_newly_heavy_combine_survives_budget_that_rejects_global_group(tmp_path)
             GROUP BY h.q,h.dir,d.path,d.usr,d.vf""")
 
     class Reads:
+        def cache_stats(self):
+            return {}
+
         def tables(self, *args):
             raise AssertionError("New members already carry complete history in dr")
 
@@ -252,15 +258,70 @@ def test_memory_snapshot_cgroup_v1(tmp_path):
     }
 
 
-def test_chunk_memory_names_each_holder_and_what_releasing_it_gave_back(monkeypatch):
-    """`chunk_memory` (specs/static-catch-up.md C): RSS, DuckDB's bytes and spill, pyarrow's, the checkpoint's pending rows,
-    then what releasing pyarrow's pool and the C heap gave back, measured as RSS before and after each."""
-    rss = iter([100, 90, 70])
+HEAP = {"arrow_bytes": 5, "py_blocks": 7, "glibc_used_bytes": 30, "glibc_free_bytes": 10}
+
+
+def _fixed(monkeypatch, rss, jemalloc=True):
     monkeypatch.setattr(sd, "memory_snapshot", lambda: {"rss_anon_bytes": next(rss)})
+    monkeypatch.setattr(sd, "heap_snapshot", lambda: dict(HEAP))
+    monkeypatch.setattr(sd, "duckdb_jemalloc", lambda con: jemalloc)
+    con = duckdb.connect()
+    con.execute("SET memory_limit = '1GiB'")
+    return con
+
+
+def test_chunk_memory_names_each_holder_and_what_releasing_it_gave_back(monkeypatch):
+    """`chunk_memory` (specs/static-catch-up.md C): `memory_breakdown`, pyarrow's pool, the checkpoint's pending rows,
+    then what releasing pyarrow's pool and the C heap gave back, measured as RSS before and after each."""
+    con = _fixed(monkeypatch, iter([100, 90, 70]))
     monkeypatch.setattr(sd, "release_heap", lambda: None)
+    monkeypatch.setattr(sd.pa, "default_memory_pool", lambda: SimpleNamespace(backend_name="jemalloc", max_memory=lambda: 4, release_unused=lambda: None))
     parts = SimpleNamespace(pending=[pa.table({"x": [1, 2]}), pa.table({"x": [3]})])
-    m = sd.chunk_memory(duckdb.connect(), parts)
-    assert {k: m[k] for k in ("rss_anon_bytes", "freed_arrow_bytes", "freed_trim_bytes", "parts_pending_bytes", "duckdb_bytes", "duckdb_spill_bytes")} == {
-        "rss_anon_bytes": 100, "freed_arrow_bytes": 10, "freed_trim_bytes": 20, "parts_pending_bytes": 24, "duckdb_bytes": 0, "duckdb_spill_bytes": 0}
-    assert sorted(m) == ["arrow_bytes", "arrow_peak_bytes", "arrow_pool", "duckdb_bytes", "duckdb_spill_bytes", "freed_arrow_bytes",
-                         "freed_trim_bytes", "parts_pending_bytes", "rss_anon_bytes"]
+    assert sd.chunk_memory(con, parts) == {
+        "rss_anon_bytes": 100, "duckdb_bytes": 0, "duckdb_spill_bytes": 0, "duckdb_allocator": "jemalloc", "duckdb_limit": "1.0 GiB",
+        **HEAP, "unattributed_bytes": 55, "arrow_pool": "jemalloc", "arrow_peak_bytes": 4, "parts_pending_bytes": 24,
+        "freed_arrow_bytes": 10, "freed_trim_bytes": 20,
+    }
+
+
+@pytest.mark.parametrize("jemalloc,allocator,unattributed", [(True, "jemalloc", 35), (False, "glibc", 55)])
+def test_memory_breakdown_subtracts_duckdb_only_outside_glibc(monkeypatch, jemalloc, allocator, unattributed):
+    """DuckDB's buffer bytes are subtracted from the unattributed RSS only when DuckDB allocates through its own jemalloc;
+    through glibc they are already in glibc's in-use bytes. The reads' caches are listed, not subtracted (decoded groups
+    are pyarrow's bytes, raw bytes glibc's)."""
+    con = _fixed(monkeypatch, iter([100]), jemalloc)
+    monkeypatch.setattr(sd, "duckdb_resources", lambda con: {"duckdb_bytes": 20, "duckdb_spill_bytes": 3})
+    reads = SimpleNamespace(cache_stats=lambda: {"decoded_groups": 2, "decoded_bytes": 4, "index_groups": 1, "index_spans": 1, "raw_bytes": 6})
+    assert sd.memory_breakdown(con, reads) == {
+        "rss_anon_bytes": 100, "duckdb_bytes": 20, "duckdb_spill_bytes": 3, "duckdb_allocator": allocator, "duckdb_limit": "1.0 GiB", **HEAP,
+        "decoded_groups": 2, "decoded_bytes": 4, "index_groups": 1, "index_spans": 1, "raw_bytes": 6, "unattributed_bytes": unattributed,
+    }
+
+
+def test_outside_bytes_needs_rss_and_glibc():
+    from dt_cloud.resource_monitor import outside_bytes
+
+    assert [outside_bytes(100, HEAP), outside_bytes(100, HEAP, 20), outside_bytes(None, HEAP), outside_bytes(100, {"arrow_bytes": 5, "py_blocks": 7})] == [
+        55, 35, None, None]
+
+
+def test_a_stages_memory_is_on_its_own_line_only(monkeypatch):
+    """`ResourceMonitor.update`: the stage's line carries its measured memory; the periodic lines after it keep the stage
+    and its progress, with fresh RSS and heap, not the stage's DuckDB bytes as if current."""
+    from json import loads
+
+    from dt_cloud import resource_monitor as rm
+
+    rss = iter([100, 120])
+    monkeypatch.setattr(rm, "memory_snapshot", lambda: {"rss_anon_bytes": next(rss)})
+    monkeypatch.setattr(rm, "heap_snapshot", lambda: dict(HEAP))
+    lines = []
+    m = rm.ResourceMonitor(log=lines.append)
+    m.update("long: touched", directories=3, duckdb_bytes=9, rss_anon_bytes=99, unattributed_bytes=1, py_blocks=8)
+    m.sample()
+    drop = ("elapsed_s", "cpu_s")
+    assert [{k: v for k, v in loads(line.removeprefix("DRILL_RESOURCE ")).items() if k not in drop} for line in lines] == [
+        {"stage": "long: touched", "directories": 3, **HEAP, "outside_glibc_arrow_bytes": 55,
+         "duckdb_bytes": 9, "rss_anon_bytes": 99, "unattributed_bytes": 1, "py_blocks": 8},
+        {"stage": "long: touched", "directories": 3, "rss_anon_bytes": 120, **HEAP, "outside_glibc_arrow_bytes": 75},
+    ]

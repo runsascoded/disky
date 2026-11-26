@@ -33,7 +33,7 @@ from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version, Parts
 from .static_names import CODEC, OPEN, PREFIX, U64, Progress, _batches, err, q
 from .static_profile import data_bucket
-from .resource_monitor import memory_snapshot, monitor_resources, resource_stage
+from .resource_monitor import heap_snapshot, memory_snapshot, monitor_resources, outside_bytes, resource_stage
 
 KIND_FULL, KIND_KEPT, KIND_REST, KIND_DELTA = 0, 1, 2, -1  # the delta header sorts first, as a full one
 KINDS = ("long", "short")
@@ -1104,6 +1104,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         FROM tdir""")
     tdir_rows = con.execute("SELECT count(*) FROM tdir").fetchone()[0]
     log(f"drill {kind}: {tdir_rows:,} touched directories in {monotonic() - t0:.0f}s")
+    resource_stage(f"{kind}: touched", directories=tdir_rows, **memory_breakdown(con, reads))
     # the prior state of the touched directories: each tier's rows for the member's canonical there, from the newest full header on
     con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
     for i, t in enumerate(prior):
@@ -1188,6 +1189,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     doc["restated"] = _settle(con, D, K, reads, kind, log, ck)
     reads.drop_decoded()
     release_heap()
+    resource_stage(f"{kind}: settled", **memory_breakdown(con, reads))
     if doc["affected"]:
         log(f"drill {kind}: {doc['affected']:,} directories settled one by one, {doc['restated']:,} restated in {monotonic() - t1:.0f}s")
     # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's. The prior runs'
@@ -1235,6 +1237,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     for tb in ("nh_t", "nh_m"):
         con.execute(f"DROP TABLE {tb}")
     log(f"drill {kind}: newly heavy: the sums in {monotonic() - t2:.0f}s")
+    resource_stage(f"{kind}: newly-heavy sums", **memory_breakdown(con, reads))
     unknown = con.execute(f"SELECT q, dir FROM nh WHERE base IS NULL AND {floor - 1} + runs + today > {R} ORDER BY q, dir").fetchall()
     if ck and ck.done("counts"):
         ck.load(con, "counts")
@@ -1251,7 +1254,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     if doc["heavy_new"]:
         reads.drop_decoded()
         release_heap()
-        resource_stage(f"{kind}: newly-heavy start", directories=doc["heavy_new"], **duckdb_resources(con), **reads.cache_stats())
+        resource_stage(f"{kind}: newly-heavy start", directories=doc["heavy_new"], **memory_breakdown(con, reads))
         count = newly_heavy_rollups(con, reads, kind, K, log=log, ck=ck)
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
     step(f"drill/newly-heavy/{kind}", t2, directories=doc["heavy_new"], prior_roots=count)
@@ -1381,13 +1384,15 @@ def newly_heavy_rollups(
         if ck:
             parts.add(con.execute("SELECT * FROM nhr").to_arrow_table(), b)
         con.execute("INSERT INTO rup SELECT * FROM nhr; DELETE FROM nhr")
-        mem = chunk_memory(con, parts)
+        mem = chunk_memory(con, parts, reads)
         resource_stage(f"{kind}: newly-heavy chunk", **progress, **mem)
-        gib = lambda k: f"{mem[k] / 2**30:.1f}"  # noqa: E731
+        gib = lambda k: "?" if mem.get(k) is None else f"{mem[k] / 2**30:.1f}"  # noqa: E731
         log(f"drill {kind}: newly-heavy directories {b}/{len(directories)} (chunk {n + 1}/{len(chunks)}: {b - a} directories, "
             f"{len(old)} ranges read), {total:,} prior roots, {monotonic() - t0:.0f}s; RSS {gib('rss_anon_bytes')} GiB (DuckDB "
-            f"{gib('duckdb_bytes')}, spill {gib('duckdb_spill_bytes')}, arrow {gib('arrow_bytes')} / peak {gib('arrow_peak_bytes')}, "
-            f"checkpoint {gib('parts_pending_bytes')}; freed: arrow pool {gib('freed_arrow_bytes')}, C heap {gib('freed_trim_bytes')})")
+            f"{gib('duckdb_bytes')} {mem['duckdb_allocator']}, spill {gib('duckdb_spill_bytes')}, arrow {gib('arrow_bytes')} / peak "
+            f"{gib('arrow_peak_bytes')}, glibc {gib('glibc_used_bytes')} used / {gib('glibc_free_bytes')} free, unattributed "
+            f"{gib('unattributed_bytes')}, {mem['py_blocks']:,} Python blocks, checkpoint {gib('parts_pending_bytes')}; freed: arrow "
+            f"pool {gib('freed_arrow_bytes')}, C heap {gib('freed_trim_bytes')})")
     parts.flush(len(directories))
     con.execute("DROP TABLE newh_today; DROP TABLE nhr")
     return total
@@ -1415,24 +1420,45 @@ def duckdb_resources(con) -> dict:
     return {"duckdb_bytes": int(memory), "duckdb_spill_bytes": int(spill)}
 
 
-def chunk_memory(con, parts: Parts | None = None) -> dict:
-    """What a newly-heavy chunk leaves held, by holder (specs/static-catch-up.md C: cw's 11-26T0003 drill grew ~1 GiB of
-    RSS a chunk outside DuckDB until it was OOM-killed): the process's anonymous RSS, DuckDB's buffer-managed bytes and
-    spill, pyarrow's live allocations and its pool's peak, the checkpoint's pending rows; then what RSS pyarrow's pool
-    (`release_unused`) and the C heap (`release_heap`) give back, asked in turn. Linux only for RSS (0 elsewhere)."""
-    def anon() -> int:
-        snap = memory_snapshot()
-        return snap.get("rss_anon_bytes") or snap.get("rss_bytes") or 0
+def _anon() -> int:
+    snap = memory_snapshot()
+    return snap.get("rss_anon_bytes") or snap.get("rss_bytes") or 0
 
+
+def duckdb_jemalloc(con) -> bool:
+    """Whether DuckDB allocates through its own jemalloc (its built-in extension, Linux), outside glibc's heap."""
+    row = con.execute("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'jemalloc'").fetchone()
+    return bool(row and row[0])
+
+
+def memory_breakdown(con, reads: TierReads | None = None) -> dict:
+    """The process's anonymous RSS by holder, on the owning thread (specs/static-catch-up.md C: cw's long drill holds
+    ~56–70 GiB outside DuckDB's buffer manager from before the newly-heavy loop to the end of the drill). DuckDB's
+    buffer-managed bytes and spill, its limit and allocator; the heap's holders (`heap_snapshot`: pyarrow, glibc in use and
+    free, CPython's block count); `reads`' caches (`cache_stats`: decoded groups, which are pyarrow's, and raw bytes, which
+    are glibc's, so neither is subtracted again); and `unattributed_bytes`, what none of them accounts for (`outside_bytes`:
+    jemalloc's retained pages, DuckDB's allocations outside its buffer manager, pymalloc's arenas)."""
+    duck = duckdb_resources(con)
+    jemalloc = duckdb_jemalloc(con)
+    limit = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+    anon, heap = _anon(), heap_snapshot()
+    return {"rss_anon_bytes": anon, **duck, "duckdb_allocator": "jemalloc" if jemalloc else "glibc", "duckdb_limit": limit, **heap,
+            **(reads.cache_stats() if reads is not None else {}),
+            "unattributed_bytes": outside_bytes(anon, heap, duck["duckdb_bytes"] if jemalloc else 0)}
+
+
+def chunk_memory(con, parts: Parts | None = None, reads: TierReads | None = None) -> dict:
+    """What a newly-heavy chunk leaves held, by holder (specs/static-catch-up.md C): `memory_breakdown`, pyarrow's pool's
+    backend and peak, the checkpoint's pending rows; then what RSS pyarrow's pool (`release_unused`) and the C heap
+    (`release_heap`) give back, asked in turn. Linux only for RSS (0 elsewhere)."""
     pool = pa.default_memory_pool()
-    out = {"rss_anon_bytes": anon(), **duckdb_resources(con), "arrow_bytes": pa.total_allocated_bytes(),
-           "arrow_pool": pool.backend_name, "arrow_peak_bytes": pool.max_memory() or 0,
+    out = {**memory_breakdown(con, reads), "arrow_pool": pool.backend_name, "arrow_peak_bytes": pool.max_memory() or 0,
            "parts_pending_bytes": sum(t.nbytes for t in parts.pending) if parts is not None else 0}
     pool.release_unused()
-    after_arrow = anon()
+    after_arrow = _anon()
     release_heap()
     out["freed_arrow_bytes"] = out["rss_anon_bytes"] - after_arrow
-    out["freed_trim_bytes"] = after_arrow - anon()
+    out["freed_trim_bytes"] = after_arrow - _anon()
     return out
 
 
@@ -1575,7 +1601,7 @@ def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err, ck: 
         restated += _settled(con, out)
         del out, kept, others, cands, hdr, opens, rest, heavy_tot, ctx, plans
         release_heap()
-        resource_stage(f"{kind}: settle", chunk=j + 1, chunks=len(chunks), settled=start + done, **duckdb_resources(con), **reads.cache_stats())
+        resource_stage(f"{kind}: settle", chunk=j + 1, chunks=len(chunks), settled=start + done, **memory_breakdown(con, reads))
     io = Counter(reads.io())
     io.subtract(io0)
     rq = Counter(reads.requests())
@@ -2108,7 +2134,7 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
             meta.update(ck.load_files("written", out))
             continue
         km: dict = {}
-        resource_stage(f"{kind}: delta roots")
+        resource_stage(f"{kind}: delta roots", **memory_breakdown(con))
         if ck and ck.done("roots"):
             km.update(ck.load(con, "roots"))
         else:
@@ -2131,7 +2157,7 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
         t = step(f"drill/roots/{kind}", t1, roots=con.execute("SELECT count(*) FROM dr").fetchone()[0])
         con.execute(f"CREATE OR REPLACE TABLE meas AS {meas[kind]}")
         reads = TierReads(prior, kind, threads, cache_bytes)
-        resource_stage(f"{kind}: rollups")
+        resource_stage(f"{kind}: rollups", **memory_breakdown(con, reads))
         km[f"{kind}_day"] = day_rollups(con, prior, kind, D, R=R, K=K, floor=floor, reads=reads, log=log, ck=ck, step=step)
         km[f"{kind}_day"]["reads"] = reads.io()
         log(f"drill {kind}: requests {reads.requests()}")
@@ -2140,7 +2166,7 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
         for tr in prior:
             tr.release(kind)
         t = monotonic()
-        resource_stage(f"{kind}: write")
+        resource_stage(f"{kind}: write", **memory_breakdown(con))
         km.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
         write_state(con, out, kind)
         step(f"drill/write/{kind}", t, roots=km[f"{kind}_roots"]["rows"], rup=km[f"{kind}_rollups"]["rows"])

@@ -46,11 +46,13 @@ Open questions (to settle before building):
 - Size: how many pairs would be stored (all near pairs ever, or only those within some factor of R)? Bound it by keeping only pairs whose count is ≥ R / 4, re-probing the rest, and measure on cw.
 - Pairs a run removes rows from (closed versions don't reduce the "versions ever" count): confirm the anchors' count is monotone, as the rollups' `b` is.
 
-## C. The drill's newly-heavy step, memory-bounded (so cw's drill goes back to an n2-highmem-16)
+## C. The drill's long kind, memory-bounded (so cw's drill goes back to an n2-highmem-16)
 
-cw's 11-26T0003 drill was OOM-killed (exit 137, cgroup `oom_kill 1`) at 131 GB on its n2-highmem-16, in `drill long`'s newly-heavy step: `gov_reports` made 2,096 directories newly heavy, whose rollups read 125M prior roots. Stopgap: cw's drill runs on an n2-highmem-32 (`machines.drill`, cw `546518031`), which grows the machine with `gov_reports` rather than bounding the step.
+cw's 11-26T0003 drill was OOM-killed (exit 137, cgroup `oom_kill 1`) at 131 GB on its n2-highmem-16, in `drill long`'s newly-heavy step: `gov_reports` made 2,096 directories newly heavy, whose rollups read 125M prior roots. Stopgap: cw's drill runs on an n2-highmem-32 with 1500 GB of local SSD (`machines.drill` / `ssd_gbs.drill`, cw `546518031`, `f39042686`: an n2-highmem-32 takes 4, 8, 16 or 24 SSDs, and the default 750 GB failed the job at scheduling; profiles now refuse such a pair, cloud `98c210def`). That grows the machine with `gov_reports` instead of bounding the drill.
 
-What the step does already (`static_drill.newly_heavy_rollups`): chunks of consecutive `(q, dir)` of ≤ `NEWLY_HEAVY_CHUNK_ROWS` estimated rows; per chunk it reads the prior tiers' roots of the chunk's top ranges (`insert_prior_roots`, prefetched through `TierReads.hold`), combines them with today's rows, rolls up (`full_rollups`), appends to `rup`. So it isn't one global join like `pvc` or `measure_kind` were. **The growth is outside DuckDB:**
+What the step does already (`static_drill.newly_heavy_rollups`): chunks of consecutive `(q, dir)` of ≤ `NEWLY_HEAVY_CHUNK_ROWS` estimated rows; per chunk it reads the prior tiers' roots of the chunk's top ranges (`insert_prior_roots`, prefetched through `TierReads.hold`), combines them with today's rows, rolls up (`full_rollups`), appends to `rup`. So it isn't one global join like `pvc` or `measure_kind` were.
+
+On the highmem-16 (11-26T0003, first attempt), RSS rose ~1 GiB a chunk on top of DuckDB:
 
 | chunk | prior roots so far | DuckDB bytes | DuckDB spill | process RSS |
 |---|---|---|---|---|
@@ -59,18 +61,30 @@ What the step does already (`static_drill.newly_heavy_rollups`): chunks of conse
 | 22/29 | 108M | 54.7 GB | 38.2 GB | 118 GiB |
 | 27/29 (combine) | 125M | — | — | 123 GiB, then killed |
 
-DuckDB stayed under its 60 GB limit (`-M 60GB`) and spilled ~40 GB; RSS rose ~1 GiB a chunk on top of it, to ~68 GiB that DuckDB doesn't account for. Candidates, in order of likelihood:
+Measured per holder (`chunk_memory`, cloud `dc00facb9`) on the n2-highmem-32 catch-up of the same scan (`sn-drill-2026-11-26-0003-084428`, DuckDB `-M 120GB`; GiB; gap = anonymous RSS − DuckDB's buffer bytes):
 
-1. **pyarrow's pool holding freed buffers.** Each chunk's prior roots pass through Arrow (`_insert_root_batch`: `pa.concat_tables`, registered, inserted); the default pool (jemalloc/mimalloc) keeps what it freed. Check `pa.total_allocated_bytes()` vs RSS per chunk; `pa.default_memory_pool().release_unused()` after each chunk, or the system allocator for this process.
-2. **`Parts.pending`** (`checkpoint.Parts.add`): a chunk's rollup rows are kept until `every_s` elapses, so a fast run holds many chunks' rows. Flush by bytes as well as time.
-3. **`rup` itself** grows in DuckDB across chunks (counted in DuckDB's bytes, so not the gap, but it competes with each chunk's join for the 60 GB): write each chunk's rows out as a parquet part (`Parts` already can) and read them back at the end, instead of holding `rup` across the loop.
-4. **DuckDB's limit vs the machine.** `drill_duckdb_args` gives DuckDB 60 GB of 128; whatever Python holds is the rest. Once 1–3 are bounded, pin the split (e.g. DuckDB ½ of RAM, Python a fixed budget) and fail loudly past it rather than be OOM-killed.
+| chunk | anon RSS | DuckDB | spill | gap | arrow alloc / peak | `Parts` pending | freed: arrow pool | freed: `malloc_trim` |
+|---|---|---|---|---|---|---|---|---|
+| 1/29 | 150.2 | 94.0 | 16.0 | 56.2 | 0.0 / 4.0 | 0.00 | 2.83 | 0.01 |
+| 10/29 | 163.4 | 97.0 | 14.9 | 66.4 | 0.0 / 4.0 | 0.07 | 1.88 | 0.10 |
+| 20/29 | 163.4 | 100.4 | 13.6 | 63.1 | 0.0 / 4.0 | 0.00 | 0.05 | 0.50 |
+| 29/29 | 173.3 | 104.3 | 12.1 | 69.0 | 0.0 / 4.0 | 0.02 | 0.62 | 0.00 |
 
-Shape of the fix: instrument first (per chunk: RSS, DuckDB bytes and spill, `pa.total_allocated_bytes()`, `Parts` pending bytes), reproduce on a synthetic newly-heavy set big enough to show the climb (a test that asserts RSS flat across chunks, within a margin, at a small `NEWLY_HEAVY_CHUNK_ROWS`), then bound each holder that climbs. Same output at any chunking (the step's contract already; the existing tests check it). Done when cw's drill runs `gov_reports`-sized scans on an n2-highmem-16 again and `machines.drill` goes back out of cw's profile.
+The step finished: 2,096 directories, 137.7M prior roots in 1283 s, the drill's RSS peak 184 GiB of 256. What it says:
+
+1. **Little grows within the loop.** Over 29 chunks DuckDB gains 10 GiB (its spill falls 4: it moves data into memory near its limit), the gap 13 (~0.45 GiB a chunk).
+2. **The suspects this section first named are ruled out for the loop**: pyarrow's live allocations are ~0 after each chunk's `release_unused` (which gives back 1–3 GiB a chunk: kept), the checkpoint's pending rows ≤ 0.1 GiB, glibc's `malloc_trim` gives back ~0.
+3. **The gap is there before the loop**: 52 GiB at `long: newly-heavy start` (anon 154.3 vs DuckDB 102.3). It forms in `long: delta roots` (anon 15 → 113 GiB) and `long: rollups` before the loop (56 → 140), neither of which sampled DuckDB or the heap.
+4. **It follows the data, not the machine**: 56–70 GiB here, ~68 on the highmem-16. DuckDB gets half the machine (`drill_duckdb_args`); on an n2-highmem-16 that's 60 GB, and 60 GB + ~68 GiB doesn't fit 128 GB. That was the OOM, more than the per-chunk climb.
+5. **It lives across the long kind**: anon fell 173 → 133 GiB once the step's tables dropped (`newh_today`, `nhr`), and to 103 during `write`.
+
+Next: **find the stage that forms the gap**, then bound it. Each long-drill stage boundary (`delta roots`, `touched`, each `settle` chunk, `settled`, `newly-heavy sums`, `newly-heavy start`, each chunk, `write`) now logs `memory_breakdown` on the owning thread: DuckDB's buffer bytes, spill, limit and allocator (its own jemalloc, or glibc); pyarrow's bytes; glibc's in use (`mallinfo2` `uordblks` + `hblkhd`) and free (`fordblks`); CPython's allocated blocks (a count); the tier reads' caches; and `unattributed_bytes`, what none of those accounts for (anon − pyarrow − glibc − DuckDB's bytes when they're jemalloc's: jemalloc's retained pages, DuckDB's allocations outside its buffer manager, pymalloc's arenas). The 15 s monitor lines add the thread-safe part (pyarrow, glibc, blocks, and anon less those as `outside_glibc_arrow_bytes`), so the growth inside `delta roots` shows too. The caches are listed, not subtracted: decoded groups are pyarrow's bytes, raw bytes glibc's. Lowering DuckDB's limit at a boundary to see whether anon follows was left out: it would spill ~50 GB there, minutes on the critical path.
+
+Then, by holder: Python objects (blocks large through `delta roots` / `rollups`) → stream or drop them where they're built (a `tracemalloc` pass over one stage behind a flag, if the block count alone doesn't name them); DuckDB outside its buffer manager or jemalloc's retention → DuckDB's allocator settings (`allocator_flush_threshold`, `allocator_background_threads`) or a smaller `-M`; tables held across the kind (`newh_today`, `rup`) → write them out as parts. Interim, should the highmem-32 cost matter: an n2-highmem-16 with DuckDB at ~40 GB (40 + ~70 ≈ 110 of 128), trading spill for the box. Done when cw's drill runs `gov_reports`-sized scans on an n2-highmem-16 and `machines.drill` / `ssd_gbs.drill` leave cw's profile.
 
 ## Order
 
 1. Ship the two fixes (done), watch cw's next compaction and the next scans' `anchors` timings.
-2. C: bound the drill's newly-heavy step, then drop cw's `machines.drill` stopgap.
+2. C: find the long-drill stage that forms the ~60 GiB outside DuckDB, bound it, then drop cw's `machines.drill` stopgap.
 3. A, if the next fold still struggles, or as the backlog policy regardless (it's the escape valve).
 4. B, measured on cw against today's `anchors end` numbers (above).
