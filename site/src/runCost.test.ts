@@ -47,8 +47,8 @@ describe('runCost', () => {
       job({ component: 'static-names', stage: 'r2', job: 'sn-r2', estimated_compute_usd: null }),
       job({ component: 'static-names', stage: 'merge', upkeep: 'carry', job: 'sn-merge', estimated_compute_usd: 2.62 }),
     ])
-    const { stages, total, upkeep } = costStages(r)
-    expect(total).toBe(0.2 + (0.92 + 1.42))
+    const { stages, total, billed, upkeep } = costStages(r)
+    expect([total, billed]).toEqual([0.2 + (0.92 + 1.42), null])
     expect(stages.map(s => [s.stage, s.usd, s.vmHours, s.jobs.map(j => j.label)])).toEqual([
       ['head', 0.2, 2, ['head']],
       ['static names', 0.92 + 1.42, 3, ['anchors', 'drill', 'r2']],
@@ -66,6 +66,14 @@ describe('runCost', () => {
     const { stages, total, upkeep } = costStages(report(jobs))
     expect([stages.reduce((n, s) => n + s.jobs.length, 0) + (upkeep?.jobs.length ?? 0), stages.map(s => s.stage)]).toEqual([6, ['head', 'list', 'static names', 'other']])
     expect((total ?? 0) + (upkeep?.usd ?? 0)).toBeCloseTo(0.1979 + 0.5 + 0.9181 + 0.25 + 2.621, 10)
+  })
+
+  it('sums each stage’s billed lines where the export has them, leaving the rest out (null when none)', () => {
+    const { stages, billed, upkeep } = costStages(report([
+      job({ association: 'root', billed_usd: 0.05 }), job({ component: 'drill', stage: 'drill', billed_usd: 0.4 }),
+      job({ component: 'anchors', stage: 'anchors', billed_usd: null }), job({ component: 'static-names', stage: 'merge', billed_usd: 0.9 }),
+    ]))
+    expect([stages.map(s => [s.stage, s.billed]), billed, upkeep?.billed]).toEqual([[['head', 0.05], ['static names', 0.4]], 0.05 + 0.4, 0.9])
   })
 
   it('reads a store’s merge or compaction job from before the upkeep label as upkeep', () => {

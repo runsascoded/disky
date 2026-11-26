@@ -8,6 +8,7 @@ packed tasks do not double-count a machine, and retain failed/retried attempts.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -279,14 +280,55 @@ def build_report(profile: Profile, jobs: Sequence[Mapping], run_id: str, scan: s
     return report(profile, root, scan, selected, tasks, _now() if now is None else now)
 
 
+def billed_sql(table: str, days: int, deployment: str) -> str:
+    """The billing export's (`table`) net cost (cost + credits) per Batch job of `deployment` over the last `days` days,
+    of the jobs a scan run labelled (`scan_run`): `job_uid`, `net`, `last_day` (its latest usage day). The export is
+    ingestion-time partitioned (`_PARTITIONTIME` prunes it) and lags about a day."""
+    from .cost_labels import TABLE_RE, check_label
+
+    if not TABLE_RE.fullmatch(table):
+        raise ValueError(f"billing table {table!r}: expected project.dataset.table")
+    if days < 1:
+        raise ValueError(f"days: {days} < 1")
+    check_label("deployment", deployment)
+    since = f"TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {int(days)} DAY)"
+    return f"""SELECT
+  (SELECT value FROM UNNEST(labels) WHERE key = 'batch-job-id') AS job_uid,
+  SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) AS c), 0)) AS net,
+  MAX(DATE(usage_start_time)) AS last_day
+FROM `{table.replace(":", ".")}`
+WHERE _PARTITIONTIME >= TIMESTAMP_TRUNC({since}, DAY)
+  AND usage_start_time >= {since}
+  AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'batch-job-id')
+  AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'scan_run')
+  AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'deployment' AND value = '{deployment}')
+GROUP BY job_uid"""
+
+
+def billed_rows(page: dict) -> list[tuple[str, float, str]]:
+    """A BigQuery page's rows (`billed_sql`) as `(job_uid, net, last_day)`."""
+    return [(r["f"][0]["v"], float(r["f"][1]["v"]), r["f"][2]["v"]) for r in page.get("rows", [])]
+
+
+def with_billed(doc: dict, billed: Mapping[str, float]) -> dict:
+    """`doc` (a run's report) with what the billing export says each job cost (`billed_usd`, None: no line yet: the
+    export lags a day), and the run's billed totals beside the estimate: `billed_usd` (its own jobs), `billed_upkeep_usd`
+    (its carries and folds), `billed_jobs` (how many of its jobs have a line)."""
+    jobs = [{**j, "billed_usd": round(billed[j["uid"]], 4) if j["uid"] in billed else None} for j in doc["jobs"]]
+    own = [j["billed_usd"] for j in jobs if j["billed_usd"] is not None and not j.get("upkeep")]
+    upkeep = [j["billed_usd"] for j in jobs if j["billed_usd"] is not None and j.get("upkeep")]
+    return {**doc, "jobs": jobs, "billed_usd": round(sum(own), 4) if own else None,
+            "billed_upkeep_usd": round(sum(upkeep), 4) if upkeep else None,
+            "billed_jobs": sum(j["billed_usd"] is not None for j in jobs)}
+
+
 def report_key(scan: str, root_uid: str) -> str:
     """Where a run's saved report lives under a reports root: `<scan>/<root uid>.json`."""
     return f"{check_scan_id(scan)}/{root_uid}.json"
 
 
-def unsettled(store, days: int, now: float) -> list[tuple[str, str]]:
-    """The saved reports (`(scan, root uid)`) of scans within `days` of `now` that still listed a job running (a run's
-    head, a detached carry or fold): reread once those end, so the saved one is the whole run's."""
+def saved(store, days: int, now: float) -> list[tuple[str, str]]:
+    """Every saved report (`(scan, root uid)`) of the scans within `days` of `now`."""
     from .scan_id import scan_time
 
     out = []
@@ -298,9 +340,15 @@ def unsettled(store, days: int, now: float) -> list[tuple[str, str]]:
             when = scan_time(scan).timestamp()
         except ValueError:
             continue
-        if now - when <= days * 86400 and store.read_json(key).get("ongoing_jobs"):
+        if now - when <= days * 86400:
             out.append((scan, name.removesuffix(".json")))
     return sorted(out)
+
+
+def unsettled(store, days: int, now: float) -> list[tuple[str, str]]:
+    """The saved reports (`saved`) that still listed a job running (a run's head, a detached carry or fold): reread once
+    those end, so the saved one is the whole run's."""
+    return [k for k in saved(store, days, now) if store.read_json(report_key(*k)).get("ongoing_jobs")]
 
 
 @command("cost")
@@ -309,6 +357,8 @@ def unsettled(store, days: int, now: float) -> list[tuple[str, str]]:
 @option("-l", "--legacy", is_flag=True, help="Infer pre-label children by exact scan ID and dispatch window")
 @option("-o", "--out", type=Path, default=None, help="Save the report instead of printing it")
 @option("-O", "--save", "roots", multiple=True, help="Save the JSON report as <ROOT>/<scan>/<root uid>.json (a dir or URL; repeatable), and reread the saved reports of the last `-r` days' scans that still listed a job running")
+@option("-B", "--billing-table", help="With -O: the billing export (`project.dataset.table`): each saved report of the last `-r` days gets what each of its jobs billed (the export lags about a day)")
+@option("-d", "--deployment", help="With -B: the jobs' `deployment` label (default: $DISKY_LABELS')")
 @option("-r", "--refresh-days", type=int, default=7, show_default=True, help="With -O: how far back unsettled saved reports are reread")
 @option("-s", "--scan", required=True, help="Exact scan ID, not a day prefix")
 @argument("run_id")
@@ -318,6 +368,8 @@ def cost_cmd(
     legacy: bool,
     out: Path | None,
     roots: tuple[str, ...],
+    billing_table: str | None,
+    deployment: str | None,
     refresh_days: int,
     scan: str,
     run_id: str,
@@ -341,11 +393,22 @@ def cost_cmd(
         for s_, uid in unsettled(stores[0], refresh_days, now):
             if (s_, uid) not in docs and any(j["uid"] == uid for j in jobs):
                 docs[(s_, uid)] = build_report(profile, jobs, uid, s_, legacy=legacy, now=now)
+        if billing_table:
+            from .cost_labels import deployment_labels, query_rows
+
+            dep = deployment or deployment_labels(dict(os.environ))["deployment"]
+            billed = {uid: net for uid, net, _ in query_rows(billed_sql(billing_table, refresh_days + 2, dep), profile.project,
+                                                              parse=billed_rows)}
+            # every saved report of the window, settled or not: the export's lines for a job arrive a day after it ran
+            for s_, uid in saved(stores[0], refresh_days, now):
+                docs.setdefault((s_, uid), stores[0].read_json(report_key(s_, uid)))
+            docs = {k: with_billed(d, billed) for k, d in docs.items()}
         for (s_, uid), d in sorted(docs.items()):
             data = (json.dumps(d, indent=2, sort_keys=True) + "\n").encode()
             for st in stores:
                 st.write_bytes(report_key(s_, uid), data)
-            print(f"cost: {s_} {uid}: ${d['estimated_compute_usd']:.2f} (+ upkeep ${sum(d['upkeep_usd'].values()):.2f})"
+            billed = f", billed ${d['billed_usd']:.2f}" if d.get("billed_usd") is not None else ""
+            print(f"cost: {s_} {uid}: ${d['estimated_compute_usd']:.2f} (+ upkeep ${sum(d.get('upkeep_usd', {}).values()):.2f}){billed}"
                   + (f", still running: {', '.join(d['ongoing_jobs'])}" if d["ongoing_jobs"] else ""), file=sys.stderr)
         return
     text = json.dumps(doc, indent=2, sort_keys=True) + "\n" if as_json else render_report(doc)

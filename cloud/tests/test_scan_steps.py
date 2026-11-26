@@ -2102,9 +2102,9 @@ def test_run_cost_saves_the_runs_report_beside_the_cost_snapshots(tmp_path, env)
     the data store's `snapshots/cost/runs` and the R2 archive's; skipped without a run id, nothing on REPROC."""
     opts = {"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}}
     runs = []
-    for e in ({**env, "SCAN_RUN_ID": "cw-usage-1", "R2_ARCHIVE": "r2://arch"}, {**env, "DT_RUN_ID": "r2"}, env,
-              {**env, "SCAN_RUN_ID": "x", "REPROC": "1"}):
-        c = ctx(tmp_path, e, steps=["run-cost"], options=opts)
+    for e, o in (({**env, "SCAN_RUN_ID": "cw-usage-1", "R2_ARCHIVE": "r2://arch"}, {}), ({**env, "DT_RUN_ID": "r2"}, {}), (env, {}),
+                 ({**env, "SCAN_RUN_ID": "x", "REPROC": "1"}, {}), ({**env, "SCAN_RUN_ID": "b"}, {"run-cost": {"billing": "p.d.t", "days": 3}})):
+        c = ctx(tmp_path, e, steps=["run-cost"], options={**opts, **o})
         c.run = Notes()
         S.run_cost(c, None)
         runs.append((c.sh_impl.calls, c.run.calls))
@@ -2114,4 +2114,5 @@ def test_run_cost_saves_the_runs_report_beside_the_cost_snapshots(tmp_path, env)
         (["dt-cloud scan-run cost -s 2026-10-16T1200 -r 7 -O <tmp>/data/snapshots/cost/runs r2"], done),
         ([], []),
         ([], []),
+        (["dt-cloud scan-run cost -s 2026-10-16T1200 -r 3 -O <tmp>/data/snapshots/cost/runs -B p.d.t b"], done),
     ]

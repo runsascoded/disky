@@ -210,3 +210,56 @@ def test_cli_saves_the_run_and_rereads_unsettled_reports(tmp_path, monkeypatch):
          "2026-10-13T0700/earlier-uid.json": (0.3, []), "2026-10-13T1300/root-uid.json": (0.3, [])},
         {"2026-10-13T0700/earlier-uid.json": (0.3, []), "2026-10-13T1300/root-uid.json": (0.3, [])},
     )
+
+
+def test_billed_sql_names_the_deployments_labelled_jobs():
+    from dt_cloud.scan_cost import billed_sql
+
+    sql = billed_sql("p.billing_export.t", 9, "cw")
+    assert [ln.strip() for ln in sql.splitlines() if "EXISTS" in ln or "FROM" in ln.lstrip()[:4]] == [
+        "FROM `p.billing_export.t`",
+        "AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'batch-job-id')",
+        "AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'scan_run')",
+        "AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'deployment' AND value = 'cw')",
+    ]
+    with pytest.raises(ValueError) as e:
+        billed_sql("p.d.t; DROP", 9, "cw")
+    assert str(e.value) == "billing table 'p.d.t; DROP': expected project.dataset.table"
+
+
+def test_with_billed_puts_each_jobs_line_beside_its_estimate_and_upkeep_apart():
+    from dt_cloud.scan_cost import with_billed
+
+    doc = {"jobs": [{"uid": "root", "upkeep": None}, {"uid": "drill", "upkeep": None}, {"uid": "fold", "upkeep": "fold"},
+                    {"uid": "late", "upkeep": None}], "estimated_compute_usd": 1.0}
+    got = with_billed(doc, {"root": 0.11, "drill": 0.4, "fold": 2.0})
+    assert ([j["billed_usd"] for j in got["jobs"]], got["billed_usd"], got["billed_upkeep_usd"], got["billed_jobs"]) == (
+        [0.11, 0.4, 2.0, None], 0.51, 2.0, 3)
+    assert with_billed({"jobs": [{"uid": "x"}]}, {})["billed_usd"] is None
+
+
+def test_cli_saves_billed_lines_into_every_saved_report_of_the_window(tmp_path, monkeypatch):
+    """`-B`: one billing-export query, and each saved report of the last `-r` days (settled ones too: the export lags a
+    day) rewritten with what its jobs billed."""
+    from dt_cloud import cost_labels, scan_cost
+
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"project": "p", "regions": ["us-east1"], "prices": {"n2-highmem-16": 1}, "spot_factor": .3}))
+    monkeypatch.setattr(gcp, "batch_jobs", lambda project, region: [job()])
+    monkeypatch.setattr(gcp, "batch_tasks", lambda j: [hour_task()])
+    monkeypatch.setattr(scan_cost, "_now", lambda: NOW)
+    asked = []
+
+    def query(sql, project, parse=None):
+        asked.append(project)
+        return [("root-uid", 0.27, "2026-10-13"), ("old-uid", 1.5, "2026-10-12")]
+    monkeypatch.setattr(cost_labels, "query_rows", query)
+    a = tmp_path / "a"
+    (a / "2026-10-12T1300").mkdir(parents=True)
+    (a / "2026-10-12T1300/old-uid.json").write_text(json.dumps({"ongoing_jobs": [], "estimated_compute_usd": 1.2,
+                                                                 "jobs": [{"uid": "old-uid", "upkeep": None}]}))
+    result = CliRunner().invoke(main, ["scan-run", "cost", "-c", str(profile), "-s", "2026-10-13T1300", "-O", str(a),
+                                       "-B", "p.billing_export.t", "-d", "cw", "root-uid"])
+    assert result.exit_code == 0, result.output
+    got = {p.relative_to(a).as_posix(): (json.loads(p.read_text())["billed_usd"], json.loads(p.read_text())["billed_jobs"]) for p in sorted(a.rglob("*.json"))}
+    assert (asked, got) == (["p"], {"2026-10-12T1300/old-uid.json": (1.5, 1), "2026-10-13T1300/root-uid.json": (0.27, 1)})

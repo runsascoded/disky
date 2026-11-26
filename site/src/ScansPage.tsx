@@ -793,11 +793,12 @@ const vmH = (h: number) => (h < 10 ? h.toFixed(2) : Math.round(h).toLocaleString
 
 /** A run's compute by stage → job (specs/scan-cost-by-stage.md), its store upkeep apart: an estimate at the profile's rates. */
 function RunCost({ report, project }: { report: RunCostReport; project: string | null }) {
-  const { stages, total, upkeep } = costStages(report)
+  const { stages, total, billed, upkeep } = costStages(report)
+  const anyBilled = report.billed_jobs != null
   const rows = (s: CostStage, apart = false) => s.jobs.length === 1 && s.jobs[0].label === s.stage ? [job(s.jobs[0].job, <b>{s.stage}</b>, 'sr-cost-stage')] : [
     <tr key={s.stage} className="sr-cost-stage">
       <td colSpan={2}><b>{s.stage}</b>{apart && <span className="dim"> (not in the run’s total)</span>}</td>
-      <td className="num nb">{vmH(s.vmHours)}</td><td className="num nb">{usd(s.usd)}</td><td />
+      <td className="num nb">{vmH(s.vmHours)}</td><td className="num nb">{usd(s.usd)}</td>{anyBilled && <td className="num nb">{usd(s.billed)}</td>}<td />
     </tr>,
     ...s.jobs.map(({ label, job: j }) => job(j, label)),
   ]
@@ -811,6 +812,7 @@ function RunCost({ report, project }: { report: RunCostReport; project: string |
           <td className="num nb">{job.estimated_compute_usd == null
             ? <Tooltip content={job.warnings.join('; ') || 'not priced'}><span className="dim">?</span></Tooltip>
             : usd(job.estimated_compute_usd)}</td>
+          {anyBilled && <td className="num nb">{job.billed_usd == null ? <span className="dim">—</span> : usd(job.billed_usd)}</td>}
           <td className="nb">{href ? <a href={href} target="_blank" rel="noreferrer"><code>{job.job}</code></a> : <code>{job.job}</code>}</td>
         </tr>
       )
@@ -823,10 +825,13 @@ function RunCost({ report, project }: { report: RunCostReport; project: string |
       {' '}(spot at its multiplier), as of {fmtRunTime(Math.floor(Date.parse(report.as_of) / 1000))}.
       {report.ongoing_jobs.length > 0 && <> Still running then: {report.ongoing_jobs.join(', ')}; the next run’s report rereads it.</>}
       {report.legacy_inference && <> Jobs before run labels were matched by scan and time.</>}
+      {anyBilled && (billed != null
+        ? <> Billed so far (the billing export, about a day late): {usd(billed)}{upkeep?.billed != null && <> + {usd(upkeep.billed)} upkeep</>}.</>
+        : <> Billed: no lines in the billing export yet (they arrive about a day after a job runs).</>)}
     </p>
     <div className="runs-wrap">
       <StickyTable className="runs sr-cost">
-        <thead><tr><th>stage · job</th><th>machine</th><th className="num">VM-h</th><th className="num">estimate</th><th>Batch job</th></tr></thead>
+        <thead><tr><th>stage · job</th><th>machine</th><th className="num">VM-h</th><th className="num">estimate</th>{anyBilled && <th className="num">billed</th>}<th>Batch job</th></tr></thead>
         <tbody>{[...stages.flatMap(s => rows(s)), ...(upkeep ? rows(upkeep, true) : [])]}</tbody>
       </StickyTable>
     </div>

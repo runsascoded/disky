@@ -202,8 +202,10 @@ def audit_lines(rows: list[tuple[str, str, float]]) -> list[str]:
     return [f"{job}\t{day}\t${net:,.2f}" for job, day, net in rows] + [f"total\t{len(rows)} jobs\t${sum(n for *_, n in rows):,.2f}"]
 
 
-def query_rows(sql: str, project: str, timeout_s: int = 300) -> list[tuple[str, str, float]]:
-    """Run `sql` (standard SQL) as a BigQuery job billed to `project` over REST (ADC), every page's rows (`audit_rows`)."""
+def query_rows(sql: str, project: str, timeout_s: int = 300, parse=None) -> list:
+    """Run `sql` (standard SQL) as a BigQuery job billed to `project` over REST (ADC), every page's rows (`parse`,
+    default `audit_rows`)."""
+    parse = parse or audit_rows
     from time import monotonic
 
     from .gcp import session
@@ -216,7 +218,7 @@ def query_rows(sql: str, project: str, timeout_s: int = 300) -> list[tuple[str, 
     params = {"location": ref.get("location"), "timeoutMs": 60_000}
     while True:
         if page.get("jobComplete"):
-            rows.extend(audit_rows(page))
+            rows.extend(parse(page))
             if not (token := page.get("pageToken")):
                 return rows
             params["pageToken"] = token

@@ -25,6 +25,9 @@ export interface RunCostJob {
   tasks: number
   observed_vm_seconds: number
   estimated_compute_usd: number | null
+  /** What the billing export says it cost (cost + credits; spot prices, disks): null until its lines arrive (about a day
+   *  late), absent in a report written without the export (`run-cost` with no `billing`). */
+  billed_usd?: number | null
   warnings: string[]
 }
 
@@ -36,6 +39,10 @@ export interface RunCostReport {
   estimated_compute_usd: number
   components: Record<string, number>
   upkeep_usd?: Record<string, number>
+  /** The billing export's totals (`scan_cost.with_billed`): its own jobs', its upkeep's, and how many jobs have a line. */
+  billed_usd?: number | null
+  billed_upkeep_usd?: number | null
+  billed_jobs?: number
   ongoing_jobs: string[]
   unpriced_jobs: string[]
   legacy_inference: boolean
@@ -47,6 +54,8 @@ export interface RunCostReport {
 export interface CostStage {
   stage: string
   usd: number | null
+  /** Its jobs' billed lines summed (null: none has one yet). */
+  billed: number | null
   vmHours: number
   jobs: { label: string; job: RunCostJob }[]
 }
@@ -90,7 +99,7 @@ export function upkeepOf(j: RunCostJob): string | null {
 
 /** The run's own jobs by stage (in `STAGES` order, empty stages left out), their total (a report's own `estimated_compute_usd`
  *  counts a carry from before the upkeep label), and its store upkeep apart. */
-export function costStages(r: RunCostReport): { stages: CostStage[]; total: number | null; upkeep: CostStage | null } {
+export function costStages(r: RunCostReport): { stages: CostStage[]; total: number | null; billed: number | null; upkeep: CostStage | null } {
   const by = new Map<string, CostStage['jobs']>()
   const upkeep: CostStage['jobs'] = []
   for (const job of r.jobs) {
@@ -105,10 +114,14 @@ export function costStages(r: RunCostReport): { stages: CostStage[]; total: numb
   const stage = (name: string, jobs: CostStage['jobs']): CostStage => ({
     stage: name, jobs: [...jobs].sort((a, b) => a.label.localeCompare(b.label) || a.job.job.localeCompare(b.job.job)),
     usd: sumOrNull(jobs.map(j => j.job.estimated_compute_usd)),
+    billed: sumOrNull(jobs.map(j => j.job.billed_usd ?? null)),
     vmHours: jobs.reduce((a, j) => a + j.job.observed_vm_seconds / 3600, 0),
   })
   const stages = STAGES.filter(s => by.has(s)).map(s => stage(s, by.get(s)!))
-  return { stages, total: sumOrNull(stages.map(s => s.usd)), upkeep: upkeep.length ? stage('store upkeep', upkeep) : null }
+  return {
+    stages, total: sumOrNull(stages.map(s => s.usd)), billed: sumOrNull(stages.map(s => s.billed)),
+    upkeep: upkeep.length ? stage('store upkeep', upkeep) : null,
+  }
 }
 
 /** A report's key under the served store, or null for a scan or run id that isn't one (never a path outside it). */
