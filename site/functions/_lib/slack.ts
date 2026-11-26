@@ -10,11 +10,18 @@ import { Memo, reqOf } from './shared.js'
 export interface SlackEnv {
   SLACK_BOT_TOKEN?: string
   SLACK_SIGNING_SECRET?: string
-  /** Channel id staged-plan threads post to (e.g. #cw-s3-admin). Unset = no Slack. */
+  /** The admin channel (e.g. #cw-s3-admin): service activity, and staged-plan threads unless `SLACK_STAGED_CHANNEL` names
+   *  another. Unset = no Slack. */
   SLACK_ADMIN_CHANNEL?: string
+  /** Where staged-plan threads go, when not the admin channel (cw: #cw-usage, where the deployment's users read: the
+   *  admin channel is mostly sessions' activity). A plan whose thread is in the other channel continues in a new one here. */
+  SLACK_STAGED_CHANNEL?: string
 }
 
 export const slackReady = (env: SlackEnv): boolean => !!(env.SLACK_BOT_TOKEN && env.SLACK_ADMIN_CHANNEL)
+
+/** The channel staged-plan threads post to: `SLACK_STAGED_CHANNEL`, else the admin channel. */
+export const stagedChannel = (env: SlackEnv): string => env.SLACK_STAGED_CHANNEL || env.SLACK_ADMIN_CHANNEL!
 
 export interface SlackResult { ok: boolean; error?: string; ts?: string; channel?: string; [k: string]: unknown }
 

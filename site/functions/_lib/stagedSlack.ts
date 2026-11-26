@@ -1,7 +1,7 @@
 /**
  * The staged-deletion review loop in Slack (specs/done/staged-slack.md): one thread
- * per staged plan in the deployment's admin channel (`SLACK_ADMIN_CHANNEL`,
- * the only place a channel comes from). The parent message is re-rendered on
+ * per staged plan in the deployment's staged channel (`stagedChannel`: `SLACK_STAGED_CHANNEL`, else
+ * `SLACK_ADMIN_CHANNEL`; the only place a channel comes from). The parent message is re-rendered on
  * every event (counts, size, the latest dry-run, whether it still matches the
  * plan, the action buttons); each event is a reply. A stager's stages within
  * `COALESCE_S` of their reply's last update edit that one reply in place. A ✅
@@ -15,7 +15,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import type { RunOutcome } from '../../src/runs.js'
 import { batchDeletions, type FinishedRun, openPlanId, planDigest, planHistory, planItemLines, planRuns, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
 import { withoutDeleted } from '../../src/stagedScan.js'
-import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
+import { slackApi, slackPeople, type SlackPerson, slackReady, stagedChannel, type SlackEnv, type SlackResult } from './slack.js'
 import { badgedAvatarUrl, badgeOf, type Badge } from './badgedAvatar.js'
 import type { Env } from './auth.js'
 import { runHasNoUndo, runPromisedNothing, undoneText, type UndoUnavailable, undoUnavailableText } from '../../src/softDelete.js'
@@ -842,7 +842,7 @@ const SETTLE_ROUNDS = 3
  * none) and, with `event`, reply in its thread. Before replying, a thread
  * whose parent carries a ✅ (or a stage into an emptied queue) moves the plan
  * to a new thread: a new parent, a pointer in the old thread, and the old
- * parent marked done. A thread in another channel than `SLACK_ADMIN_CHANNEL`
+ * parent marked done. A thread in another channel than `stagedChannel`
  * is left alone and a new one starts there. Best-effort; never throws.
  * Returns the event reply's id (`<channel>/<ts>`) when it posted, else null. */
 export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number; quiet?: boolean } = {}): Promise<string | null> {
@@ -887,7 +887,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected, undoUnavailable: runUndo?.unavailable }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], runEv.phase, runEv.run.mode) } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
       : undefined
-    const channel = env.SLACK_ADMIN_CHANNEL!
+    const channel = stagedChannel(env)
     let ts = v.slack_ts
     if (ts && v.slack_channel !== channel) {
       const d = await detach(db, planId, ts)
@@ -988,7 +988,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
 export async function updateReplies(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, { replyIds, legacy = {} }: { replyIds?: number[]; legacy?: Record<number, string> } = {}): Promise<{ replies: Record<string, string>; coalesced: Record<string, string> }> {
   const out = { replies: {} as Record<string, string>, coalesced: {} as Record<string, string> }
   if (!slackReady(env)) return out
-  const channel = env.SLACK_ADMIN_CHANNEL!
+  const channel = stagedChannel(env)
   const rows = replyIds
     ? (await db.prepare(`SELECT id, channel, slack_ts FROM stage_replies WHERE plan_id = ? AND id IN (${replyIds.map(() => '?').join(',') || 'NULL'})`).bind(planId, ...replyIds).all<{ id: number; channel: string; slack_ts: string | null }>()).results
     : (await db.prepare('SELECT id, channel, slack_ts FROM stage_replies WHERE plan_id = ? AND slack_ts IS NOT NULL').bind(planId).all<{ id: number; channel: string; slack_ts: string | null }>()).results
@@ -1028,7 +1028,7 @@ export async function refreshThread(env: NotifyEnv, db: D1Database, planId: numb
   const out = { parent: false, replies: {} as Record<string, string>, coalesced: {} as Record<string, string> }
   if (!slackReady(env)) return out
   const plan = await db.prepare('SELECT slack_ts, slack_channel FROM plans WHERE id = ?').bind(planId).first<{ slack_ts: string | null; slack_channel: string | null }>()
-  if (!plan?.slack_ts || plan.slack_channel !== env.SLACK_ADMIN_CHANNEL) return out
+  if (!plan?.slack_ts || plan.slack_channel !== stagedChannel(env)) return out
   await notifyPlan(env, db, planId, siteUrl)
   out.parent = true
   return { ...out, ...await updateReplies(env, db, planId, siteUrl, { legacy: replies }) }
@@ -1042,7 +1042,7 @@ export async function refreshStagedCard(env: NotifyEnv, db: D1Database, siteUrl:
   const id = await openPlanId(db)
   if (id == null) return false
   const plan = await db.prepare('SELECT slack_ts, slack_channel FROM plans WHERE id = ?').bind(id).first<{ slack_ts: string | null; slack_channel: string | null }>()
-  if (!plan?.slack_ts || plan.slack_channel !== env.SLACK_ADMIN_CHANNEL) return false
+  if (!plan?.slack_ts || plan.slack_channel !== stagedChannel(env)) return false
   await notifyPlan(env, db, id, siteUrl, undefined, { quiet: true })
   return true
 }

@@ -308,6 +308,14 @@ describe('D1', () => {
       expect(await refreshStagedCard(env, db, SITE)).toBe(false)
       expect(calls).toEqual([])
     })
+    it('`SLACK_STAGED_CHANNEL` moves the threads: one still in the admin channel is left there, one in the staged channel edited', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      const moved = { ...env, SLACK_STAGED_CHANNEL: 'CUSAGE' }
+      expect([await refreshStagedCard(moved, db, SITE), calls.length]).toEqual([false, 0])
+      raw.exec("UPDATE plans SET slack_channel = 'CUSAGE'")
+      expect(await refreshStagedCard(moved, db, SITE)).toBe(true)
+    })
     it('no open plan: nothing', async () => {
       const calls = fakeSlack()
       const { db, raw } = await planDb()
