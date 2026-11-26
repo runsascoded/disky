@@ -120,7 +120,7 @@ def test_batch_runner_polls_at_most_every_30s(monkeypatch):
 
     sleeps = []
     states = iter(["QUEUED", "RUNNING", "RUNNING", "RUNNING", "RUNNING", "SUCCEEDED"])
-    monkeypatch.setattr(batch, "submit_job", lambda spec, name, region: None)
+    monkeypatch.setattr(batch, "submit_job", lambda spec, name, region, project, **kw: None)
     monkeypatch.setattr(gcp, "batch_job", lambda name, project, region: {"status": {"state": next(states)}})
     monkeypatch.setattr(ar.time, "sleep", sleeps.append)
     ar.BatchRunner(ar.Profile(region="r", project="p"), lambda m: None)("j", {})

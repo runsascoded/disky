@@ -677,7 +677,7 @@ def test_batch_runner_stops_watching_after_its_wait(monkeypatch):
     from dt_cloud import batch, gcp
 
     submitted, polls = [], []
-    monkeypatch.setattr(batch, "submit_job", lambda spec, name, region: submitted.append(name))
+    monkeypatch.setattr(batch, "submit_job", lambda spec, name, region, project, **kw: submitted.append(name))
     states = iter(["RUNNING", "RUNNING", "SUCCEEDED"])
     monkeypatch.setattr(gcp, "batch_job", lambda name, project, region: polls.append(name) or {"status": {"state": next(states)}})
     run = sd.BatchRunner(CFG, lambda m: None, delay=0, max_delay=0)

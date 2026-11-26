@@ -355,6 +355,13 @@ def live_labelled(jobs: Sequence[Mapping], labels: Mapping[str, str]) -> list[st
             and all(j.get("labels", {}).get(k) == v for k, v in labels.items())]
 
 
+def cancel_job(name: str, *, region: str | None = None, project: str | None = None) -> None:
+    """Delete (= cancel) the Batch job `name` in `region` (default `$BATCH_REGION`) / `project` (default `gcp_project()`)."""
+    region, project = batch_region(region), project or gcp_project()
+    r = session().delete(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{name}")
+    r.raise_for_status()
+
+
 def cancel_labelled(labels: Mapping[str, str], *, region: str | None = None, dry_run: bool = False, log=None) -> list[str]:
     """Delete (= cancel) every live Batch job in ``region`` (default ``$BATCH_REGION``) carrying all of ``labels``;
     returns their names. A driver killed mid-submit leaves jobs it never saw submitted: a run's own label finds them (a
@@ -367,6 +374,5 @@ def cancel_labelled(labels: Mapping[str, str], *, region: str | None = None, dry
         if log:
             log(f"{'would cancel' if dry_run else 'cancelling'} {n}")
         if not dry_run:
-            r = session().delete(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{n}")
-            r.raise_for_status()
+            cancel_job(n, region=region, project=project)
     return names

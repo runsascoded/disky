@@ -1,0 +1,15 @@
+# The VM pilot's scan budget (specs/vm-pilot.md "The box"): every job the local job backend runs
+# (`DISKY_JOB_BACKEND=local`: containers under `--cgroup-parent=scan.slice`, supervisors via `systemd-run --slice=scan.slice`).
+# Install: copy to /etc/systemd/system/, `systemctl daemon-reload`.
+# Values are placeholders until the box is sized (the spec's "Slices" table): MemoryMax = the scan budget.
+[Unit]
+Description=disky VM pilot: scans (local job backend)
+Before=slices.target
+
+[Slice]
+# A scan that needs more spills to disk; it never grows the slice. No swap: past the budget is an OOM kill in the
+# slice, never a slow box.
+MemoryMax=8G
+MemorySwapMax=0
+CPUWeight=100
+IOWeight=100

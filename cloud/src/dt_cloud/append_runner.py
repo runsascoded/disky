@@ -13,7 +13,7 @@ listed by immutable manifests:
   the `compact` job when it's submitted, adopted and renewed by the job until it ends, whoever submitted it; a `run`
   meanwhile exits `BUSY`, and once the successor is written it follows there.
 - **Stages** (`Runner`): each skipped when its output exists, so a rerun resumes at the first missing one; Batch jobs
-  submitted over the API and polled (`BatchRunner`, at most every 30 s), several at once where they're independent
+  submitted through the job backend and polled (`BatchRunner`, at most every 30 s), several at once where they're independent
   (`Runner.concurrently`), labelled for cost attribution (`job_spec`, `cost_labels`).
 - **Publish** adds only the scan's own level-0 run: `manifests/<id>.json`, written once, last, after every file of every
   run it lists exists.
@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from click import ParamType
 
@@ -63,6 +63,9 @@ from .maint_runs import Recorder
 from .owner_carry import OwnerCarry
 from .scan_id import SCAN_ID
 from .static_profile import COMPACT_LEVEL, Profile, parse_compact_level
+
+if TYPE_CHECKING:
+    from .job_backend import JobBackend
 
 
 class Level(ParamType):
@@ -166,7 +169,7 @@ class LeaseLost(RuntimeError):
 
 
 class StillRunning(Exception):
-    """A Batch job outlived the wait given for it (it keeps running; nothing is cancelled)."""
+    """A job outlived the wait given for it (it keeps running; nothing is cancelled)."""
 
 
 class Superseded(Exception):
@@ -1388,28 +1391,29 @@ def transient(e: BaseException) -> bool:
 
 
 class BatchRunner:
-    """Submit a Batch job and wait for it (REST over ADC, `batch.submit_job` / `gcp.batch_job`); a transient poll error is
-    retried (`POLL_RETRIES`)."""
+    """Submit a job and wait for it, through the deployment's job backend (`job_backend.resolve`: GCP Batch unless
+    `$DISKY_JOB_BACKEND` names another; `backend` overrides); a transient poll error is retried (`POLL_RETRIES`)."""
 
-    def __init__(self, p: Profile, log: Callable[[str], None], *, delay: float = 10, max_delay: float = 30):
+    def __init__(self, p: Profile, log: Callable[[str], None], *, delay: float = 10, max_delay: float = 30,
+                 backend: JobBackend | None = None):
         """Polls every `delay` s, doubling up to `max_delay`: each stage's end is noticed up to one poll late, so the cap
         stays low (at 120 s, gcs 10-10's static chain lost minutes between stages; the interval store's jobs run a minute
         or a few)."""
-        self.p, self.log, self.delay, self.max_delay = p, log, delay, max_delay
+        self.p, self.log, self.delay, self.max_delay, self.backend = p, log, delay, max_delay, backend
 
     def __call__(self, name: str, spec: dict, wait: float | None = None) -> None:
         """Submit, then poll until the job ends; `wait`: stop polling after that many seconds (`StillRunning`; the job runs on)."""
-        from .batch import submit_job
-        from .gcp import batch_job
+        from .job_backend import resolve
 
-        submit_job(spec, name, region=self.p.region)
+        jobs = self.backend or resolve(region=self.p.region, project=self.p.project)
+        jobs.submit(spec, name)
         self.log(f"submitted {name}")
         delay, t0, fails = self.delay, monotonic(), 0
         while True:
             if wait is not None and monotonic() - t0 >= wait:
-                raise StillRunning(f"Batch job {name}: still running after {wait:.0f}s")
+                raise StillRunning(f"{jobs.what} {name}: still running after {wait:.0f}s")
             try:
-                st = batch_job(name, project=self.p.project, region=self.p.region).get("status", {})
+                st = jobs.status(name)
             except Exception as e:
                 if not transient(e) or fails >= POLL_RETRIES:
                     raise
@@ -1419,13 +1423,11 @@ class BatchRunner:
                 time.sleep(back)
                 continue
             fails = 0
-            state = st.get("state", "?")
-            counts = " ".join(f"{k}={v}" for g in (st.get("taskGroups") or {}).values() for k, v in sorted(g.get("counts", {}).items()))
-            self.log(f"{name} {state} {counts}")
-            if state == "SUCCEEDED":
+            self.log(f"{name} {st.state} {st.detail}")
+            if st.state == "SUCCEEDED":
                 return
-            if state in ("FAILED", "DELETION_IN_PROGRESS", "CANCELLED"):
-                raise RuntimeError(f"Batch job {name}: {state}")
+            if st.state in ("FAILED", "DELETION_IN_PROGRESS", "CANCELLED"):
+                raise RuntimeError(f"{jobs.what} {name}: {st.state}")
             time.sleep(delay if wait is None else max(0.0, min(delay, wait - (monotonic() - t0))))
             delay = min(delay * 2, self.max_delay)
 
