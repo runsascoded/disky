@@ -63,6 +63,11 @@ def sweep_bucket() -> str:
 # S3 `delete_objects` accepts up to 1000 keys per call.
 DELETE_BATCH = 1000
 
+#: Endpoint host suffixes of stores whose `DeleteObjects` ignores the per-item `ETag` and deletes anyway, with no error:
+#: R2 (the owned canary, 2026-11-26; specs/delete-preconditions.md §1). `execute_plan` deletes only in that form, so a
+#: real run refuses these stores.
+BATCH_ETAG_IGNORED = ('.r2.cloudflarestorage.com',)
+
 # A plan prefix, once normalized to a relative key prefix: non-empty, no scheme,
 # no leading slash, trailing slash, no `.`/`..` segments or backslashes.
 PREFIX_RE = re.compile(r"^(?!/)(?![.]{1,2}/)[^\\]+/$")
@@ -350,6 +355,14 @@ def _run_retention_days(client: "S3Client", bucket: str, for_real: bool, min_day
     return days
 
 
+def _endpoint_host(client: "S3Client") -> str:
+    """The host `client` sends to (boto3's `meta.endpoint_url`); empty for a test double, which has no `meta`."""
+    from urllib.parse import urlparse
+
+    meta = getattr(client, "meta", None)
+    return (urlparse(meta.endpoint_url).hostname or "") if meta else ""
+
+
 def execute_plan(
     run_dir: str,
     *,
@@ -395,6 +408,9 @@ def execute_plan(
     roots = listing_roots(plan_summary)
 
     client = client or s3_client()
+    if for_real and (host := _endpoint_host(client)).endswith(BATCH_ETAG_IGNORED):
+        raise SweepError(f"not deleting: {host}'s DeleteObjects ignores each item's ETag precondition, so a changed object "
+                         "would be deleted (specs/delete-preconditions.md)")
     soft_delete_days = _run_retention_days(client, bucket, for_real, min_soft_delete_days)
 
     manifest_path = run / "manifest" / f"{bucket}.parquet"

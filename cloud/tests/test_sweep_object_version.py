@@ -108,3 +108,18 @@ def test_preserved_analytics_distinguishes_new_changed_and_post_scan_keys(tmp_pa
     assert result["preserved_breakdown"] == {"new_since_review": 1, "changed_since_review": 1, "new_since_scan": 1, "unclassified": 0}
     assert (result["deleted_objects"], result["drift_new"], result["delete_failed"]) == (1, 3, 0)
     assert store.calls == _deleted("p/f")
+
+
+def test_a_store_ignoring_batch_etags_refuses_a_real_run(tmp_path: Path) -> None:
+    """R2's `DeleteObjects` deletes a stale-ETag item anyway (the canary, 2026-11-26), so a real run there deletes nothing."""
+    from types import SimpleNamespace
+
+    out = run_dir(tmp_path)
+    store = ConditionalStore()
+    store.meta = SimpleNamespace(endpoint_url="https://acct.r2.cloudflarestorage.com")
+    with pytest.raises(SweepError, match=r"^not deleting: acct\.r2\.cloudflarestorage\.com's DeleteObjects ignores each item's "
+                                         r"ETag precondition, so a changed object would be deleted \(specs/delete-preconditions\.md\)$"):
+        execute_plan(str(out), for_real=True, client=store)
+    assert store.calls == []
+    assert execute_plan(str(out), client=store)["mode"] == "dry"
+    assert store.calls == []
