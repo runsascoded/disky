@@ -50,3 +50,4 @@ The common hierarchy (Azure Pipelines: pipeline → stage → job → step; Jenk
 2. The run detail's stage → job rows from the estimate.
 3. `gcp-cost`'s billed snapshot and the site reading it.
 4. The per-stage chart; the UI's wording (stage, job, step; no "phase").
+5. Parity, with the UI change: gcs, r2 and hf list `run-cost` in `steps`, and their scan-run profiles price every machine their jobs use (cw's lacked n2-highmem-32/48 and the N2D fallbacks: an unpriced job shows as unknown, never $0). The reports are per-scan compute only, which may be public (sizes and per-scan cost are; gcs's storage bill isn't): on a deployment whose R2 copy is public (the r2 demo), `snapshots/cost/runs/` is too, by design.
