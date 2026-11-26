@@ -7,6 +7,7 @@ Each probe writes a key twice (ETags A, then B), then deletes with the stale A:
 - `single`: `DeleteObject(IfMatch=A)`. Enforced: refused (412) and the object is still B.
 - `batch`: `DeleteObjects` naming `{Key, ETag: A}`. Enforced: the item comes back in `Errors` and the object is still B.
 - `multipart`: `batch` over two multipart uploads (ETags `"…-2"`), as large checkpoint shards are written.
+- `single-multipart`: `single` over two multipart uploads (a store may enforce `If-Match` on one and not the other).
 
 Each then deletes with the current B, which must succeed (else the store refuses conditional deletes outright).
 
@@ -104,10 +105,10 @@ def _batch(client: "S3Client", bucket: str, key: str, etag: str) -> str:
 
 
 def probe(client: "S3Client", bucket: str, key: str, kind: str) -> dict[str, Any]:
-    """One probe (`single` | `batch` | `multipart`) on its own key: the stale delete's answer and whether the object
+    """One probe (`single` | `batch` | `multipart` | `single-multipart`) on its own key: the stale delete's answer and whether the object
     survived it, then the current delete's answer and whether that removed it."""
-    delete = _single if kind == "single" else _batch
-    multipart = kind == "multipart"
+    delete = _single if kind.startswith("single") else _batch
+    multipart = kind.endswith("multipart")
     a, b = (_two_multipart if multipart else _two_versions)(client, bucket, key)
     stale = delete(client, bucket, key, a)
     after_stale = _etag_now(client, bucket, key)
@@ -171,12 +172,12 @@ def cleanup(client: "S3Client", bucket: str, prefix: str) -> int:
 
 
 def conditional_delete_canary(client: "S3Client", bucket: str, prefix: str = "disky-canary/conditional-delete") -> dict[str, Any]:
-    """Both probes under a fresh run prefix, then its cleanup. The summary says, per probe, whether the store enforced
+    """Every probe under a fresh run prefix, then its cleanup. The summary says, per probe, whether the store enforced
     a stale ETag."""
     run = f"{prefix.strip('/')}/{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:8]}/"
     out: dict[str, Any] = {"bucket": bucket, "prefix": run, "probes": []}
     try:
-        for kind in ("single", "batch", "multipart"):
+        for kind in ("single", "batch", "multipart", "single-multipart"):
             out["probes"].append(probe(client, bucket, f"{run}{kind}", kind))
         out["probes"].append(probe_mixed(client, bucket, run))
     finally:

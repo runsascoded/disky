@@ -1841,7 +1841,7 @@ def plan_sweep_purge(dry_run: bool, run_dir: str) -> None:
 @option("-p", "--prefix", default="disky-canary/conditional-delete", help="Where the run's keys go")
 def plan_sweep_canary(bucket: str, prefix: str) -> None:
     """Does the sweep's S3 store (`$SWEEP_S3_ENDPOINT`) enforce a delete's ETag precondition, on `DeleteObject`
-    (`If-Match`) and per item on `DeleteObjects` (single-part and multipart ETags, and a stale item beside a current one
+    (`If-Match`) and per item on `DeleteObjects` (single-part and multipart ETags on each, and a stale item beside a current one
     in one call)? Writes, overwrites and deletes only its own keys, then removes every version of them
     (`sweep_canary.py`). Prints the JSON summary; exit 0 when every probe is enforced, 1 when any isn't."""
     import json

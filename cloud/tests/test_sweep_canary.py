@@ -98,7 +98,7 @@ def _summary(store: _Store) -> list[dict]:
 @pytest.mark.parametrize("single,batch", [(True, True), (True, False), (False, True), (False, False)])
 def test_canary_reports_what_the_store_enforces_and_leaves_nothing(single: bool, batch: bool) -> None:
     expect = []
-    for kind, on in (("single", single), ("batch", batch), ("multipart", batch), ("mixed", batch)):
+    for kind, on in (("single", single), ("batch", batch), ("multipart", batch), ("single-multipart", single), ("mixed", batch)):
         expect.append({
             "kind": kind, "stale": "PreconditionFailed" if on else "ok", "survived_stale": on,
             "current": "ok", "removed_by_current": True, "enforced": on,
