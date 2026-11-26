@@ -130,6 +130,12 @@ class Profile:
             from .append_runner import parse_policy
 
             object.__setattr__(self, "compact", parse_policy("compact", self.compact))
+        from .scan_profile import local_ssd_problem
+
+        for stage in ("", *sorted({*self.machines, *self.ssd_gbs})):
+            if why := local_ssd_problem(self.machine_for(stage), self.ssd_for(stage)):
+                where = f"stage {stage} (machines / ssd_gbs)" if stage else "machine / ssd_gb"
+                raise SystemExit(f"static names profile: {where}: {why}")
 
     @property
     def policy(self) -> Policy:

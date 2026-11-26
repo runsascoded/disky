@@ -67,6 +67,31 @@ SOURCE_KINDS = {"gs": "gcs", "gcs": "gcs", "s3": "s3", "r2": "r2", "hf": "hf"}
 FOLDABLE = {"bucket-check": "list", "index-sync": "post"}
 #: A local SSD's size on GCE: a `local-ssd` disk request is a multiple of it.
 LOCAL_SSD_GB = 375
+#: The local SSD counts GCE attaches to an N2 machine, by its vCPUs (rows of `(max vCPUs, counts)`): any other count
+#: fails the job at scheduling ("Number of local SSDs for an instance of type n2-highmem-32 should be one of [0, 4, 8,
+#: 16, 24]"), after the scan has waited on it.
+N2_LOCAL_SSDS = ((10, (1, 2, 4, 8, 16, 24)), (20, (2, 4, 8, 16, 24)), (40, (4, 8, 16, 24)), (80, (8, 16, 24)), (128, (16, 24)))
+
+
+def local_ssd_counts(machine: str) -> tuple[int, ...] | None:
+    """The local SSD counts `machine` can take (an N2's, by `N2_LOCAL_SSDS`), or None for a family not tabled (unchecked)."""
+    m = re.fullmatch(r"n2-[a-z]+-(\d+)", machine)
+    if not m:
+        return None
+    cpus = int(m.group(1))
+    return next((counts for top, counts in N2_LOCAL_SSDS if cpus <= top), None)
+
+
+def local_ssd_problem(machine: str, gb: int) -> str | None:
+    """Why `gb` of local SSD can't go on `machine` (not whole SSDs, or a count GCE refuses for it), else None."""
+    if gb % LOCAL_SSD_GB:
+        return f"{gb} GB of local SSD is not a multiple of {LOCAL_SSD_GB}"
+    counts = local_ssd_counts(machine)
+    n = gb // LOCAL_SSD_GB
+    if counts is not None and n not in counts:
+        sizes = ", ".join(str(c * LOCAL_SSD_GB) for c in counts)
+        return f"{machine} takes {', '.join(map(str, counts))} local SSDs ({sizes} GB), not {n} ({gb} GB)"
+    return None
 #: The site's main store (`STORES_JSON` keys name the others); what the CLIs' `-s/--store` default to.
 PRIMARY_STORE = "primary"
 

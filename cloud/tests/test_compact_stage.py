@@ -575,7 +575,7 @@ def test_the_anchors_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compac
     from dt_cloud.static_merge import ANCHOR_STAGE, anchor_helper_job
 
     r = _static_runner(1)
-    r.cfg = replace(r.cfg, machines={**r.cfg.machines, ANCHOR_STAGE: "n2-highmem-32"})
+    r.cfg = replace(r.cfg, machines={**r.cfg.machines, ANCHOR_STAGE: "n2-highmem-32"}, ssd_gbs={**r.cfg.ssd_gbs, ANCHOR_STAGE: 1500})
     url = "gs://scr/static-names/compact-checkpoints/g.c001/abc"
     name, spec = anchor_helper_job(r, url, "anchored/plan-1.json", 7, "c0de", "2026-10-23T0702")
     assert re.fullmatch(r"[a-z0-9-]+-anchor-shard-2026-10-23-0702-\d{6}", name), name
