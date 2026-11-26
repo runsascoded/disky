@@ -1063,11 +1063,12 @@ def test_jobs_are_the_profiles_and_carry_the_cost_label(monkeypatch):
     f.runner().run("2026-08-04T1236")  # then a carry: the merge job
     (_, ranges), (_, publish), (_, r2), _, _, (merge_name, merge) = f.jobs
     want = {"app": "disky", "deployment": "t", "component": "interval-store", "scan_run": "root-uid"}
-    for spec, scan, stage in ((ranges, "2026-08-04", "ranges"), (publish, "2026-08-04", "publish"),
-                             (r2, "2026-08-04", "r2"), (merge, "2026-08-04T1236", "merge")):
-        # the cost labels on the job and on its allocation policy (its VMs and disks); the job's own two stay on the job
-        assert spec["allocationPolicy"]["labels"] == {**want, "scan_id": scan.lower(), "stage": stage}
-        assert spec["labels"] == {**want, "scan_id": scan.lower(), "stage": stage, "purpose": "interval-store", "gen": "g1"}
+    for spec, scan, stage, upkeep in ((ranges, "2026-08-04", "ranges", {}), (publish, "2026-08-04", "publish", {}),
+                                      (r2, "2026-08-04", "r2", {}), (merge, "2026-08-04T1236", "merge", {"upkeep": "carry"})):
+        # the cost labels on the job and on its allocation policy (its VMs and disks); the job's own two stay on the job; a
+        # carry is store upkeep on both (specs/scan-cost-by-stage.md)
+        assert spec["allocationPolicy"]["labels"] == {**want, "scan_id": scan.lower(), "stage": stage, **upkeep}
+        assert spec["labels"] == {**want, "scan_id": scan.lower(), "stage": stage, "purpose": "interval-store", "gen": "g1", **upkeep}
     cmd = lambda s: s["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]  # noqa: E731
     assert [s["taskGroups"][0]["taskCount"] for s in (ranges, publish, r2, merge)] == [2, 1, 1, 1]
     assert cmd(ranges) == ("set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.interval_append ranges "

@@ -1349,6 +1349,18 @@ def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: s
     }, component)
 
 
+#: The label a carry (`carry`) or a fold (`fold`) carries on its job and allocation: store upkeep, which serves every scan it
+#: merges, so a run's cost lists it apart from the run's own (`scan_cost.report`, `scan_runs.finish_cmd`).
+UPKEEP_LABEL = "upkeep"
+
+
+def upkeep(spec: dict, kind: str) -> dict:
+    """`spec` (a merge or compaction job) labelled `upkeep: <kind>` on the job and its allocation (what its VMs bill under)."""
+    spec.setdefault("labels", {})[UPKEEP_LABEL] = kind
+    spec.setdefault("allocationPolicy", {}).setdefault("labels", {})[UPKEEP_LABEL] = kind
+    return spec
+
+
 def label(v: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "-" for c in v.lower())[:63]
 
@@ -1998,7 +2010,7 @@ class Runner:
         Before submitting, the compaction lease (`compacting`) is written for the `compact` job (its `holder`, which the
         job adopts): appends to the generation wait from then on, whether or not this run stays to watch the job. None is
         submitted while another live compaction holds it."""
-        jobs = self.compact_jobs(scan)
+        jobs = [(name, upkeep(spec, "fold")) for name, spec in self.compact_jobs(scan)]
         if jobs:
             # the first job folds and publishes: its run is recorded (`compact-r2`, the R2 account's, isn't)
             jobs[0] = (jobs[0][0], self.record_env(*jobs[0]))
@@ -2058,6 +2070,7 @@ class Runner:
             elif merges:
                 desc = "; ".join(f"{len(ins)} runs → {out['key']} (level {out['level']})" for ins, out in merges)
                 name, spec = self.merge_job(m["date"], long=merge_is_long(merges, self.long_merge_rows))
+                upkeep(spec, "carry")
                 # its status record's holder (`StatusMirror`)
                 spec["taskGroups"][0]["taskSpec"]["environment"]["variables"][JOB_NAME_VAR] = name
                 self.record_env(name, spec)
