@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { costStages, jobStage, type RunCostJob, type RunCostReport, runCostKey } from './runCost'
+import { costStages, jobStage, type RunCostJob, type RunCostReport, runCostKey, upkeepOf } from './runCost'
 
 const job = (o: Partial<RunCostJob>): RunCostJob => ({
   job: 'j', uid: 'u', region: 'us-east1', association: 'scan_run_label', component: 'scan', stage: null, step: null, upkeep: null,
@@ -47,13 +47,24 @@ describe('runCost', () => {
       job({ component: 'static-names', stage: 'r2', job: 'sn-r2', estimated_compute_usd: null }),
       job({ component: 'static-names', stage: 'merge', upkeep: 'carry', job: 'sn-merge', estimated_compute_usd: 2.62 }),
     ])
-    const { stages, upkeep } = costStages(r)
+    const { stages, total, upkeep } = costStages(r)
+    expect(total).toBe(0.2 + (0.92 + 1.42))
     expect(stages.map(s => [s.stage, s.usd, s.vmHours, s.jobs.map(j => j.label)])).toEqual([
       ['head', 0.2, 2, ['head']],
       ['static names', 0.92 + 1.42, 3, ['anchors', 'drill', 'r2']],
     ])
     expect(upkeep && [upkeep.stage, upkeep.usd, upkeep.jobs.map(j => j.label)]).toEqual(['store upkeep', 2.62, ['carry (merge)']])
     expect(costStages(report([job({ association: 'root' })])).upkeep).toBeNull()
+  })
+
+  it('reads a store’s merge or compaction job from before the upkeep label as upkeep', () => {
+    expect([
+      job({ component: 'static-names', stage: 'merge', upkeep: undefined }),
+      job({ component: 'interval-store', stage: 'compact' }),
+      job({ component: 'static-names', stage: 'compact-r2' }),
+      job({ component: 'static-names', stage: 'drill' }),
+      job({ component: 'scan', stage: 'merge' }),
+    ].map(upkeepOf)).toEqual(['carry', 'fold', 'fold', null, null])
   })
 
   it('keys a report by scan and run, refusing anything else', () => {

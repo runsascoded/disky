@@ -793,17 +793,19 @@ const vmH = (h: number) => (h < 10 ? h.toFixed(2) : Math.round(h).toLocaleString
 
 /** A run's compute by stage → job (specs/scan-cost-by-stage.md), its store upkeep apart: an estimate at the profile's rates. */
 function RunCost({ report, project }: { report: RunCostReport; project: string | null }) {
-  const { stages, upkeep } = costStages(report)
-  const rows = (s: CostStage, apart = false) => [
+  const { stages, total, upkeep } = costStages(report)
+  const rows = (s: CostStage, apart = false) => s.jobs.length === 1 && s.jobs[0].label === s.stage ? [job(s.jobs[0].job, <b>{s.stage}</b>, 'sr-cost-stage')] : [
     <tr key={s.stage} className="sr-cost-stage">
       <td colSpan={2}><b>{s.stage}</b>{apart && <span className="dim"> (not in the run’s total)</span>}</td>
       <td className="num nb">{vmH(s.vmHours)}</td><td className="num nb">{usd(s.usd)}</td><td />
     </tr>,
-    ...s.jobs.map(({ label, job }) => {
+    ...s.jobs.map(({ label, job: j }) => job(j, label)),
+  ]
+  function job(job: RunCostReport['jobs'][number], label: ReactNode, className?: string) {
       const href = project ? batchHref(project, job.region, job.job) : null
       return (
-        <tr key={job.uid}>
-          <td className="sr-cost-job">{label}{job.state !== 'SUCCEEDED' && <span className="dim"> · {job.state.toLowerCase()}</span>}</td>
+        <tr key={job.uid} className={className}>
+          <td className={className ? undefined : 'sr-cost-job'}>{label}{job.state !== 'SUCCEEDED' && <span className="dim"> · {job.state.toLowerCase()}</span>}</td>
           <td className="nb">{job.machine ?? <span className="dim">—</span>}{job.provisioning_model === 'SPOT' && <span className="dim"> spot</span>}</td>
           <td className="num nb">{vmH(job.observed_vm_seconds / 3600)}</td>
           <td className="num nb">{job.estimated_compute_usd == null
@@ -812,11 +814,10 @@ function RunCost({ report, project }: { report: RunCostReport; project: string |
           <td className="nb">{href ? <a href={href} target="_blank" rel="noreferrer"><code>{job.job}</code></a> : <code>{job.job}</code>}</td>
         </tr>
       )
-    }),
-  ]
+  }
   return (<>
     <p className="dim">
-      ~{usd(report.estimated_compute_usd)} of compute
+      ~{usd(total)} of compute
       {upkeep && <>, plus {usd(upkeep.usd)} of store upkeep (carries and folds serve every scan they merge, so they’re listed apart)</>}.
       {' '}<Tooltip content={<>{report.exclusions.map(x => <div key={x}>Excluded: {x}</div>)}</>}><span className="sr-cost-basis">An estimate at list prices</span></Tooltip>
       {' '}(spot at its multiplier), as of {fmtRunTime(Math.floor(Date.parse(report.as_of) / 1000))}.

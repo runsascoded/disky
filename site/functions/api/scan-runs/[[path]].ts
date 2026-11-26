@@ -5,7 +5,8 @@
 //
 // `cost`: the run's compute report by job (`snapshots/cost/runs/<scan>/<run>.json`, the `run-cost` step's, read through
 // the served store; specs/scan-cost-by-stage.md), or null where none was written. Compute only: public where the
-// deployment's served copy is (sizes and per-scan cost may be).
+// deployment's served copy is (sizes and per-scan cost may be). Under `?store=`, the requested store's own copy (`withStore`
+// rebinds the env): a store whose runs write no report shows none.
 //
 // `emoji=1` (the scan-health thread's read, `dt_cloud.nominal`): each manual run's starter's Slack emoji
 // (`trigger_emoji`), asked of OA's broker (`OA_LOGIN_*`, the deployment's own client) and never stored; nothing for a

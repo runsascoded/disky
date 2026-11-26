@@ -79,13 +79,24 @@ const sumOrNull = (xs: (number | null)[]): number | null => {
   return priced.length ? priced.reduce((a, b) => a + b, 0) : null
 }
 
-/** The run's own jobs by stage (in `STAGES` order, empty stages left out), and its store upkeep apart. */
-export function costStages(r: RunCostReport): { stages: CostStage[]; upkeep: CostStage | null } {
+/** A job's upkeep kind: its `upkeep` label, else (a report from before the label) a store's merge or compaction job. */
+export function upkeepOf(j: RunCostJob): string | null {
+  if (j.upkeep) return j.upkeep
+  const store = j.component === 'static-names' || j.component === 'interval-store'
+  if (store && j.stage === 'merge') return 'carry'
+  if (store && (j.stage === 'compact' || j.stage === 'compact-r2')) return 'fold'
+  return null
+}
+
+/** The run's own jobs by stage (in `STAGES` order, empty stages left out), their total (a report's own `estimated_compute_usd`
+ *  counts a carry from before the upkeep label), and its store upkeep apart. */
+export function costStages(r: RunCostReport): { stages: CostStage[]; total: number | null; upkeep: CostStage | null } {
   const by = new Map<string, CostStage['jobs']>()
   const upkeep: CostStage['jobs'] = []
   for (const job of r.jobs) {
-    if (job.upkeep) {
-      upkeep.push({ label: `${job.upkeep} (${job.stage ?? job.component})`, job })
+    const kind = upkeepOf(job)
+    if (kind) {
+      upkeep.push({ label: `${kind} (${job.stage ?? job.component})`, job })
       continue
     }
     const { stage, label } = jobStage(job)
@@ -96,10 +107,8 @@ export function costStages(r: RunCostReport): { stages: CostStage[]; upkeep: Cos
     usd: sumOrNull(jobs.map(j => j.job.estimated_compute_usd)),
     vmHours: jobs.reduce((a, j) => a + j.job.observed_vm_seconds / 3600, 0),
   })
-  return {
-    stages: STAGES.filter(s => by.has(s)).map(s => stage(s, by.get(s)!)),
-    upkeep: upkeep.length ? stage('store upkeep', upkeep) : null,
-  }
+  const stages = STAGES.filter(s => by.has(s)).map(s => stage(s, by.get(s)!))
+  return { stages, total: sumOrNull(stages.map(s => s.usd)), upkeep: upkeep.length ? stage('store upkeep', upkeep) : null }
 }
 
 /** A report's key under the served store, or null for a scan or run id that isn't one (never a path outside it). */
