@@ -42,6 +42,7 @@ from time import monotonic
 from uuid import uuid4
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from click import Choice, argument, group, option
 
@@ -74,6 +75,8 @@ START_MAX_ROWS = 400_000 + 2 * 8192
 START_MAX_HITS = 150_000
 #: Target rows per name-index shard (a three-character prefix is never split).
 NAME_SHARD_ROWS = 50_000_000
+#: Rows per batch of `prior_dir_counts`' sorted stream (versions + near bounds) as it is summed
+PD_BATCH_ROWS = 1 << 20
 #: Rows per rollup row group (the decode unit).
 ROLLUP_RG = 2048
 
@@ -1190,17 +1193,40 @@ def prior_dir_counts(con) -> None:
     A version's rows in several tiers count once, and only its identity is read (cw's 10-20 18:06 scan: 401M prior rows,
     367M versions; a dedup carrying every column peaked at 180 GB, 324 GB spilled). Each near counts the versions under
     it as a difference of per-key running counts at `dir/` and `dir0` (ASOF), not by expanding every version into each
-    of its ancestors (rows × depth)."""
+    of its ancestors (rows × depth).
+
+    The running counts are one sorted pass, not a window: the versions and every near's two bounds (`dir/`, `dir0`) are
+    sorted together by `(k, path)` (DuckDB's external sort) and summed as they stream, a bound taking the sum of the
+    versions before it. A near's count is the difference of its bounds' sums, which lie in the same key, so one running
+    sum over every key serves. Over cw's `gov_reports` (2026-11-21: 797M versions) the per-key window spilled 221 GB on
+    a 128 GB machine and took 108 min."""
     con.execute("CREATE OR REPLACE TABLE pv AS SELECT k, path, count(DISTINCT (usr, vf))::BIGINT AS n FROM prows GROUP BY k, path")
     con.execute("CREATE OR REPLACE TABLE pvt AS SELECT k, sum(n)::BIGINT AS n FROM pv GROUP BY k")
-    con.execute("CREATE OR REPLACE TABLE pvc AS SELECT k, path, sum(n) OVER (PARTITION BY k ORDER BY path)::BIGINT AS cum FROM pv")
+    con.execute("""CREATE OR REPLACE TABLE pdp AS SELECT (row_number() OVER () - 1)::BIGINT AS pid, k, x
+        FROM (SELECT DISTINCT k, x FROM (SELECT k, dir || '/' AS x FROM near WHERE dir <> '' UNION ALL SELECT k, dir || '0' FROM near WHERE dir <> ''))""")
+    pids, cums = [], []
+    if con.execute("SELECT count(*) FROM pdp").fetchone()[0]:
+        # a bound sorts before a version at its own path (`o`), so its sum counts only paths below it
+        reader = con.execute("""SELECT n, pid FROM (SELECT k, path AS x, 1 AS o, n, NULL::BIGINT AS pid FROM pv
+            UNION ALL SELECT k, x, 0 AS o, 0 AS n, pid FROM pdp) ORDER BY k, x, o""").to_arrow_reader(PD_BATCH_ROWS)
+        carry = 0
+        for batch in reader:
+            cum = pc.cumulative_sum(batch.column("n"), start=carry)
+            if len(cum):
+                carry = cum[-1].as_py()
+            at = pc.is_valid(batch.column("pid"))
+            pids.append(pc.filter(batch.column("pid"), at))
+            cums.append(pc.filter(cum, at))
+    con.register("pdc_in", pa.table({"pid": pa.chunked_array(pids, pa.int64()), "cum": pa.chunked_array(cums, pa.int64())}))
+    con.execute("CREATE OR REPLACE TABLE pdc AS SELECT p.k, p.x, c.cum FROM pdp AS p JOIN pdc_in AS c USING (pid)")
+    con.unregister("pdc_in")
     con.execute("DROP TABLE pv")
     con.execute("""CREATE OR REPLACE TABLE pd AS SELECT near.k, near.lvl, near.dir,
-            (CASE WHEN near.dir = '' THEN coalesce(t.n, 0) ELSE coalesce(hi.cum, 0) - coalesce(lo.cum, 0) END)::BIGINT AS n
+            (CASE WHEN near.dir = '' THEN coalesce(t.n, 0) ELSE hi.cum - lo.cum END)::BIGINT AS n
         FROM near LEFT JOIN pvt AS t USING (k)
-        ASOF LEFT JOIN pvc AS hi ON near.k = hi.k AND near.dir || '0' > hi.path
-        ASOF LEFT JOIN pvc AS lo ON near.k = lo.k AND near.dir || '/' > lo.path""")
-    for t in ("pvt", "pvc"):
+        LEFT JOIN pdc AS hi ON hi.k = near.k AND hi.x = near.dir || '0'
+        LEFT JOIN pdc AS lo ON lo.k = near.k AND lo.x = near.dir || '/'""")
+    for t in ("pvt", "pdp", "pdc"):
         con.execute(f"DROP TABLE {t}")
 
 

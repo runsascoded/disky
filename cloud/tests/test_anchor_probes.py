@@ -197,6 +197,34 @@ def test_prior_dir_counts_match_the_ancestor_expansion():
 
 
 
+@pytest.mark.parametrize("batch_rows", [1, 7, 1 << 20])
+def test_prior_dir_counts_carry_across_batches(monkeypatch, batch_rows):
+    """`pd` over random versions and nears (nested dirs, names sorting either side of `/` and `0`, keys with no versions)
+    equals the ancestor expansion's counts, whatever the stream's batch size."""
+    import random
+
+    monkeypatch.setattr(an, "PD_BATCH_ROWS", batch_rows)
+    rnd = random.Random(3)
+    names = ["a", "b", "ab", "a0", "a.b", "z"]
+    for _ in range(20):
+        keys = [rnd.choice("abcde") * rnd.randint(1, 3) for _ in range(4)]
+        con = duckdb.connect()
+        con.execute("CREATE TABLE prows (k VARCHAR, depth INTEGER, path VARCHAR, usr VARCHAR, vf BIGINT)")
+        for _ in range(rnd.randint(0, 120)):
+            d = rnd.randint(1, 4)
+            con.execute("INSERT INTO prows VALUES (?, ?, ?, ?, ?)", [rnd.choice(keys), d, "/".join(rnd.choice(names) for _ in range(d)), rnd.choice(["", "u"]), rnd.randint(1, 3)])
+        con.execute("CREATE TABLE near (k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)")
+        nears = {(rnd.choice(keys), lvl, "/".join(rnd.choice(names) for _ in range(lvl))) for lvl in (rnd.randint(0, 3) for _ in range(rnd.randint(1, 25)))}
+        con.executemany("INSERT INTO near VALUES (?, ?, ?, 1)", sorted(nears))
+        an.prior_dir_counts(con)
+        got = con.execute("SELECT k, lvl, dir, n FROM pd ORDER BY k, lvl, dir").fetchall()
+        con.execute("CREATE TABLE pvx AS SELECT DISTINCT k, depth, path, usr, vf FROM prows")
+        under = dict(((k, lvl, d), n) for k, lvl, d, n in con.execute(f"""SELECT x.k, x.lvl, x.dir, count(*) FROM ({an._level_dirs('pvx')}) AS x
+            SEMI JOIN near USING (k, lvl, dir) GROUP BY ALL""").fetchall())
+        total = dict(con.execute("SELECT k, count(*) FROM pvx GROUP BY k").fetchall())
+        assert got == [(k, lvl, d, total.get(k, 0) if d == "" else under.get((k, lvl, d), 0)) for k, lvl, d in sorted(nears)]
+
+
 @pytest.mark.parametrize("batch_keys, queries", [(1, 8), (2, 4), (256, 2)])
 def test_start_probes_read_every_row_under_each_near_prefix_in_key_batches(tmp_path, batch_keys, queries):
     """Each near key gets every prior row whose name starts with it (nested keys `abc` / `abcd` both), once per tier,
