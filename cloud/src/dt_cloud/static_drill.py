@@ -33,7 +33,7 @@ from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version, Parts
 from .static_names import CODEC, OPEN, PREFIX, U64, Progress, _batches, err, q
 from .static_profile import data_bucket
-from .resource_monitor import monitor_resources, resource_stage
+from .resource_monitor import memory_snapshot, monitor_resources, resource_stage
 
 KIND_FULL, KIND_KEPT, KIND_REST, KIND_DELTA = 0, 1, 2, -1  # the delta header sorts first, as a full one
 KINDS = ("long", "short")
@@ -1381,8 +1381,13 @@ def newly_heavy_rollups(
         if ck:
             parts.add(con.execute("SELECT * FROM nhr").to_arrow_table(), b)
         con.execute("INSERT INTO rup SELECT * FROM nhr; DELETE FROM nhr")
+        mem = chunk_memory(con, parts)
+        resource_stage(f"{kind}: newly-heavy chunk", **progress, **mem)
+        gib = lambda k: f"{mem[k] / 2**30:.1f}"  # noqa: E731
         log(f"drill {kind}: newly-heavy directories {b}/{len(directories)} (chunk {n + 1}/{len(chunks)}: {b - a} directories, "
-            f"{len(old)} ranges read), {total:,} prior roots, {monotonic() - t0:.0f}s")
+            f"{len(old)} ranges read), {total:,} prior roots, {monotonic() - t0:.0f}s; RSS {gib('rss_anon_bytes')} GiB (DuckDB "
+            f"{gib('duckdb_bytes')}, spill {gib('duckdb_spill_bytes')}, arrow {gib('arrow_bytes')} / peak {gib('arrow_peak_bytes')}, "
+            f"checkpoint {gib('parts_pending_bytes')}; freed: arrow pool {gib('freed_arrow_bytes')}, C heap {gib('freed_trim_bytes')})")
     parts.flush(len(directories))
     con.execute("DROP TABLE newh_today; DROP TABLE nhr")
     return total
@@ -1408,6 +1413,27 @@ def duckdb_resources(con) -> dict:
     """Buffer-managed allocations and spill, sampled on the owning thread, never concurrently with SQL."""
     memory, spill = con.execute("SELECT coalesce(sum(memory_usage_bytes), 0), coalesce(sum(temporary_storage_bytes), 0) FROM duckdb_memory()").fetchone()
     return {"duckdb_bytes": int(memory), "duckdb_spill_bytes": int(spill)}
+
+
+def chunk_memory(con, parts: Parts | None = None) -> dict:
+    """What a newly-heavy chunk leaves held, by holder (specs/static-catch-up.md C: cw's 11-26T0003 drill grew ~1 GiB of
+    RSS a chunk outside DuckDB until it was OOM-killed): the process's anonymous RSS, DuckDB's buffer-managed bytes and
+    spill, pyarrow's live allocations and its pool's peak, the checkpoint's pending rows; then what RSS pyarrow's pool
+    (`release_unused`) and the C heap (`release_heap`) give back, asked in turn. Linux only for RSS (0 elsewhere)."""
+    def anon() -> int:
+        snap = memory_snapshot()
+        return snap.get("rss_anon_bytes") or snap.get("rss_bytes") or 0
+
+    pool = pa.default_memory_pool()
+    out = {"rss_anon_bytes": anon(), **duckdb_resources(con), "arrow_bytes": pa.total_allocated_bytes(),
+           "arrow_pool": pool.backend_name, "arrow_peak_bytes": pool.max_memory() or 0,
+           "parts_pending_bytes": sum(t.nbytes for t in parts.pending) if parts is not None else 0}
+    pool.release_unused()
+    after_arrow = anon()
+    release_heap()
+    out["freed_arrow_bytes"] = out["rss_anon_bytes"] - after_arrow
+    out["freed_trim_bytes"] = after_arrow - anon()
+    return out
 
 
 def release_heap() -> None:

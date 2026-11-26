@@ -250,3 +250,17 @@ def test_memory_snapshot_cgroup_v1(tmp_path):
         "cgroup_current_bytes": 1000, "cgroup_limit_bytes": 2000,
         "cgroup_peak_bytes": 1500, "cgroup_limit_hits": 2,
     }
+
+
+def test_chunk_memory_names_each_holder_and_what_releasing_it_gave_back(monkeypatch):
+    """`chunk_memory` (specs/static-catch-up.md C): RSS, DuckDB's bytes and spill, pyarrow's, the checkpoint's pending rows,
+    then what releasing pyarrow's pool and the C heap gave back, measured as RSS before and after each."""
+    rss = iter([100, 90, 70])
+    monkeypatch.setattr(sd, "memory_snapshot", lambda: {"rss_anon_bytes": next(rss)})
+    monkeypatch.setattr(sd, "release_heap", lambda: None)
+    parts = SimpleNamespace(pending=[pa.table({"x": [1, 2]}), pa.table({"x": [3]})])
+    m = sd.chunk_memory(duckdb.connect(), parts)
+    assert {k: m[k] for k in ("rss_anon_bytes", "freed_arrow_bytes", "freed_trim_bytes", "parts_pending_bytes", "duckdb_bytes", "duckdb_spill_bytes")} == {
+        "rss_anon_bytes": 100, "freed_arrow_bytes": 10, "freed_trim_bytes": 20, "parts_pending_bytes": 24, "duckdb_bytes": 0, "duckdb_spill_bytes": 0}
+    assert sorted(m) == ["arrow_bytes", "arrow_peak_bytes", "arrow_pool", "duckdb_bytes", "duckdb_spill_bytes", "freed_arrow_bytes",
+                         "freed_trim_bytes", "parts_pending_bytes", "rss_anon_bytes"]

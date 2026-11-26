@@ -21,7 +21,7 @@ def memory_snapshot(
     out = {}
     if status.exists():
         fields = dict(line.split(":", 1) for line in status.read_text().splitlines() if ":" in line)
-        for field, key in (("VmRSS", "rss_bytes"), ("VmHWM", "rss_peak_bytes")):
+        for field, key in (("VmRSS", "rss_bytes"), ("VmHWM", "rss_peak_bytes"), ("RssAnon", "rss_anon_bytes"), ("RssFile", "rss_file_bytes")):
             if field in fields:
                 out[key] = int(fields[field].split()[0]) * 1024
     for name, key in (("memory.current", "cgroup_current_bytes"), ("memory.max", "cgroup_limit_bytes"), ("memory.peak", "cgroup_peak_bytes")):
