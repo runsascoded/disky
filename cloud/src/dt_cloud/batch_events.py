@@ -16,6 +16,7 @@ service running `serve` (infra `BatchEvents`), and on a terminal state it
 Both are idempotent and the thread's writers serialize on its lease, so the delivery after a head that did finish
 (the job already wrote both) changes nothing, and a redelivery is harmless.
 
+A static-names compaction's jobs do too (the same `events_topic`, every job `alert`): a failure or cancel alerts.
 An interval-store compaction's jobs publish to the same topic when the profile names it (`events_topic`,
 `interval_append.with_events`), labelled `events` (`append_runner.EVENTS_LABEL`); their ends go to `compaction`
 instead: the job that publishes the new generation's pointer (`catch-up`), on success, submits the catch-up append as
@@ -136,26 +137,40 @@ def catch_up_spec(job: Mapping) -> dict | None:
             "labels": labels, "logsPolicy": deepcopy(job.get("logsPolicy") or {"destination": "CLOUD_LOGGING"})}
 
 
+#: A static-names compaction job's `component` label (`static_runner.StaticRunner.job`)
+STATIC_COMPONENT = "static-names"
+
+
 def compaction(attrs: Mapping[str, str], job: Mapping | None, submit: Callable[[dict, str, str, str], str],
                alert: Callable[[str, str], None]) -> str | None:
-    """A terminal change of an interval-store compaction job (labels `component` `interval-store`, `events`
-    `catch-up` / `alert`): what it did (see the module doc), or None for any other job (a scan head's: `converge`).
-    `submit(spec, id, region, project)` creates a Batch job (a 409 counts as created); `alert(level, message)` posts."""
+    """A terminal change of an interval-store or static-names compaction job (labels `component` `interval-store` /
+    `static-names`, `events` `catch-up` / `alert`): what it did (see the module doc), or None for any other job (a scan
+    head's: `converge`). `submit(spec, id, region, project)` creates a Batch job (a 409 counts as created);
+    `alert(level, message)` posts."""
     from .append_runner import ALERT, CATCH_UP, EVENTS_LABEL
     from .interval_append import COMPONENT
 
     labels = (job or {}).get("labels") or {}
     event = labels.get(EVENTS_LABEL)
     ref = job_ref(attrs)
-    if job is None or ref is None or labels.get("component") != COMPONENT or event not in (CATCH_UP, ALERT):
+    component = labels.get("component")
+    if job is None or ref is None or component not in (COMPONENT, STATIC_COMPONENT) or event not in (CATCH_UP, ALERT):
         return None
     project, region, jid = ref
     state = attrs.get("NewJobState")
     gen = labels.get("gen") or "?"
     if state != "SUCCEEDED":
-        alert("fail", f"interval-store compaction job {jid} (generation {gen}) ended {state}: the generation isn't compacted. "
-                      "Appends wait on the compaction lease until it lapses; while the compaction is due, the next append submits it again.")
+        if component == STATIC_COMPONENT:
+            # cw's static-names compactions ran out of memory twice a day for days (2026-11-22..), unseen: their runs piled up
+            alert("fail", f"static-names compaction job {jid} (generation {gen}) ended {state}: the generation isn't compacted. "
+                          "Its runs keep piling up (each scan's anchors and drill read them all); while the compaction is due, "
+                          "the next scan's append submits it again.")
+        else:
+            alert("fail", f"interval-store compaction job {jid} (generation {gen}) ended {state}: the generation isn't compacted. "
+                          "Appends wait on the compaction lease until it lapses; while the compaction is due, the next append submits it again.")
         return f"compaction {jid} {state}: alerted"
+    if component == STATIC_COMPONENT:
+        return f"compaction {jid} SUCCEEDED: nothing to do"
     if event == ALERT:
         return f"compaction {jid} SUCCEEDED: a step before the pointer's, nothing to do"
     spec = catch_up_spec(job)
@@ -168,10 +183,11 @@ def compaction(attrs: Mapping[str, str], job: Mapping | None, submit: Callable[[
 
 
 def post(env: Mapping[str, str], level: str, message: str) -> None:
-    """`message` through `disk-tree notify`'s channels in `env` (`fail`: high priority), or stderr without one."""
+    """`message` (a compaction's, naming its store) through `disk-tree notify`'s channels in `env` (`fail`: high
+    priority), or stderr without one."""
     from disk_tree.notify import push
 
-    title = f"{'❌' if level == 'fail' else '⚠️'} interval store"
+    title = f"{'❌' if level == 'fail' else '⚠️'} compaction"
     chans = push.configured(env)
     if not chans:
         err(f"batch-events: alert (no channel configured): {title}: {message}")

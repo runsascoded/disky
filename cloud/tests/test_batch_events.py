@@ -130,6 +130,17 @@ def test_a_compactions_end_submits_the_catch_up_or_alerts():
                          "no catch-up submitted; the scans it deferred go in with the next scan's append")])
 
 
+def test_a_static_names_compactions_failure_alerts_and_its_success_does_nothing():
+    job = compact_job("alert", profile=None)
+    job["labels"] = {**job["labels"], "component": "static-names", "purpose": "static-names", "gen": "2026-10-15cw-c003"}
+    assert ended("SUCCEEDED", job) == (f"compaction {JOB} SUCCEEDED: nothing to do", [])
+    for state in ("FAILED", "CANCELLED"):
+        assert ended(state, job) == (f"compaction {JOB} {state}: alerted", [(
+            "alert", "fail", f"static-names compaction job {JOB} (generation 2026-10-15cw-c003) ended {state}: the generation isn't compacted. "
+                             "Its runs keep piling up (each scan's anchors and drill read them all); while the compaction is due, "
+                             "the next scan's append submits it again.")])
+
+
 def test_any_other_job_is_left_to_the_scan_path():
     head = compact_job()
     head["labels"] = {"app": "disky", "component": "scan"}

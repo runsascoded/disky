@@ -163,6 +163,12 @@ class Runner(ar.Runner):
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen, *(["-N"] if self.candidate else [])], r2=True,
                                 mount=False))
+        if self.cfg.events_topic and not self.candidate:
+            # each job's end reaches `batch-events serve`, which alerts on a failure or cancel (nothing follows a success: the
+            # next run appends to the new generation by its successor record)
+            from .interval_append import with_events
+
+            out = [(n, with_events(s, self.cfg.events_topic, ar.ALERT, None)) for n, s in out]
         return out
 
     def with_gen(self, gen: str) -> Profile:

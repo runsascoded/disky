@@ -133,6 +133,23 @@ def test_static_compact_jobs_split_by_account():
     assert ROOT == f"static-names/{GEN}"
 
 
+def test_static_compact_jobs_publish_their_ends_when_the_profile_names_a_topic():
+    """With `events_topic`, every static-names compaction job names it in `notifications`, labelled `events: alert` (a
+    failure alerts; nothing follows a success); a candidate's and a topicless profile's don't."""
+    topic = "projects/p/topics/d-scan-events"
+
+    def ends(r):
+        return [(s["labels"]["stage"], s["labels"].get("events"), s.get("notifications")) for _, s in r.compact_jobs("2026-10-10")]
+
+    r = _static_runner(1)
+    assert ends(r) == [("compact", None, None), ("compact-r2", None, None)]
+    r.cfg = replace(r.cfg, events_topic=topic)
+    note = [{"pubsubTopic": topic, "message": {"type": "JOB_STATE_CHANGED"}}]
+    assert ends(r) == [("compact", "alert", note), ("compact-r2", "alert", note)]
+    r.candidate = True
+    assert ends(r) == [("compact", None, None), ("compact-r2", None, None)]
+
+
 def test_a_candidate_runners_compact_jobs_pass_n():
     """`runs add -N`: the `compact` job writes a candidate (`-N`), and `compact-r2` copies that candidate (`-N`)."""
     r = _static_runner(1)
