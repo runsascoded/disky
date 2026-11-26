@@ -25,5 +25,6 @@
   "soft-delete": {"leaves": "today's soft-delete reading not written: the site keeps the last one, dated", "side": true, "converges": false, "checks": false},
   "access-requesters": {"leaves": "the previous days' requester rollups not written: `dt-cloud access requesters -s` backfills them", "side": true, "converges": false, "checks": false},
   "access-jobs": {"leaves": "the previous days' job tables not written: a later run's job writes every missing day in its window", "side": true, "converges": true, "checks": false},
-  "vm-pack": {"leaves": "VM mode's pack not written: the VM serves the previous one until a later run writes it", "side": true, "converges": true, "checks": false}
+  "vm-pack": {"leaves": "VM mode's pack not written: the VM serves the previous one until a later run writes it", "side": true, "converges": true, "checks": false},
+  "run-cost": {"leaves": "this run's cost report not written: `dt-cloud scan-run cost -s <scan> <run> -O …` writes it later", "side": true, "converges": false, "checks": false}
 }

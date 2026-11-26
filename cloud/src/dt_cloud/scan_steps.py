@@ -2259,3 +2259,29 @@ def run_step(name: str, arg: str | None, env: dict[str, str] | None = None, prof
         err(f"WARN: {name} failed (exit {rc}); soft step, the scan goes on")
         return 0
     return rc
+
+
+#: Each run's compute report (`dt-cloud scan-run cost -O`), `<prefix>/<scan>/<root uid>.json`, beside the cost snapshots.
+RUN_COST_PREFIX = "snapshots/cost/runs"
+
+
+@step("run-cost", core=False, soft=True, options={"days": int},
+      side=True, leaves="this run's cost report not written: `dt-cloud scan-run cost -s <scan> <run> -O …` writes it later")
+def run_cost(ctx: Ctx, arg: str | None) -> None:
+    """This run's compute by job (`dt-cloud scan-run cost -s <scan> <run> -O`): its head, its tasks and every job they
+    submitted (`scan_run`), priced at the profile's rates, with store upkeep (carries, folds) apart
+    (specs/scan-cost-by-stage.md), saved as `<data>/snapshots/cost/runs/<scan>/<run>.json` (+ the R2 archive's copy, which
+    the site reads under `SERVED_R2`). It also rereads the saved reports of the last `options.run-cost.days` (7) days that
+    still listed a job running (each run's own head, a detached fold), so they end whole. Last of the post steps (the
+    registry's order). Needs the run's id (`$SCAN_RUN_ID`, the head's); skipped without one or on REPROC; never fatal."""
+    run_id = ctx.env.get("SCAN_RUN_ID") or ctx.env.get("DT_RUN_ID")
+    if ctx.reproc or not run_id:
+        err(f"run-cost: {'REPROC' if ctx.reproc else 'no $SCAN_RUN_ID'}: skipping the run's cost report")
+        return
+    with ctx.phase("run-cost"):
+        outs = [f"{ctx.data_uri}/{RUN_COST_PREFIX}"]
+        if ctx.env.get("R2_ARCHIVE"):
+            outs.append(f"{ctx.env['R2_ARCHIVE']}/{RUN_COST_PREFIX}")
+        ctx.sh(["dt-cloud", "scan-run", "cost", "-s", ctx.scan, "-r", str(ctx.opt("run-cost", "days", 7)),
+                *(a for o in outs for a in ("-O", o)), run_id],
+               fatal=False, warn="run cost report failed (the scan's outputs stand; the next run rereads the unsettled ones)")
