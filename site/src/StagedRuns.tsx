@@ -34,7 +34,7 @@ import {
   ATTEMPTED, attemptOnly, LOWER_BOUND, NOT_OBSERVABLE, totalsLowerBound, UNDO_CAVEAT, UNDO_LOG_ONLY,
   type Check, commonBucketPrefix, deletedBuckets, type DeletionRun, elapsed, elapsedDetails, type ExecJob, fmtDur, type LogSummaryFile, loggedOf, logSubdir,
   type PlanSummaryFile, localStamp, plannedOf, progressEstimate, type ProgressFile, progressFromSamples, runControls, runFileHref, runFilesRel, runIdTime, runLabel, type RunView, sumProgress, type Tally,
-  expectedOf, undoStatus, verifyRun, viewBuckets, viewLive, viewState, joinRuns,
+  expectedOf, undoStatus, verifyRun, viewActive, viewBuckets, viewLive, viewState, joinRuns,
 } from './runs'
 import { RecoveryUnavailable, RecoveryUnseen, UndoBy, UndoControl, UndoLine } from './RunUndo'
 import { runHasNoUndo, runNoUndoText, runUndoUnavailable, runUndoUnseen, UNDO_UNSEEN_WHO, undoUnseenText } from './softDelete'
@@ -87,6 +87,9 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   placed?: boolean
 }) {
   const views = useMemo(() => joinRuns(runs, jobs), [runs, jobs])
+  const now = Math.floor(Date.now() / 1000)
+  // live, or ended with its totals not yet in its row (`viewSettling`): its progress is still read and shown
+  const active = (v: RunView) => viewActive(v, now)
   // What each run planned (`plan-summary.json`, absent until its manifest
   // step ran), and each live run's per-bucket progress.
   const planRels = views.flatMap(v => { const d = dirOf(v); return d ? [`${d}plan-summary.json`] : [] })
@@ -99,7 +102,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const closedRels = views.flatMap(v => { const d = dirOf(v); return d && v.run?.mode === 'real' && v.run.finished_ts && v.run.plan_digest === '' ? [{ view: v, rel: `${d}deleted-summary.json` }] : [] })
   const closedQs = useRunFiles<LogSummaryFile>(closedRels.map(c => c.rel), false)
   const lowerBound = new Set(closedRels.flatMap(({ view }, i) => view.run && totalsLowerBound(view.run, closedQs[i]?.data) ? [view.key] : []))
-  const progTargets = views.filter(viewLive).flatMap(v => {
+  const progTargets = views.filter(active).flatMap(v => {
     const d = dirOf(v)
     if (!d) return []
     const bs = viewBuckets(v).length ? viewBuckets(v) : Object.keys(planOf(v)?.file.buckets ?? {})
@@ -109,7 +112,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const progress = new Map<string, ProgressFile[]>()
   progTargets.forEach((t, i) => { const p = progQs[i]?.data; if (p) progress.set(t.key, [...(progress.get(t.key) ?? []), p]) })
   // No run dir to read (cw): the samples the site recorded of the job's progress files.
-  const sampled = CAPS.runFiles ? [] : views.filter(v => viewLive(v) && v.run)
+  const sampled = CAPS.runFiles ? [] : views.filter(v => active(v) && v.run)
   const historyQs = useRunHistories(sampled.map(v => v.run!.run_id), !CAPS.runFiles)
   sampled.forEach((v, i) => { const ss = historyQs[i]?.data?.samples; if (ss?.length) progress.set(v.key, progressFromSamples(ss)) })
 
@@ -122,7 +125,6 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
   const [queryFilter, setQueryFilter] = useUrlState('rq', stringParam(''))
   const [sort, setSort] = useUrlState('sort', stringParam('started'))
   const [direction, setDirection] = useUrlState('order', stringParam('desc'))
-  const now = Math.floor(Date.now() / 1000)
   const metrics = new Map(views.map(v => {
     const ps = progress.get(v.key), p = ps ? sumProgress(ps) : null
     const deleted = v.run?.finished_ts ? v.run.deleted_objects : p?.deletes
@@ -202,7 +204,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
               const job = v.job
               const mode = r?.mode ?? (job?.mode === 'real' ? 'real' : 'dry')
               const state = viewState(v)
-              const live = viewLive(v)
+              const live = active(v)
               const deleted = deletedBuckets(v, Object.keys(planOf(v)?.file.buckets ?? {}))
               const unavailable = r ? runUndoUnavailable(r, deleted, softDelete, now) : null
               const unseen = r ? runUndoUnseen(r, deleted, softDelete, now) : null

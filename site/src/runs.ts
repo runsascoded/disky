@@ -149,6 +149,21 @@ export const viewState = (v: RunView): string => v.job?.stop_requested && v.job.
 
 export const viewLive = (v: RunView): boolean => LIVE_STATES.has(v.job?.state ?? '')
 
+/** How long after its job ends a run with no final totals in its row still counts as settling (`viewSettling`). */
+export const SETTLE_S = 600
+
+/** A run whose job has ended but whose row has no `finished_ts` yet: the jobs route records its totals as it lists the
+ *  ended job, after the page last read the row. Until they arrive it keeps its live display (progress, not zeros) and
+ *  the page keeps polling; past `SETTLE_S` after the job's end it stops waiting. */
+export function viewSettling(v: RunView, now: number): boolean {
+  if (!v.job || !v.run || v.run.finished_ts || viewLive(v) || !v.job.created) return false
+  const end = Date.parse(v.job.created) / 1000 + (v.job.run_secs ?? 0)
+  return now - end < SETTLE_S
+}
+
+/** A run the page treats as in progress: live, or settling. */
+export const viewActive = (v: RunView, now: number): boolean => viewLive(v) || viewSettling(v, now)
+
 /** A live run's selection total: what its row shows until the manifest says what it found. */
 export const expectedOf = (v: RunView): NonNullable<ExecJob['expected']> | null => (viewLive(v) ? v.job?.expected ?? null : null)
 

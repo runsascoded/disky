@@ -3,7 +3,7 @@ import { planDigest, realRun, type RunRow } from '../functions/_lib/plans'
 import {
   attemptOnly, itemsDigest, reusableDryRun, totalsLowerBound,
   commonBucketPrefix, deletedBuckets, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, expectedOf, joinRuns, localStamp, loggedOf, plannedOf, runControls,
-  progressEstimate, type ProgressFile, progressFromSamples, runDirHref, runFileHref, runFilesRel, runIdTime, runJobId, runLabel, sumProgress, undoStatus, verifyRun, viewBuckets, viewState,
+  progressEstimate, type ProgressFile, progressFromSamples, runDirHref, runFileHref, runFilesRel, runIdTime, runJobId, runLabel, SETTLE_S, sumProgress, undoStatus, verifyRun, viewActive, viewBuckets, viewSettling, viewState,
 } from './runs'
 
 const GCS_JOB = 'gcs-sweep-real-20260928-120000z'
@@ -23,6 +23,32 @@ describe('runJobId — the Batch job behind a run', () => {
       runJobId({ run_id: GCS_RUN, log_dir: 'gs://data/sweep/2026-09-27-p3/' }),
       runJobId({ run_id: GCS_RUN }),
     ]).toEqual([GCS_JOB, 'cw-sweep-dry-20260928-120000z', GCS_RUN, GCS_RUN])
+  })
+})
+
+describe('viewSettling — an ended job whose run row has no totals yet', () => {
+  // the job ended at 12:00:00Z + 2,700 s; its run row is the page's copy, read before the jobs route recorded the totals
+  const end = Date.parse('2026-09-28T12:00:00Z') / 1000 + 2700
+  const view = (r: Partial<DeletionRun>, j: Partial<ExecJob> | null) => ({
+    key: GCS_RUN, run: run(r), ...(j ? { job: job({ job_id: GCS_JOB, run_secs: 2700, ...j }) } : {}), ops: [],
+  })
+  it('settles after its job ends until its totals arrive, for SETTLE_S; a live, recorded or jobless run doesn\'t', () => {
+    const cases = [
+      view({ finished_ts: null, deleted_objects: 0 }, {}),
+      view({ finished_ts: null, deleted_objects: 0 }, { state: 'FAILED' }),
+      view({ finished_ts: 5000 }, {}),
+      view({ finished_ts: null }, { state: 'RUNNING' }),
+      view({ finished_ts: null }, null),
+      view({ finished_ts: null }, { created: undefined }),
+    ]
+    expect(cases.map(v => [viewSettling(v, end + 30), viewSettling(v, end + SETTLE_S), viewActive(v, end + SETTLE_S)])).toEqual([
+      [true, false, false],
+      [true, false, false],
+      [false, false, false],
+      [false, false, true],
+      [false, false, false],
+      [false, false, false],
+    ])
   })
 })
 

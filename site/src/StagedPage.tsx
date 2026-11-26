@@ -43,7 +43,7 @@ import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useScanDeletions, useStagedPlan, useUnstage } from './plans'
 import type { EmptiedBatch, StagedItem } from './plans'
 import { addBatchDeletion } from './batchDeletion'
-import { itemsDigest, joinRuns, LIVE_STATES, reusableDryRun, runFilesRel, viewBuckets, viewLive, type ProgressFile } from './runs'
+import { itemsDigest, joinRuns, LIVE_STATES, reusableDryRun, runFilesRel, viewBuckets, viewLive, viewSettling, type ProgressFile } from './runs'
 import { PrefixRecovery } from './PrefixRecovery'
 import { liveTargetOf, prefixExecution } from './prefixExecution'
 import type { PrefixExecution, RunItems } from './prefixExecution'
@@ -219,7 +219,8 @@ export function StagedPage() {
   const pendingJob = dispatched && !views.some(v => v.job?.job_id === dispatched && v.run) && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(dispatchedState ?? '') ? dispatched : null
   const pendingState = pendingJob ? dispatchedState : undefined
   const anyLive = !!pendingJob
-    || views.some(v => viewLive(v) || v.ops.some(o => LIVE_STATES.has(o.state)) || (v.run && !v.run.finished_ts && !v.job))
+    || views.some(v => viewLive(v) || v.ops.some(o => LIVE_STATES.has(o.state)) || (v.run && !v.run.finished_ts && !v.job)
+      || viewSettling(v, Math.floor(Date.now() / 1000)))
   useEffect(() => setLive(anyLive), [anyLive])
   const history = usePrefixHistory(plan?.id ?? null, anyLive)
   const liveRuns = views.filter(v => v.run?.mode === 'real' && v.run.plan_id === plan?.id && !v.run.finished_ts && (!v.job || viewLive(v)) && v.run.log_dir)
