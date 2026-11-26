@@ -234,3 +234,10 @@
 // "Run a scan"'s confirm (`RunScan.tsx`; a portal-less fixed modal, outside `.scans-page`'s rules for buttons)
 .run-scan-modal .token-actions .run-scan-go { border-color: var(--s1); font-weight: 600; }
 .run-scan-modal .token-actions .sr-cancel-go { border-color: var(--danger); color: var(--danger); }
+
+// A run's cost by stage → job (`RunCost`): stage rows carry the subtotal, job rows indent under them.
+.sr-cost {
+  .sr-cost-stage td { border-top: 1px solid var(--border, #8884); padding-top: 0.4em; }
+  .sr-cost-job { padding-left: 1.4em; }
+}
+.sr-cost-basis { text-decoration: underline dotted; cursor: help; }

@@ -116,7 +116,7 @@ def test_exact_job_estimate_and_report():
     got = job_estimate(PRICES, root, [hour_task()], NOW, "root")
     assert got == {
         "job": "root", "uid": "root-uid", "region": "us-east1", "association": "root", "component": "scan", "stage": None,
-        "upkeep": None, "scan_id": None, "state": "SUCCEEDED", "machine": "n2-highmem-16", "provisioning_model": "SPOT", "tasks": 1,
+        "step": None, "upkeep": None, "scan_id": None, "state": "SUCCEEDED", "machine": "n2-highmem-16", "provisioning_model": "SPOT", "tasks": 1,
         "attempts": 1, "task_seconds": 3600.0, "observed_vm_seconds": 3600.0, "observed_vms": 1,
         "configured_hourly_usd": 0.3, "estimated_compute_usd": 0.3,
         "disks_per_vm": [{"type": "pd-balanced", "size_gb": 100}], "warnings": [],

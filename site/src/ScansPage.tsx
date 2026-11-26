@@ -40,12 +40,15 @@ import { XRangeControls } from './XRangeControls'
 import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
 import { scanTime } from './scanSlug'
 import { StickyTable } from './stickyHead'
+import { costStages, type CostStage, type RunCostReport } from './runCost'
 import './scans.scss'
 
 type DetailResponse = Links & {
   run: ScanRun; secs: number | null; failed_at: string | null; phases: ScanRunPhase[]; spans: PhaseSpan[]
   outputs: OutputDelta[]; downstream: ScanRun[]; siblings: ScanRun[]; prev_scan: string | null; next_scan: string | null
   phase_issues: PhaseIssue[]; recoveries: PhaseRecovery[]; dag?: RunDagRow | null
+  /** The run's compute report by job (the `run-cost` step's), or null where none was written. */
+  cost?: RunCostReport | null
 }
 
 const useScanRun = (id: string, store: Store) => useQuery<DetailResponse, Error>({
@@ -786,6 +789,49 @@ function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; p
   </>)
 }
 
+const vmH = (h: number) => (h < 10 ? h.toFixed(2) : Math.round(h).toLocaleString('en-US'))
+
+/** A run's compute by stage → job (specs/scan-cost-by-stage.md), its store upkeep apart: an estimate at the profile's rates. */
+function RunCost({ report, project }: { report: RunCostReport; project: string | null }) {
+  const { stages, upkeep } = costStages(report)
+  const rows = (s: CostStage, apart = false) => [
+    <tr key={s.stage} className="sr-cost-stage">
+      <td colSpan={2}><b>{s.stage}</b>{apart && <span className="dim"> (not in the run’s total)</span>}</td>
+      <td className="num nb">{vmH(s.vmHours)}</td><td className="num nb">{usd(s.usd)}</td><td />
+    </tr>,
+    ...s.jobs.map(({ label, job }) => {
+      const href = project ? batchHref(project, job.region, job.job) : null
+      return (
+        <tr key={job.uid}>
+          <td className="sr-cost-job">{label}{job.state !== 'SUCCEEDED' && <span className="dim"> · {job.state.toLowerCase()}</span>}</td>
+          <td className="nb">{job.machine ?? <span className="dim">—</span>}{job.provisioning_model === 'SPOT' && <span className="dim"> spot</span>}</td>
+          <td className="num nb">{vmH(job.observed_vm_seconds / 3600)}</td>
+          <td className="num nb">{job.estimated_compute_usd == null
+            ? <Tooltip content={job.warnings.join('; ') || 'not priced'}><span className="dim">?</span></Tooltip>
+            : usd(job.estimated_compute_usd)}</td>
+          <td className="nb">{href ? <a href={href} target="_blank" rel="noreferrer"><code>{job.job}</code></a> : <code>{job.job}</code>}</td>
+        </tr>
+      )
+    }),
+  ]
+  return (<>
+    <p className="dim">
+      ~{usd(report.estimated_compute_usd)} of compute
+      {upkeep && <>, plus {usd(upkeep.usd)} of store upkeep (carries and folds serve every scan they merge, so they’re listed apart)</>}.
+      {' '}<Tooltip content={<>{report.exclusions.map(x => <div key={x}>Excluded: {x}</div>)}</>}><span className="sr-cost-basis">An estimate at list prices</span></Tooltip>
+      {' '}(spot at its multiplier), as of {fmtRunTime(Math.floor(Date.parse(report.as_of) / 1000))}.
+      {report.ongoing_jobs.length > 0 && <> Still running then: {report.ongoing_jobs.join(', ')}; the next run’s report rereads it.</>}
+      {report.legacy_inference && <> Jobs before run labels were matched by scan and time.</>}
+    </p>
+    <div className="runs-wrap">
+      <StickyTable className="runs sr-cost">
+        <thead><tr><th>stage · job</th><th>machine</th><th className="num">VM-h</th><th className="num">estimate</th><th>Batch job</th></tr></thead>
+        <tbody>{[...stages.flatMap(s => rows(s)), ...(upkeep ? rows(upkeep, true) : [])]}</tbody>
+      </StickyTable>
+    </div>
+  </>)
+}
+
 function OutputsTable({ outputs, meta }: { outputs: OutputDelta[]; meta: string | null }) {
   const { bytes, delta } = useBytes()
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
@@ -964,6 +1010,10 @@ export function ScanRunPage() {
         {!!tasks.length && <>
           <h3>Tasks</h3>
           <TasksTable tasks={tasks} run={r} project={d.project} />
+        </>}
+        {d.cost && <>
+          <h3>Cost</h3>
+          <RunCost report={d.cost} project={d.project} />
         </>}
         {!!d.recoveries?.length && <>
           <h3>Phase recovery attempts</h3>

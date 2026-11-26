@@ -189,6 +189,8 @@ def job_estimate(
         "association": association,
         "component": labels.get("component", "unknown"),
         "stage": labels.get("stage"),
+        # a Nextflow task's process (`base.config` `resourceLabels`): which pipeline step the task ran
+        "step": labels.get("step"),
         # a carry or fold (`append_runner.UPKEEP_LABEL`): the generation's upkeep, serving every scan it merges
         "upkeep": labels.get("upkeep"),
         "scan_id": labels.get("scan_id"),

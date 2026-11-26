@@ -1,7 +1,11 @@
 // /api/scan-runs[/:run_id] — what each scan job did (specs/done/scan-runs-ui.md):
 //
 //   GET /api/scan-runs[?store=<key>]          { configured, runs: RunSummary[], project, meta, dispatch }     viewer
-//   GET /api/scan-runs/:run_id[?store=<key>]  { ...ScanRunDetail, dag, project, meta }               viewer
+//   GET /api/scan-runs/:run_id[?store=<key>]  { ...ScanRunDetail, dag, cost, project, meta }         viewer
+//
+// `cost`: the run's compute report by job (`snapshots/cost/runs/<scan>/<run>.json`, the `run-cost` step's, read through
+// the served store; specs/scan-cost-by-stage.md), or null where none was written. Compute only: public where the
+// deployment's served copy is (sizes and per-scan cost may be).
 //
 // `emoji=1` (the scan-health thread's read, `dt_cloud.nominal`): each manual run's starter's Slack emoji
 // (`trigger_emoji`), asked of OA's broker (`OA_LOGIN_*`, the deployment's own client) and never stored; nothing for a
@@ -23,6 +27,8 @@ import { dispatchState, missingTable, STORE, submitJob } from '../../_lib/scanDi
 import { slackEmojiClient } from '@open-athena/auth/oidc'
 import { loadDag, loadScanRuns, scanRunDetail, scanRunsList, withoutStarters, withStarterEmoji } from '../../_lib/scanRuns.js'
 import { storeKey, withStore } from '../../_lib/stores.js'
+import { servedStore } from '../../_lib/index.js'
+import { RUN_COST_PREFIX, type RunCostReport, runCostKey } from '../../../src/runCost.js'
 
 /** One broker emoji client per isolate (it caches answers 10 min), per issuer + client. */
 const emojiClients = new Map<string, ReturnType<typeof slackEmojiClient>>()
@@ -67,5 +73,19 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; params?: 
   if (!rows) return json({ error: 'scan runs are not set up on this deployment (no scan_runs table)' }, 404)
   const d = scanRunDetail(rows, id, now)
   if (!d) return json({ error: `no scan run ${id}` }, 404)
-  return json({ ...d, dag: await loadDag(db, id), ...links }, 200, headers)
+  return json({ ...d, dag: await loadDag(db, id), cost: await loadRunCost(ctx.env, d.run.scan, d.run.run_id), ...links }, 200, headers)
+}
+
+/** The run's saved cost report, or null: none written (the step is off, or hasn't run), or no store to read it from. */
+export async function loadRunCost(env: Env, scan: string, runId: string): Promise<RunCostReport | null> {
+  const key = runCostKey(scan, runId)
+  if (!key) return null
+  try {
+    const { bytes } = await servedStore(env as Parameters<typeof servedStore>[0], [RUN_COST_PREFIX]).get(key)
+    return JSON.parse(new TextDecoder().decode(bytes)) as RunCostReport
+  } catch (e) {
+    if ((e as Error).name === 'NotFoundError') return null
+    console.warn(`scan-runs: ${key}: ${(e as Error).message}`)
+    return null
+  }
 }
