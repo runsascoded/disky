@@ -1076,10 +1076,11 @@ function AppContent() {
     const d = i < 0 ? undefined : (subtreeQs[i]?.data ?? coarseQs[i]?.data) as (MatchFields & { matchesCapped?: boolean; partialReason?: string; approximateReason?: string; rollup?: unknown }) | undefined
     return rowMatchesOf(d?.matched, matchedListOf(d))
   }, [fq, subStamp, tblPath, subtreePaths]) // eslint-disable-line react-hooks/exhaustive-deps
-  const onMapPath = (p: TreeNode[]) => drillTo(p.slice(1).map(n => n.name))
+  // Every in-page drill holds the section being read where it is on screen (`holdView`), as the crumbs do
+  const onMapPath = (p: TreeNode[]) => { holdView(); drillTo(p.slice(1).map(n => n.name)) }
   // Worklist rows / children table → drill the map to a prefix (the new path
   // starts at the top, where the map is).
-  const openPath = (segs: string[]) => drillTo(segs)
+  const openPath = (segs: string[]) => { holdView(); drillTo(segs) }
   // A server user-lens map is already just that user's bytes — nothing to dim.
   const effHl: Highlight | null = activeLens ? null : hl
 
@@ -1130,7 +1131,7 @@ function AppContent() {
       // Not Escape (that reads as "dismiss"; it stays for unpinning tips);
       // Backspace still pops the map too.
       defaultBindings: ['g u'],
-      handler: () => { const s = drillPath.split('/').filter(Boolean); if (s.length) drillTo(s.slice(0, -1)) },
+      handler: () => { const s = drillPath.split('/').filter(Boolean); if (s.length) { holdView(); drillTo(s.slice(0, -1)) } },
     },
     'owner:me': { label: 'Owner: my files', group: 'Scope', handler: () => setOP('me') },
     'owner:owned': { label: 'Owner: owned only', group: 'Scope', handler: () => setOP('owned') },
@@ -1828,7 +1829,7 @@ function AppContent() {
               <DiffTreemap model={diffModel} onDrill={rel => { holdDiff(); drillTo([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} hrefs={{ drill: rel => cellHrefs.drill([...diffSegs, ...rel]), open: rel => cellHrefs.open([...diffSegs, ...rel]) }} />
               {/* The map's tabular twin: the same cells as rows, sortable; a
                   row's name drills like its cell. */}
-              <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => { holdDiff(); openPath([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
+              <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => { holdDiff(); drillTo([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
               {diffStaleOther || diffStale
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
