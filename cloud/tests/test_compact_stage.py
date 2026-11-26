@@ -66,6 +66,29 @@ def test_compaction_submitted_not_waited_on():
     assert waits == [("compact", 0), ("compact", None)]
 
 
+def test_carries_and_folds_are_labelled_upkeep():
+    """A carry's job is labelled `upkeep: carry` and a fold's `upkeep: fold`, on the job and its allocation (what its VMs
+    bill under), so a run's cost lists them apart from its own (specs/scan-cost-by-stage.md)."""
+    seen: list[tuple] = []
+
+    def run(f: IvFake, compact: bool) -> None:
+        job = f.run_job
+
+        def spy(name: str, spec: dict, wait: float | None = None) -> None:
+            seen.append((spec["labels"]["stage"], spec["labels"].get("upkeep"), spec["allocationPolicy"]["labels"].get("upkeep")))
+            job(name, spec, wait)
+        f.run_job = spy
+        _two_l0(f)
+        r = f.runner(merge_wait=1800)
+        r.compact_now = compact
+        r.carries()
+
+    run(IvFake(["2026-08-03"], compact_level=1), True)
+    run(IvFake(["2026-08-03"], compact_level=None), False)
+    # the R2 copy of the carry's revision (`r2`, minutes) goes through the scan's own path, unlabelled
+    assert seen == [("compact", "fold", "fold"), ("merge", "carry", "carry"), ("r2", None, None)]
+
+
 def test_compact_jobs_run_long_on_standard_vms():
     """Both stores' `compact` job: STANDARD even on a spot profile (a reclaimed fold restarts from zero), no retries, and
     `LONG_RUN_S` rather than `MAX_RUN_S`; the interval store's folds `compact_jobs` sorts at a time (`-j`); `compact-r2` and

@@ -116,7 +116,7 @@ def test_exact_job_estimate_and_report():
     got = job_estimate(PRICES, root, [hour_task()], NOW, "root")
     assert got == {
         "job": "root", "uid": "root-uid", "region": "us-east1", "association": "root", "component": "scan", "stage": None,
-        "scan_id": None, "state": "SUCCEEDED", "machine": "n2-highmem-16", "provisioning_model": "SPOT", "tasks": 1,
+        "upkeep": None, "scan_id": None, "state": "SUCCEEDED", "machine": "n2-highmem-16", "provisioning_model": "SPOT", "tasks": 1,
         "attempts": 1, "task_seconds": 3600.0, "observed_vm_seconds": 3600.0, "observed_vms": 1,
         "configured_hourly_usd": 0.3, "estimated_compute_usd": 0.3,
         "disks_per_vm": [{"type": "pd-balanced", "size_gb": 100}], "warnings": [],
@@ -126,7 +126,7 @@ def test_exact_job_estimate_and_report():
         "scan": "2026-10-13T1300", "scan_run": "root-uid", "root_uid": "root-uid", "as_of": "2026-10-13T15:00:00+00:00",
         "estimate_basis": "union of observed task assignment intervals per VM, at configured profile rates",
         "legacy_inference": False, "ongoing_jobs": [], "unpriced_jobs": [], "estimated_compute_usd": 0.3,
-        "components": {"scan": 0.3}, "billing_filter": {"root_batch_job_uid": "root-uid", "child_scan_run": "root-uid"}, "jobs": [got],
+        "components": {"scan": 0.3}, "upkeep_usd": {}, "billing_filter": {"root_batch_job_uid": "root-uid", "child_scan_run": "root-uid"}, "jobs": [got],
     }
     assert render_report(doc).splitlines() == [
         "2026-10-13T1300 · root-uid", "Observed compute estimate (not billed cost):",
@@ -137,6 +137,21 @@ def test_exact_job_estimate_and_report():
         "Excluded: boot disks and local SSDs.",
         "Excluded: network transfers, storage operations, and persistent index storage.",
         "Excluded: billing credits, negotiated discounts, and actual Spot prices.",
+    ]
+
+
+def test_upkeep_is_listed_apart_from_the_runs_total():
+    """A carry or fold the run submitted (`upkeep` label) is priced and listed, but serves every scan it merges: it's in
+    `upkeep_usd`, not in the run's total or components."""
+    root = job()
+    fold = job("sn-compact", "fold-uid", {"scan_run": "root-uid", "component": "static-names", "stage": "compact", "upkeep": "fold"})
+    doc = report(PRICES, root, "2026-10-13T1300", [(root, "root"), (fold, "scan_run_label")],
+                 {"root-uid": [hour_task()], "fold-uid": [hour_task()]}, NOW)
+    assert (doc["estimated_compute_usd"], doc["components"], doc["upkeep_usd"]) == (0.3, {"scan": 0.3}, {"fold": 0.3})
+    assert render_report(doc).splitlines()[2:5] == [
+        "  scan/-  SUCCEEDED  n2-highmem-16  1.000 VM-h  $0.3000  root",
+        "  static-names/compact (fold, not in the total)  SUCCEEDED  n2-highmem-16  1.000 VM-h  $0.3000  sn-compact",
+        "Total priced observed compute: $0.3000",
     ]
 
 

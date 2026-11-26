@@ -188,6 +188,8 @@ def job_estimate(
         "association": association,
         "component": labels.get("component", "unknown"),
         "stage": labels.get("stage"),
+        # a carry or fold (`append_runner.UPKEEP_LABEL`): the generation's upkeep, serving every scan it merges
+        "upkeep": labels.get("upkeep"),
         "scan_id": labels.get("scan_id"),
         "state": job["status"]["state"],
         "machine": machine,
@@ -212,9 +214,13 @@ def report(
 ) -> dict:
     rows = [job_estimate(profile, job, tasks[job["uid"]], now, association) for job, association in jobs]
     components: dict[str, float] = defaultdict(float)
+    upkeep: dict[str, float] = defaultdict(float)
     for row in rows:
         if row["estimated_compute_usd"] is not None:
-            components[row["component"]] += row["estimated_compute_usd"]
+            if row["upkeep"]:
+                upkeep[row["upkeep"]] += row["estimated_compute_usd"]
+            else:
+                components[row["component"]] += row["estimated_compute_usd"]
     return {
         "scan": scan,
         "scan_run": labels_of(root).get("scan_run") or root["uid"],
@@ -227,6 +233,8 @@ def report(
         "unpriced_jobs": [r["job"] for r in rows if r["estimated_compute_usd"] is None],
         "estimated_compute_usd": round(sum(components.values()), 4),
         "components": {k: round(v, 4) for k, v in sorted(components.items())},
+        # carries and folds the run submitted: the generation's, not in the run's total (specs/scan-cost-by-stage.md)
+        "upkeep_usd": {k: round(v, 4) for k, v in sorted(upkeep.items())},
         "billing_filter": {"root_batch_job_uid": root["uid"], "child_scan_run": labels_of(root).get("scan_run") or root["uid"]},
         "jobs": rows,
     }
@@ -236,7 +244,7 @@ def render_report(doc: Mapping) -> str:
     lines = [f"{doc['scan']} · {doc['scan_run']}", "Observed compute estimate (not billed cost):"]
     for row in doc["jobs"]:
         amount = "unknown" if row["estimated_compute_usd"] is None else f"${row['estimated_compute_usd']:.4f}"
-        lines.append(f"  {row['component']}/{row['stage'] or '-'}  {row['state']}  {row['machine']}  {row['observed_vm_seconds'] / 3600:.3f} VM-h  {amount}  {row['job']}")
+        lines.append(f"  {row['component']}/{row['stage'] or '-'}{f' ({row["upkeep"]}, not in the total)' if row['upkeep'] else ''}  {row['state']}  {row['machine']}  {row['observed_vm_seconds'] / 3600:.3f} VM-h  {amount}  {row['job']}")
         lines.extend(f"    WARNING: {w}" for w in row["warnings"])
     lines.append(f"Total priced observed compute: ${doc['estimated_compute_usd']:.4f}")
     if doc["legacy_inference"]:

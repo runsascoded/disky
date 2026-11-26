@@ -2091,8 +2091,10 @@ def finish_cmd(dag_path, dag_engine, error, cost_labels, rc, profile_path, d1, d
 
         try:
             labels = dict(l.split("=", 1) for l in cost_labels)
-            # the run's own job is priced as the run's (`own`): never again as one of its labelled jobs
-            jobs = [x for x in bf.fetch_jobs(j.profile.project or "", j.profile.regions) if not run_id or x.get("uid") != run_id]
+            # the run's own job is priced as the run's (`own`): never again as one of its labelled jobs; carries and folds it
+            # submitted (`upkeep`) are the generation's, not the run's (specs/scan-cost-by-stage.md)
+            jobs = [x for x in bf.fetch_jobs(j.profile.project or "", j.profile.regions)
+                    if (not run_id or x.get("uid") != run_id) and not (x.get("labels") or {}).get("upkeep")]
             extra = labelled_cost(j.profile, jobs, labels, _now())
         except Exception as e:  # noqa: BLE001 — the cost is an estimate; the record must still finish
             report_failure(e)

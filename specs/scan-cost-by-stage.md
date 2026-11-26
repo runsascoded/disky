@@ -29,8 +29,8 @@ The common hierarchy (Azure Pipelines: pipeline → stage → job → step; Jenk
 1. Every job a run causes carries its `scan_run` (and `scan_id`):
    - the scan head passes `SCAN_RUN_ID` (its own Batch uid, or the one it was given) into every Nextflow task's env, and `scan_run` into `process.resourceLabels` beside `nf-session` and `step`;
    - submitters inside a task already forward `$SCAN_RUN_ID` (`job/static-names.sh` `task_env`, `cost_labels.label_batch_spec`), so the static-names jobs get it with no change of their own;
-   - static-names jobs label their kind as `job` (`append`, `drill`, …) and their stage as `stage: static-names`; the old `stage` label is read as `job` for jobs from before.
-2. **Store upkeep is the generation's, not the scan's.** A carry or a fold serves every scan it merges (cw's pending fold: 49), so it carries `gen` and `upkeep: carry|fold` beside the submitting run's `scan_run`; /scans lists it under that run as its own line, excluded from the run's total and trended separately.
+   - the labels keep their names: a job's `stage` label (static names' `append`, `drill`, …; `scan_tasks`' step) is its *job* kind in these terms, and its `purpose` / `component` (`static-names`, `interval-store`, `scan`) its stage. The readers (`scan_cost`, /scans) map them; renaming the labels would break the billing export's history and every filter on them for no new information.
+2. **Store upkeep is the generation's, not the scan's.** A carry or a fold serves every scan it merges (cw's pending fold: 49), so it carries `gen` and `upkeep: carry|fold` (`append_runner.UPKEEP_LABEL`, on the job and its allocation) beside the submitting run's `scan_run`; `scan_cost.report` lists it as `upkeep_usd`, outside the run's total, and `finish -l` leaves it out of the run's recorded cost. The R2 copy of a carry's revision (minutes) stays the run's.
 3. `scan_cost.select_jobs`: by `scan_run` (as now); the `legacy` path stays for jobs from before.
 
 ## Estimate, then billed
@@ -46,7 +46,7 @@ The common hierarchy (Azure Pipelines: pipeline → stage → job → step; Jenk
 
 ## Order
 
-1. Attribution (head env + labels, static-names `stage`/`job`/`upkeep` labels), with `scan_cost` and `labelled_cost` reading `scan_run`; /scans' totals then include the static-names jobs. Tests: a fake head's task env and labels; `select_jobs` over labelled jobs, upkeep apart.
+1. Attribution: the head's task env and labels (done: `scan_run`, `SCAN_RUN_ID`; `finish -l scan_run=`), then `upkeep` on carries and folds, apart in `scan_cost.report` and `finish`.
 2. The run detail's stage → job rows from the estimate.
 3. `gcp-cost`'s billed snapshot and the site reading it.
 4. The per-stage chart; the UI's wording (stage, job, step; no "phase").
