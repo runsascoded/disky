@@ -463,6 +463,22 @@ def test_compact_now_skips_the_due_carries():
         ["merge: compaction forced (-K): it folds every run, so the due carries are skipped (1 merge)"])
 
 
+def test_a_due_compaction_skips_the_due_carries():
+    """A compaction due under the policy with a carry also due: the compaction folds every run, so no carry is submitted.
+    Carries first, a scan step's detached carry (`merge_wait` 0) left the merge stage before the compaction (gcs,
+    2026-11-25 and 11-26: an L4 carry each run, and the level 5 fold never submitted)."""
+    f = IvFake(["2026-08-03"], compact_level=2)
+    runs = [{"key": "deltas/2026-08-02_2026-08-03", "first": "2026-08-02", "last": "2026-08-03", "level": 1, "scans": ["2026-08-02", "2026-08-03"]},
+            *({"key": f"deltas/{d}", "first": d, "last": d, "level": 0, "scans": [d]} for d in ("2026-08-04", "2026-08-05"))]
+    f.keys[f"{G1}/manifests/2026-08-05.json"] = {"date": "2026-08-05", "runs": runs}
+    r = f.runner(merge_wait=0)
+    r.carries()
+    assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
+        [("compact", f"compact -C level:2 -r -j 1 -M 90GB -p 16 {COMMON} -m /gcs/data")],
+        ["merge: level 2 is due: compact into a new base generation (carries stop below it)",
+         "merge: the due compaction folds every run, so the due carries are skipped (1 merge)"])
+
+
 def test_defer_compaction_reports_it_and_submits_nothing():
     """`-D` (a scan's step with `compact_cmd`): a due compaction is reported (`deferred`, its reason) and not submitted, so
     the scan's task never waits out the fold; the caller runs `runs merge` apart."""

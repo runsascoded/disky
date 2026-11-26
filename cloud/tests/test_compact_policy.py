@@ -158,14 +158,18 @@ def _l(scans: list[str], level: int) -> dict:
 ])
 def test_runner_merge_stage_names_the_rule(compact, log):
     """Under `every` / `geometric` the carries are unbounded (`carry -L none`: two L1s carry into an L2), and the stage
-    names the rule that fired."""
+    names the rule that fired; a due compaction folds every run, so it skips the carry."""
     f = IvFake(["2026-08-03"], compact=compact)
     runs = [_merged(["2026-08-04", "2026-08-05"], 1), _merged(["2026-08-06", "2026-08-07"], 1)]
     f.keys[f"{G1}/manifests/2026-08-07.json"] = {"date": "2026-08-07", "runs": runs}
     r = f.runner(merge_wait=None)
     r.carries()
-    assert [c for c in f.calls() if c[0] == "merge"] == [("merge", "carry -L none -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data")]
-    assert f.stack("2026-08-07.m001.json") == [("deltas/2026-08-04_2026-08-07", 2)]
+    if log:
+        assert [c[0] for c in f.calls()] == ["compact"]
+    else:
+        assert f.calls() == [("merge", "carry -L none -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data"),
+                             ("r2", "r2 -d 2026-08-07 -m 2026-08-07.m001 -b data -g g1 -R g0 -S scr")]
+        assert f.stack("2026-08-07.m001.json") == [("deltas/2026-08-04_2026-08-07", 2)]
     assert ([m for m in f.log if m.startswith("merge: compaction")], r.compaction) == (
         ([log], log.split(" (", 1)[1].rsplit("): compact", 1)[0]) if log else ([], None))
 
