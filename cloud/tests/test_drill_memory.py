@@ -284,16 +284,19 @@ def test_chunk_memory_names_each_holder_and_what_releasing_it_gave_back(monkeypa
     }
 
 
-@pytest.mark.parametrize("jemalloc,allocator,unattributed", [(True, "jemalloc", 35), (False, "glibc", 55)])
-def test_memory_breakdown_subtracts_duckdb_only_outside_glibc(monkeypatch, jemalloc, allocator, unattributed):
-    """DuckDB's buffer bytes are subtracted from the unattributed RSS only when DuckDB allocates through its own jemalloc;
-    through glibc they are already in glibc's in-use bytes. The reads' caches are listed, not subtracted (decoded groups
-    are pyarrow's bytes, raw bytes glibc's)."""
+@pytest.mark.parametrize("jemalloc,duck,allocator,unattributed", [
+    (True, 20, "jemalloc", 35), (False, 20, "glibc", 55), (False, 40, "outside glibc", 15),
+])
+def test_memory_breakdown_subtracts_duckdb_only_outside_glibc(monkeypatch, jemalloc, duck, allocator, unattributed):
+    """DuckDB's buffer bytes are subtracted from the unattributed RSS only when they're outside glibc's heap: DuckDB says it
+    allocates through its own jemalloc, or glibc's in-use bytes (30) couldn't hold them (cw 11-26T1203: 95 GiB of DuckDB's
+    against 61 of glibc's, jemalloc reading not loaded). Within glibc's they are already counted. The reads' caches are
+    listed, not subtracted (decoded groups are pyarrow's bytes, raw bytes glibc's)."""
     con = _fixed(monkeypatch, iter([100]), jemalloc)
-    monkeypatch.setattr(sd, "duckdb_resources", lambda con: {"duckdb_bytes": 20, "duckdb_spill_bytes": 3})
+    monkeypatch.setattr(sd, "duckdb_resources", lambda con: {"duckdb_bytes": duck, "duckdb_spill_bytes": 3})
     reads = SimpleNamespace(cache_stats=lambda: {"decoded_groups": 2, "decoded_bytes": 4, "index_groups": 1, "index_spans": 1, "raw_bytes": 6})
     assert sd.memory_breakdown(con, reads) == {
-        "rss_anon_bytes": 100, "duckdb_bytes": 20, "duckdb_spill_bytes": 3, "duckdb_allocator": allocator, "duckdb_limit": "1.0 GiB", **HEAP,
+        "rss_anon_bytes": 100, "duckdb_bytes": duck, "duckdb_spill_bytes": 3, "duckdb_allocator": allocator, "duckdb_limit": "1.0 GiB", **HEAP,
         "decoded_groups": 2, "decoded_bytes": 4, "index_groups": 1, "index_spans": 1, "raw_bytes": 6, "unattributed_bytes": unattributed,
     }
 

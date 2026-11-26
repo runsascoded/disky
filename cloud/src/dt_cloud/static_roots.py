@@ -566,12 +566,16 @@ class GroupFile:
 
     def footer(self, file: str) -> tuple[int, bytes]:
         if file not in self.foot:
-            size = self.size_of(file)
-            tail = self.fetch(file, size - 8, size)
-            flen = int.from_bytes(tail[:4], "little")
-            data = self.fetch(file, max(0, size - max(8 + flen, 1 << 16)), size)  # pyarrow reads up to 64 KB of tail
-            self.foot[file] = (size - len(data), data)
+            self.foot[file] = self._fetch_footer(file)
         return self.foot[file]
+
+    def _fetch_footer(self, file: str) -> tuple[int, bytes]:
+        """`file`'s tail holding its footer, `(offset, bytes)`: two ranged reads, nothing cached."""
+        size = self.size_of(file)
+        tail = self.fetch(file, size - 8, size)
+        flen = int.from_bytes(tail[:4], "little")
+        data = self.fetch(file, max(0, size - max(8 + flen, 1 << 16)), size)  # pyarrow reads up to 64 KB of tail
+        return size - len(data), data
 
     def read(self, lo, hi, groups: list[dict] | None = None) -> tuple[list[dict], dict]:
         if groups is None:

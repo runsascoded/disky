@@ -45,7 +45,8 @@ def memory_snapshot(
 
 
 #: A stage's measured memory, logged on its own line only (`ResourceMonitor.update`), with every `*_bytes` field.
-MEMORY_FIELDS = frozenset({"py_blocks", "duckdb_allocator", "duckdb_limit", "decoded_groups", "index_groups", "index_spans", "arrow_pool"})
+MEMORY_FIELDS = frozenset({"py_blocks", "duckdb_allocator", "duckdb_limit", "decoded_groups", "index_groups", "index_spans", "arrow_pool",
+                           "footer_files", "footer_refetches", "footer_evictions", "meta_reparses", "meta_parse_factor", "index_reloads"})
 
 
 def _memory_field(k: str) -> bool:
