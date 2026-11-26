@@ -387,6 +387,15 @@ def alert_body(month: Month, cfg: DigestConfig) -> str | None:
     return f"{ALERT_MARK} **Quota alert**: {' · '.join(over)} · _as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_"
 
 
+def resolved_note(month: Month, cfg: DigestConfig) -> str:
+    """The line a resolved quota alert gains (`digest.resolved_alert`): the scan it resolved at, and why (every quota under
+    ``cfg.alert_pct``, or the month closed: its next thread carries any alert)."""
+    last = month.rows[-1] if month.rows else None
+    when = f" as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z" if last else ""
+    why = "the month closed; its next thread carries any alert" if month.closed else f"every quota is back under {cfg.alert_pct:g}%"
+    return f":white_check_mark: Resolved{when}: {why}."
+
+
 @dataclass(frozen=True)
 class Scan:
     """One scan's row: total (TiB, or the config's `units`) + object count, with deltas vs. the previous
@@ -715,6 +724,9 @@ class QuotaTemplate:
 
     def alert(self, month: Month) -> str | None:
         return alert_body(month, self.cfg)
+
+    def alert_resolved(self, month: Month) -> str:
+        return resolved_note(month, self.cfg)
 
     def provisional(self, month: Month, variant: str) -> Unit | None:
         """The still-open day's provisional reply (``sender`` only), else None."""

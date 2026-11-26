@@ -223,6 +223,9 @@ class CostTemplate:
         """A day's reply is posted once its sender is known: never provisional."""
         return None
 
+    def alert_resolved(self, data: Month) -> str:
+        return ":white_check_mark: Resolved."
+
     def alert(self, data: Month) -> None:
         """No quotas: never a quota alert."""
         return None

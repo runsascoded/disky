@@ -1204,10 +1204,10 @@ def test_live_settings_override_the_file(monkeypatch):
     assert str(e.value) == "digest settings quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue', 'arrow-chip')"
 
 
-def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):
+def test_quota_alert_is_broadcast_while_over_and_struck_through_once_under(tmp_path: Path):
     """`alert_pct`: a quota at or over it marks the day's clause `:warning:`, and the thread gets one alert reply also
-    sent to the channel (`broadcast`); it is deleted once every quota is back under (Slack can't un-broadcast), and a
-    later crossing posts a new one. RNO2A, 2026-10-29: 98 of 100 Ti for two days, no quota shown, writes suspended."""
+    sent to the channel (`broadcast`); once every quota is back under it is struck through with when it resolved (Slack
+    can't un-broadcast, and deleting it broke every quote and forward of it), and a later crossing posts a new one. RNO2A, 2026-10-29: 98 of 100 Ti for two days, no quota shown, writes suspended."""
     tpl = E.template(replace(CFG, alert_pct=78.3))  # main: 78.0% → 78.35% → 78.24% → 78.6% of 1P
     root = tmp_path / "snapshots" / "cw"
     u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
@@ -1236,7 +1236,8 @@ def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Pa
     assert state["alert"] == {"ts": "m3", "body": over}
 
     state, calls = step(SEPT[2:3])
-    assert (calls[1:], "alert" in state) == ([("delete", "m3")], False)
+    # resolved: the alert stays (a quote or forward of it still opens), struck through, with the scan it resolved at
+    assert (calls[1:], "alert" in state) == ([("edit", "m3", f"~{over}~\n:white_check_mark: Resolved as of 9/2 00:00Z: every quota is back under 78.3%.")], False)
 
     state, calls = step(SEPT[3:4])
     over = alert("26090212", "78.6% of 1P (195.0 Ti free)", "9/2 12:00")
@@ -1250,7 +1251,7 @@ def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Pa
 
 def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp_path: Path):
     """A quota still over when the month ends: the scheduled converge (`converge_slack_now`) closes the old month,
-    whose alert counts as resolved there (deleted), and the new month's thread posts the one alert: never both."""
+    whose alert counts as resolved there (struck through), and the new month's thread posts the one alert: never both."""
     tpl = E.template(replace(CFG, alert_pct=78.3))
     root = tmp_path / "snapshots" / "cw"
     _publish(root, LEAD + SEPT)
@@ -1262,9 +1263,12 @@ def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp
     fake.calls.clear()
     oct_ = E.converge_slack_now(tpl, str(root), date(2026, 10, 1), fake, "C1", "sender")
     body = f":warning: **Quota alert**: [main]({SITE}/main-data?d=261001#over-time): 78.7% of 1P (194.0 Ti free) · _as of 10/1 12:00Z_"
-    # the alert calls alone: September's deleted, October's posted under October's OP (m5; its reply is m6)
-    assert [c for c in fake.calls if c[0] == "delete" or c[-1] == "broadcast"] == [
-        ("delete", "m4"), ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
+    # the alert calls alone: September's struck through as resolved by the month's close, October's posted under
+    # October's OP (m5; its reply is m6)
+    sept_body = sept["alert"]["body"]
+    assert [c for c in fake.calls if c[:2] == ("edit", "m4") or c[-1] == "broadcast"] == [
+        ("edit", "m4", f"~{sept_body}~\n:white_check_mark: Resolved as of 9/2 12:00Z: the month closed; its next thread carries any alert."),
+        ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
     assert ("alert" in E.load_state(E.state_path(str(root), SEP, CFG.state.format(channel="C1", variant="sender"))), oct_["alert"]) == (
         False, {"ts": "m7", "body": body})
 
@@ -1394,8 +1398,9 @@ def test_closing_last_months_thread_leaves_the_pin_alone(tmp_path: Path):
     _publish(root, [("2026-10-01T1200", _meta(716))])  # still over quota: September's alert is closed by October's run
     fake.calls.clear()
     oct_ = E.converge_slack_now(tpl, str(root), OCT, fake, "C1", "sender")
-    assert [c for c in fake.calls if c[0] in ("api", "delete")] == [
-        ("delete", "m4"),
+    # September's alert stays, struck through as resolved by the month's close (never deleted: quotes of it keep opening)
+    assert [c for c in fake.calls if c[0] in ("api", "delete") or c[:2] == ("edit", "m4")] == [
+        ("edit", "m4", f"~{sept['alert']['body']}~\n:white_check_mark: Resolved as of 9/2 12:00Z: the month closed; its next thread carries any alert."),
         ("api", "pins.add", {"channel": "C1", "timestamp": "m5"}),
         ("api", "pins.remove", {"channel": "C1", "timestamp": "m1"}),
     ]

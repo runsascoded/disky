@@ -140,8 +140,8 @@ class DigestConfig:
     day's reply scan lands (see `digest_quota`). ``alert_pct`` (quota): a quota at
     or over this percent gets a `:warning:` in the daily replies, and the
     month's thread one alert reply also sent to the channel (Slack
-    `reply_broadcast`), edited as its numbers move and deleted once every quota
-    is back under; None: neither. ``quota_marks`` (quota replies): `warning` (the default) keeps the
+    `reply_broadcast`), edited as its numbers move and struck through once every
+    quota is back under (`resolved_alert`: it stays, so a quote or forward of it still opens); None: neither. ``quota_marks`` (quota replies): `warning` (the default) keeps the
     clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
     marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
     points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md);
@@ -618,6 +618,7 @@ class Template(Protocol):
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
     def provisional(self, data: Any, variant: str) -> Unit | None: ...
     def alert(self, data: Any) -> str | None: ...
+    def alert_resolved(self, data: Any) -> str: ...
     def render_plot(self, data: Any, month: dt.date, out: Path, root: str | None = None) -> None: ...
 
 
@@ -1173,6 +1174,13 @@ def link_prev(cfg: DigestConfig, root: str, month: dt.date, client, channel: str
         _err(f"digest: WARN could not link {prev:%Y-%m}'s OP to {month:%Y-%m}'s: {type(e).__name__}: {e} (retried next run)")
 
 
+def resolved_alert(body: str, note: str) -> str:
+    """A resolved quota alert's text: its last body struck through (Slack's `~…~`, a line at a time: a strike can't span
+    lines), then `note` (when it resolved)."""
+    struck = "\n".join(f"~{ln}~" if ln.strip() else ln for ln in body.split("\n"))
+    return f"{struck}\n{note}"
+
+
 def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False, current: bool = False) -> dict:
     """Converge the month's Slack thread: render+host the plot, post/edit the
     OP, then per reply unit post it if none exists — or, on an edited variant,
@@ -1278,18 +1286,20 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     if not provs:
         state.pop("provisional")
 
-    # The quota alert: one reply, also in the channel, while any quota is at or over `alert_pct`; Slack can't take a
-    # reply back out of the channel, so a resolved alert is deleted (its days' replies keep their `:warning:`s)
+    # The quota alert: one reply, also in the channel, while any quota is at or over `alert_pct`. Slack can't take a
+    # reply back out of the channel, and a deleted one breaks every quote and forward of it ("This link opens a message
+    # … that's been deleted"), so a resolved alert stays, struck through, with when it resolved (`resolved_alert`); a
+    # later alert is a new reply.
     text, have = tpl.alert(data), state.get("alert")
     if text is None and have is not None:
         try:
-            client.delete(have["ts"], orphans_ok=True)
+            client.edit(have["ts"], resolved_alert(have["body"], tpl.alert_resolved(data)))
         except Exception as e:  # noqa: BLE001 — the next run retries; a lingering alert names its scan
-            _err(f"digest: WARN could not delete the quota alert: {e}")
+            _err(f"digest: WARN could not mark the quota alert resolved: {e}")
         else:
             del state["alert"]
             save_state(path, state)
-            _err("digest: deleted the quota alert (every quota back under, or its month closed)")
+            _err("digest: marked the quota alert resolved (every quota back under, or its month closed)")
     elif text is not None and have is None:
         rm = client.post(text, thread_id=op_ts, broadcast=True, username=f"{cfg.title}: quota alert", icon_emoji=ALERT_ICON)
         state["alert"] = {"ts": rm.id, "body": text}
