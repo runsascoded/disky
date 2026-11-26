@@ -1745,6 +1745,16 @@ def test_a_month_posts_lost_response_is_recovered_not_posted_again():
     assert (m.saved['months']['2026-11']['failures'], m.slack.messages_by_id['4.0']['broadcast'], 'pending' in m.saved) == ({'r1': '4.0'}, True, False)
 
 
+def test_a_replys_sections_are_expanded_so_slack_shows_every_line():
+    """Slack folds a section after about five lines ("Show more"); each of a reply's sections is `expand`ed."""
+    lines = [f'line {i:02d} ' + 'x' * 60 for i in range(48)]
+    blocks = N.expanded_sections('\n'.join(lines))
+    assert blocks == [
+        {'type': 'section', 'text': {'type': 'mrkdwn', 'text': '\n'.join(lines[:43])}, 'expand': True},
+        {'type': 'section', 'text': {'type': 'mrkdwn', 'text': '\n'.join(lines[43:])}, 'expand': True},
+    ]
+
+
 def test_a_weeks_runs_reply_past_a_sections_limit_is_one_message_of_several_sections():
     """cw's 4 runs a day pass a `section`'s 3,000 characters within a week: one reply of lines, which thrds'
     `section_blocks(lines=True)` splits between lines into several sections of the one message."""

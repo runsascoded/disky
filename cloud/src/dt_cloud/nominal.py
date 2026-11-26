@@ -464,6 +464,17 @@ def running(cfg: Config, row: dict) -> str:
 OUTCOME_WORD = {'failed': 'failed', 'issues': 'phase issues', 'cancelled': 'cancelled'}
 
 
+def expanded_sections(wire: str) -> list[dict]:
+    """`wire` (Slack mrkdwn) as `section` blocks: thrds' `section_blocks`, one block, else split at its blank lines, and a
+    paragraph past the limit at its line breaks (`lines=True`: nominal keeps its bodies and only ever writes them whole),
+    into blocks of at most 3,000 characters each. Each is `expand`ed: Slack otherwise folds a section after about five
+    lines behind "Show more", so a week's runs reply showed its first five runs, then the next section's first five
+    (Ryan, 2026-11-26)."""
+    from thrds.slack import section_blocks
+
+    return [{**b, 'expand': True} for b in section_blocks(wire, lines=True)]
+
+
 def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
     """A run reply's sender (Ryan, 2026-11-22): its line's facts as the name, `<stamp> · <duration> · <outcome>`
     (`OUTCOME_WORD`; a live run's `<stamp> · running`), clipped (…) to Slack's 80 characters; its icon the outcome, with
@@ -807,16 +818,13 @@ class Slack:
 
     def _sections(self, body: str) -> dict:
         """`body` (markdown, converted as thrds converts a post, a missing vocabulary emoji as its stock one) as one
-        message's `section` blocks: thrds' `section_blocks`, one block, else split at its blank lines, and a paragraph
-        past the limit at its line breaks (`lines=True`: nominal keeps its bodies and only ever writes them whole), into
-        blocks of at most 3,000 characters each; the whole text as the notification fallback."""
+        message's `section` blocks (`expanded_sections`); the whole text as the notification fallback."""
         from thrds.mrkdwn import to_slack
-        from thrds.slack import section_blocks
 
         wire = to_slack(V.fallback(body, self.have))
         unfurl = not getattr(self.client, '_suppress_unfurls', False)
         return {'channel': self.client.channel, 'text': wire, 'unfurl_links': unfurl, 'unfurl_media': unfurl,
-                'blocks': section_blocks(wire, lines=True)}
+                'blocks': expanded_sections(wire)}
 
     def post_sections(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None,
                       broadcast: bool = False) -> str:
