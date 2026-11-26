@@ -60,8 +60,13 @@ def sweep_bucket() -> str:
     from .deploy import require
     return require("SWEEP_BUCKET", "CW_BUCKET", what="the bucket a sweep deletes from")
 
-# S3 `delete_objects` accepts up to 1000 keys per call.
-DELETE_BATCH = 1000
+#: Keys a `delete_objects` call carries (S3 takes up to 1000). CAIOS checks a batch's per-item ETags one after another,
+#: ~35 ms an item: a 1000-key call took 30-40 s, near botocore's 60 s read timeout, so calls are smaller and more of them
+#: run at once (`DELETE_WORKERS`). cw's 2026-11-26 real run: 191,670 objects at 95/s with 1000 × 4.
+DELETE_BATCH = 250
+#: `DeleteObjects` calls in flight (`execute_plan`'s default; `plan-sweep execute -w`): the throughput lever, since a
+#: call's items are checked serially. The S3 client's connection pool is sized to match (`s3_client`).
+DELETE_WORKERS = 32
 
 #: Endpoint host suffixes of stores whose `DeleteObjects` ignores the per-item `ETag` and deletes anyway, with no error:
 #: R2 (the owned canary, 2026-11-26; specs/delete-preconditions.md §1). `execute_plan` deletes only in that form, so a
@@ -150,7 +155,7 @@ def load_plan(path: str | Path) -> Plan:
     return plan
 
 
-def s3_client(endpoint: str | None = None) -> "S3Client":
+def s3_client(endpoint: str | None = None, pool: int = DELETE_WORKERS + 4) -> "S3Client":
     """boto3 S3 client for the sweep's store (`endpoint`, default
     `sweep_endpoint()`). Creds come from the env (Secret Manager on Batch:
     AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)."""
@@ -161,7 +166,9 @@ def s3_client(endpoint: str | None = None) -> "S3Client":
         "s3",
         endpoint_url=endpoint or sweep_endpoint(),
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-        config=Config(s3={"addressing_style": "virtual"}, retries={"max_attempts": 10, "mode": "standard"}),
+        # `pool`: one connection per delete call in flight (botocore's default 10 would queue the rest)
+        config=Config(s3={"addressing_style": "virtual"}, retries={"max_attempts": 10, "mode": "standard"},
+                      max_pool_connections=pool, read_timeout=120),
     )
 
 
@@ -368,7 +375,7 @@ def execute_plan(
     *,
     for_real: bool = False,
     client: "S3Client | None" = None,
-    delete_workers: int = 4,
+    delete_workers: int = DELETE_WORKERS,
     mtime_tol: int = 1,
     min_soft_delete_days: int = 0,
     progress_every: float = 30.0,
@@ -407,7 +414,7 @@ def execute_plan(
     objects = set(plan_summary.get("approved_objects", []))
     roots = listing_roots(plan_summary)
 
-    client = client or s3_client()
+    client = client or s3_client(pool=delete_workers + 4)
     if for_real and (host := _endpoint_host(client)).endswith(BATCH_ETAG_IGNORED):
         raise SweepError(f"not deleting: {host}'s DeleteObjects ignores each item's ETag precondition, so a changed object "
                          "would be deleted (specs/delete-preconditions.md)")

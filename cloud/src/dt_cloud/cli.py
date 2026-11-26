@@ -1777,8 +1777,9 @@ def plan_sweep_manifest(date: str, interval_store: str | None, l2_path: str | No
 @plan_sweep.command("execute")
 @option("-r", "--for-real", is_flag=True, help="Actually delete (may be permanent); default is a dry run")
 @option("-s", "--min-soft-delete-days", default=0, type=IntRange(0, 90), help="Refuse --for-real on a bucket retaining deleted data for less (versioning + a noncurrent rule); 0 requires nothing")
+@option("-w", "--delete-workers", default=None, type=IntRange(1, 128), help="DeleteObjects calls in flight (default `sweep.DELETE_WORKERS`)")
 @argument("run_dir")
-def plan_sweep_execute(for_real: bool, min_soft_delete_days: int, run_dir: str) -> None:
+def plan_sweep_execute(for_real: bool, min_soft_delete_days: int, delete_workers: int | None, run_dir: str) -> None:
     """Execute the manifest under RUN_DIR against an S3-style store (boto3).
 
     Default is a dry run (touches nothing). `--for-real` deletes reviewed keys
@@ -1788,7 +1789,8 @@ def plan_sweep_execute(for_real: bool, min_soft_delete_days: int, run_dir: str) 
 
     from .sweep import execute_plan
 
-    s = execute_plan(run_dir, for_real=for_real, min_soft_delete_days=min_soft_delete_days)
+    s = execute_plan(run_dir, for_real=for_real, min_soft_delete_days=min_soft_delete_days,
+                     **({"delete_workers": delete_workers} if delete_workers else {}))
     err(
         f"{'REAL' if for_real else 'DRY'}: {s['deleted_objects']} objs / {s['deleted_bytes']} bytes; "
         f"gone {s['skipped_gone']} overwritten {s['skipped_overwritten']} "

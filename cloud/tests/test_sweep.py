@@ -611,7 +611,7 @@ def test_execute_cli_needs_no_versioning_permission(tmp_path: Path, monkeypatch)
 
     run = _run_with_manifest(tmp_path)
     store = _NoVersioningPermission(_LIVE)
-    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda: store)
+    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda **_: store)
     result = CliRunner().invoke(main, ["plan-sweep", "execute", "--for-real", str(run)])
     assert result.exit_code == 0, result.output
     summary = json.loads(result.stdout)
@@ -628,7 +628,7 @@ def test_execute_cli_fails_on_per_object_delete_errors(tmp_path: Path, monkeypat
 
     run = _run_with_manifest(tmp_path)
     store = _FakeStore(_LIVE, fail_keys={"marin/ckpt/a"})
-    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda: store)
+    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda **_: store)
     result = CliRunner().invoke(main, ["plan-sweep", "execute", "--for-real", str(run)])
     assert result.exit_code == 1, result.output
     summary = json.loads(result.stdout)
@@ -637,3 +637,16 @@ def test_execute_cli_fails_on_per_object_delete_errors(tmp_path: Path, monkeypat
     }
     assert json.loads((run / "deleted-summary.json").read_text()) == summary
     assert store.objects == _LIVE
+
+
+def test_deletes_run_many_small_calls_at_once() -> None:
+    """CAIOS checks a `DeleteObjects` call's ETags one after another (cw's 2026-11-26 run: 1000-key calls, 4 at once, 95
+    objects/s): calls carry `DELETE_BATCH` keys, `DELETE_WORKERS` in flight, and the client's pool holds a connection for
+    each (botocore's default 10 would queue the rest) with a read timeout a slow call stays under."""
+    import inspect
+
+    from dt_cloud import sweep
+
+    cfg = sweep.s3_client("https://example.invalid", pool=sweep.DELETE_WORKERS + 4).meta.config
+    assert (sweep.DELETE_BATCH, sweep.DELETE_WORKERS, inspect.signature(sweep.execute_plan).parameters["delete_workers"].default,
+            cfg.max_pool_connections, cfg.read_timeout) == (250, 32, 32, 36, 120)
