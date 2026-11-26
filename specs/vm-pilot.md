@@ -105,6 +105,7 @@ Still on raw Batch (known gaps):
 - Does r2's public map tolerate the box's downtime (a VM restart, a pack swap)? The fallback is today's Worker path while it exists; after static-names is retired for r2, search has no fallback.
 - hf's listing is rate-limited by the Hub API (429s at 8 in flight), not CPU: it fits the box's idle cycles, but a scan can take hours.
 - Where the box runs: GCP (next to r2's and hf's Batch today) or CoreWeave (cw's free CPU nodes, next to the cw tenant later). GCP for the pilot; the backend interface keeps the choice open.
+- Beyond the pilot, a shared box's size. cw's pack, measured 2026-11-26 (`cw-vm-pack-measure-1126-1618`, `vm-pack/2026-10-14cw.c003h.c003/2026-11-26T1203.fsb`): 13.74 GB for 348 scans, 391.6M rows (343.5M file versions, 48.1M dirs), 100.4M names, 16.8 GB resident (42.9 B/row); built in 6 m 50 s at a 41.2 GiB RSS peak on an n2-highmem-16. That's ~3× vm-mode.md's 11-14 estimate (`gov_reports`). With gcs's 32.4 GB (11-14, larger now), cw + gcs + the small tenants come to ~50 GB of packs: comfortable on an n2-highmem-16 (128 GB), tight on an 8.
 
 [vm-mode.md]: vm-mode.md
 [serverless-tiers.md]: serverless-tiers.md
