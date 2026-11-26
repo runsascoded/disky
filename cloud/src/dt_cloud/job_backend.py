@@ -375,13 +375,14 @@ class Local:
             print(f"note: {self.what} {job_id} already exists: counted as submitted", file=sys.stderr)
             return job_id
         _write_json(d / "spec.json", spec)
+        self._set(job_id, QUEUED)
+        _write_json(d / "supervisor.json", {"pid": 0, "boot": self.host.boot_id(), "at": self.clock()})
+        # last: a job is listed (`_job`, `_tenant_jobs`) only once its state is whole
         _write_json(d / "job.json", {
             "tenant": spec["labels"]["deployment"], "seq": time.time_ns(), "engine": self.engine,
             "runs": [{"task": r.task, "name": r.name, "argv": r.argv} for r in plan.runs],
             "dirs": [str(p) for p in plan.dirs], "task_timeout_s": plan.task_timeout_s,
         })
-        self._set(job_id, QUEUED)
-        _write_json(d / "supervisor.json", {"pid": 0, "boot": self.host.boot_id(), "at": self.clock()})
         self.host.spawn(self.supervisor_argv(job_id), d / "supervisor.log")
         return job_id
 
