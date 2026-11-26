@@ -35,3 +35,26 @@ def test_profile_refuses_a_stage_its_machine_cant_hold():
         from_mapping({"machine": "n2-highmem-48", "ssd_gb": 750})
     assert str(e.value) == ("static names profile: machine / ssd_gb: "
                             "n2-highmem-48 takes 8, 16, 24 local SSDs (3000, 6000, 9000 GB), not 2 (750 GB)")
+
+
+def _spec(machine: str, *sizes: int) -> dict:
+    disks = [{"newDisk": {"type": "local-ssd", "sizeGb": str(gb)}, "deviceName": f"d{i}"} for i, gb in enumerate(sizes)]
+    return {"allocationPolicy": {"instances": [{"policy": {"machineType": machine, "bootDisk": {"type": "pd-balanced", "sizeGb": "100"}, "disks": disks}}]}}
+
+
+def test_every_batch_submit_checks_its_local_ssd_against_its_machine(monkeypatch):
+    """`batch.check_local_ssd` in `submit_job`: `vm-pack`'s n2-highmem-16 with 1 SSD (2026-11-26) is refused before the POST,
+    as any submitter's; a pair GCE takes, a family not tabled, and a spec without local SSD pass."""
+    from dt_cloud import batch
+
+    assert [batch.check_local_ssd(s) for s in (
+        _spec("n2-highmem-16", 750), _spec("n2-highmem-32", 750, 750), _spec("e2-standard-4", 375), _spec("n2-highmem-16"), {},
+    )] == [None] * 5
+    with pytest.raises(ValueError) as e:
+        batch.check_local_ssd(_spec("n2-highmem-16", 375), "Batch job vm-pack-x")
+    assert str(e.value) == "Batch job vm-pack-x: n2-highmem-16 takes 2, 4, 8, 16, 24 local SSDs (750, 1500, 3000, 6000, 9000 GB), not 1 (375 GB)"
+    monkeypatch.setattr(batch, "check_spec", lambda spec, what: None)
+    monkeypatch.setattr(batch, "session", lambda: pytest.fail("posted"))
+    with pytest.raises(ValueError) as e:
+        batch.submit_job(_spec("n2-highmem-32", 375, 375), "drill-1", "us-east1", "p")
+    assert str(e.value) == "Batch job drill-1: n2-highmem-32 takes 4, 8, 16, 24 local SSDs (1500, 3000, 6000, 9000 GB), not 2 (750 GB)"

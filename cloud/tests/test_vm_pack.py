@@ -122,7 +122,7 @@ def test_job_spec_defaults_spot_highmem_on_local_ssd():
         "allocationPolicy": {
             "instances": [{"policy": {"machineType": "n2-highmem-16", "provisioningModel": "SPOT",
                                       "bootDisk": {"type": "pd-balanced", "sizeGb": "100"},
-                                      "disks": [{"newDisk": {"type": "local-ssd", "sizeGb": "375"}, "deviceName": "stage"}]}}],
+                                      "disks": [{"newDisk": {"type": "local-ssd", "sizeGb": "750"}, "deviceName": "stage"}]}}],
             "serviceAccount": {"email": "sa@p.iam"},
             "location": {"allowedLocations": ["regions/us-east1"]},
             "labels": COST,

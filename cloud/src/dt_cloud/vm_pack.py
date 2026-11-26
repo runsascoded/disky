@@ -151,8 +151,9 @@ MACHINE = "n2-highmem-16"
 #: Memory a task may ask for per vCPU, by machine family (Batch refuses a task its machine can't hold); another family
 #: names its own (`memory_mib`).
 MIB_PER_VCPU = {"highmem": 7700, "standard": 3700, "highcpu": 900}
-#: The work dir's local SSD (the mirrored sorts and the pack: ~1.3× the pack); 0: the boot disk (`BOOT_GB`).
-SSD_GB = 375
+#: The work dir's local SSD (the mirrored sorts and the pack: ~1.3× the pack); 0: the boot disk (`BOOT_GB`). Two SSDs: an
+#: n2-highmem-16 takes 2, 4, 8, 16 or 24 (`batch.check_local_ssd`).
+SSD_GB = 750
 BOOT_GB = 100
 #: A run's cap: gcs's writer takes ~10 minutes (mirror, 9 minutes of `pack-slim`, the upload).
 MAX_RUN_S = 4 * 3600
