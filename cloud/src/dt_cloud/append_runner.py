@@ -2048,8 +2048,13 @@ class Runner:
             elif compact:
                 self.log(f"merge: compaction due under {policy} ({why}): compact into a new base generation")
             forced = self.compact_now and bool(m["runs"]) and not compact
+            n = f"{len(merges)} merge{'s' * (len(merges) != 1)}"
             if merges and forced:
-                self.log(f"merge: compaction forced (-K): it folds every run, so the due carries are skipped ({len(merges)} merge{'s' * (len(merges) != 1)})")
+                self.log(f"merge: compaction forced (-K): it folds every run, so the due carries are skipped ({n})")
+            elif merges and compact:
+                # a carry first only delays the fold: submitted detached (`merge_wait` 0) it returned here, before the
+                # compaction (gcs 2026-11-25 and 11-26: the level 5 fold never submitted)
+                self.log(f"merge: the due compaction folds every run, so the due carries are skipped ({n})")
             elif merges:
                 desc = "; ".join(f"{len(ins)} runs → {out['key']} (level {out['level']})" for ins, out in merges)
                 name, spec = self.merge_job(m["date"], long=merge_is_long(merges, self.long_merge_rows))
