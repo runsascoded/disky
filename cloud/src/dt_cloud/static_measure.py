@@ -178,12 +178,56 @@ def _bc_part(srcs: list[str], out: str) -> int:
     return len(cands)
 
 
+#: Bytes free on the work disk `local_tier` leaves after its copy, per byte copied: else the tier is read in place.
+LOCAL_TIER_HEADROOM = 1.5
+
+
+def same_disk(a: Path, b: Path) -> bool:
+    """Whether `a` and `b` are on one filesystem (`local_tier` copies only across one)."""
+    return os.stat(a).st_dev == os.stat(b).st_dev
+
+
+def local_tier(tier: sd.Tier, kind: str, dst: Path, *, threads: int = 16) -> sd.Tier:
+    """`tier`, with what `kind`'s roots group file reads (`meta.json`, `aliases.parquet`, the roots index and its top, the
+    roots files) copied to `dst` on the work disk, as a `Tier` there; `tier` itself when it has no mount (`GcsTier`), is on
+    the work disk already, or the disk lacks room (`LOCAL_TIER_HEADROOM`, logged). The compaction's base tier is its generation's mount (gcsfuse):
+    `base_counts_parallel`'s workers decoding its groups in place there sat at ~10 of 48 CPUs for hours (cw 2026-11-27's
+    level-5 fold, 2.0B floor crossers); a sequential copy is minutes."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .heartbeat import Progress
+
+    dst.mkdir(parents=True, exist_ok=True)
+    if isinstance(tier, sd.GcsTier) or same_disk(tier.root, dst):
+        return tier
+    rels = [r for r in ("meta.json", "aliases.parquet", f"{kind}-roots-index.parquet", f"{kind}-roots-index.top.parquet") if tier.exists(r)]
+    rels += tier.listdir(f"{kind}/roots") if tier.exists(f"{kind}/roots") else []
+    sizes = {r: (tier.root / r).stat().st_size for r in rels}
+    need, free = sum(sizes.values()), shutil.disk_usage(dst).free
+    if need * (1 + LOCAL_TIER_HEADROOM) > free:
+        err(f"local tier {tier.name} {kind}: {need / 2**30:.1f} GiB won't fit {free / 2**30:.1f} GiB free; read in place from {tier.root}")
+        return tier
+    prog = Progress(f"local tier {tier.name} {kind}", len(rels), total_bytes=need, unit="files")
+
+    def copy(rel: str) -> None:
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(tier.root / rel, dst / rel)
+        prog.tick(nbytes=sizes[rel])
+    with ThreadPoolExecutor(threads) as pool:
+        list(pool.map(copy, rels))
+    prog.done()
+    return sd.Tier(dst, tier.name)
+
+
 def base_counts_parallel(con, tier: sd.Tier, kind: str, src: str, into: str, n: int, *, jobs: int, work: Path) -> None:
     """`base_counts` of DuckDB table `src`'s `(c, dir)` rows (`n` of them) into table `into` `(c, dir, rows)`, on `jobs` worker
-    processes: `src` cut in sorted shares (parquet under `work`), each counted against the tier's own group files. Nothing
-    of `src` is held in Python here: a compaction's crossers ran to 191M (cw, 2026-11-06)."""
-    from concurrent.futures import ProcessPoolExecutor
+    processes: `src` cut in sorted shares (parquet under `work`), each counted against the tier's own group files, copied to
+    the work disk first (`local_tier`). Nothing of `src` is held in Python here: a compaction's crossers ran to 191M (cw,
+    2026-11-06), 2.0B (2026-11-27). Logs its progress by share (`heartbeat.Progress`: done, crossers counted, ETA)."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     from multiprocessing import get_context
+
+    from .heartbeat import Progress
 
     parts = max(1, min(jobs * 8, n // 10_000))
     cut = work / "cands"
@@ -191,10 +235,13 @@ def base_counts_parallel(con, tier: sd.Tier, kind: str, src: str, into: str, n: 
         TO {q(str(cut))} (FORMAT parquet, PARTITION_BY (part))""")
     shares = sorted((int(d.name.split("=", 1)[1]), sorted(str(f) for f in d.glob("*.parquet"))) for d in cut.glob("part=*"))
     err(f"base counts {kind}: {n:,} floor crossers in {len(shares)} shares on {jobs} processes")
+    tier = local_tier(tier, kind, work / "tier")
+    prog = Progress(f"base counts {kind}", len(shares), total_rows=n, unit="shares")
     with ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_bc_init,
                              initargs=(str(tier.root), tier.name, kind)) as pool:
-        for f in [pool.submit(_bc_part, fs, str(work / f"out-{i:05d}.parquet")) for i, fs in shares]:
-            f.result()
+        for f in as_completed([pool.submit(_bc_part, fs, str(work / f"out-{i:05d}.parquet")) for i, fs in shares]):
+            prog.tick(rows=f.result())
+    prog.done()
     con.execute(f"INSERT INTO {into} SELECT c, dir, rows FROM read_parquet({q(str(work / 'out-*.parquet'))})")
 
 

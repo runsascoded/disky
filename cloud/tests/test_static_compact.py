@@ -170,15 +170,20 @@ def test_the_floor_crossers_counted_on_worker_processes_measure_the_same(world, 
     base = root / rec["from"]
     tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
     docs = {}
-    for name, least in (("here", 10**9), ("procs", 1)):
+    for name, least, local in (("here", 10**9, False), ("procs", 1, False), ("copied", 1, True)):
         monkeypatch.setattr(sme, "PARALLEL_MIN", least)
+        # `copied`: the base tier as if on another filesystem (the fold's mount), so the workers count a work-disk copy
+        monkeypatch.setattr(sme, "same_disk", (lambda a, b: False) if local else (lambda a, b: True))
         con = sn.connect(2, "1GB", tmp_path / f"duckdb-{name}")
         docs[name] = sme.incremental_measure(con, tiers, base / "roots-measure", str(root / "g.c001" / "catalog" / "members.parquet"),
                                              tmp_path / name, floor=tiers[0].meta.get("floor", sl.FLOOR), log=lambda s: None, jobs=2)
     assert [d["base_counted"] for d in docs["procs"].values()] == [d["base_counted"] for d in docs["here"].values()]
     assert sum(d["base_counted"] for d in docs["procs"].values()) > 0
+    assert [d["base_counted"] for d in docs["copied"].values()] == [d["base_counted"] for d in docs["here"].values()]
     assert _md5s(tmp_path / "procs") == _md5s(tmp_path / "here")
+    assert _md5s(tmp_path / "copied") == _md5s(tmp_path / "here")
     assert sorted(p.name for p in (tmp_path / "procs").iterdir()) == ["dirs", "short"]
+    assert sorted(p.name for p in (tmp_path / "copied").iterdir()) == ["dirs", "short"]
 
 
 def test_the_measurement_joined_in_q_ranges_is_one_joins(world, tmp_path, monkeypatch):
