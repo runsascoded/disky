@@ -112,6 +112,22 @@ def test_deltas_open_by_op():
     }}}
 
 
+def test_a_thinned_generation_sums_the_dropped_scans_counters_onto_the_next_kept():
+    """`rebase` (a history job's fold keeps some scans): a kept scan's counters add the dropped ones' since the kept scan
+    before it, against that scan; a gap in the counters leaves it none; keeping every scan changes nothing."""
+    e = lambda since, a, d, m, p="b": {"since": since, "mtime": "write", "paths": {"": c(added=a, deleted=d, modified=m, size=m), p: c(added=a, size=0)}}  # noqa: E731
+    counters = {"s1": e("s0", 1, 0, 0), "s2": e("s1", 2, 1, 1, "a"), "s3": e("s2", 3, 0, 2), "s5": e("s4", 5, 5, 5)}
+    order = ["s0", "s1", "s2", "s3", "s4", "s5"]
+    assert ichg.rebase(counters, order, set(order)) == counters
+    assert ichg.rebase(counters, order, {"s0", "s3", "s5"}) == {
+        "s3": {"since": "s0", "mtime": "write", "paths": {
+            "": c(added=6, deleted=1, modified=3, size=3), "a": c(added=2), "b": c(added=4),
+        }},
+    }
+    # the first kept scan has no predecessor: none
+    assert ichg.rebase(counters, order, {"s2", "s3"}) == {"s3": counters["s3"]}
+
+
 def test_counting_starts_after_the_churn_base():
     # directory-only scans (version 1), the switch to object listings, then object scans: only object → object pairs
     scans = [{"id": f"s{t}", "ts": t, "version": v} for t, v in enumerate([1, 1, 2, 2, 2])]
