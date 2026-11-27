@@ -51,7 +51,12 @@ at 1000 entries per tree page), an old version's
 bytes' age), and a bucket file's ``uploadedAt`` (falling back to its
 ``mtime``). ``storage_class_id`` is the billing class, per
 :data:`~disk_tree.listing.HF_CLASS_IDS`: public 1, private 5, unbilled git
-files 6 — so every non-6 byte is a billed byte. ``generation`` is NULL.
+files 6 — so every non-6 byte is a billed byte. ``generation`` is NULL;
+``version`` is the object's content id, so a rewrite is told by more than
+its size (specs/change-metrics.md §10): a repo file's LFS ``oid`` (SHA-256),
+else its ``xetHash``, else (a plain git file) the tree entry's git blob
+``oid``; a bucket file's ``xetHash``; an old version's LFS oid. The
+``@unlisted`` residual has none.
 
 **Rate limits.** The Hub answers with ``RateLimit: "api";r=<left>;t=<secs>``;
 the quota depends on the authenticated account's plan. The client follows
@@ -295,6 +300,11 @@ def _ref_dir(ref: Optional[str]) -> str:
     return ref.removeprefix("refs/heads/")
 
 
+def _row(path: str, size: int, created: Optional[str], cls: str, version: Optional[str]) -> tuple:
+    """A listing row (`bulk.entries_to_frame`'s seven fields): no GCS generation, no CRC32C, ``version`` the content id."""
+    return (path, size, created, cls, None, None, version)
+
+
 def _visibility(private: Optional[bool]) -> str:
     return "private" if private else "public"
 
@@ -316,7 +326,7 @@ def list_bucket(client: HfClient, namespace: str, name: str, private: Optional[b
     for e in client.paginate(f"/api/buckets/{namespace}/{quote(name)}/tree", [("recursive", "true"), ("limit", str(BUCKET_PAGE_SIZE))]):
         if e["type"] != "file":
             continue
-        rows.append((f"buckets/{name}/{e['path']}", int(e["size"]), e.get("uploadedAt") or e.get("mtime"), cls, None))
+        rows.append(_row(f"buckets/{name}/{e['path']}", int(e["size"]), e.get("uploadedAt") or e.get("mtime"), cls, e.get("xetHash")))
     listed = sum(r[1] for r in rows)
     totals = UnitTotals(f"buckets/{name}", expected=listed if size is None else int(size), listed=listed)
     if totals.expected != listed:
@@ -363,7 +373,7 @@ def list_repo(
             else:
                 oids.add(oid)
                 lfs_bytes += size
-            rows.append((f"{unit}/{e['path']}", size, created, file_cls, None))
+            rows.append(_row(f"{unit}/{e['path']}", size, created, file_cls, oid or e.get("oid")))
     history = 0
     if lfs_files:
         try:
@@ -383,11 +393,11 @@ def list_repo(
             old.append((f"{unit}/{HISTORY_DIR}/{_ref_dir(o.get('ref'))}/{filename}", oid, int(o["size"]), o.get("pushedAt")))
         versions = Counter(path for path, *_ in old)
         for path, oid, size, pushed in old:
-            rows.append((f"{path}/{oid}" if versions[path] > 1 else path, size, pushed, cls, None))
+            rows.append(_row(f"{path}/{oid}" if versions[path] > 1 else path, size, pushed, cls, oid))
     used = int(info.get("usedStorage") or 0)
     residual = used - lfs_bytes - history
     if residual > 0:
-        rows.append((f"{unit}/{HISTORY_DIR}/{UNLISTED}", residual, modified, cls, None))
+        rows.append(_row(f"{unit}/{HISTORY_DIR}/{UNLISTED}", residual, modified, cls, None))
     elif residual < 0:
         err(f"WARN: hf {kind[:-1]} {repo_id}: listed {lfs_bytes + history:,} LFS B > usedStorage {used:,} B")
     totals = UnitTotals(unit, expected=used, listed=lfs_bytes + history, git_bytes=git_bytes, residual=max(residual, 0), history=history)

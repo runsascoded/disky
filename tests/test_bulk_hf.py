@@ -83,17 +83,24 @@ def test_parse_hf_uri_rejects(uri):
 
 # ---------- listing ----------
 
+def row(path: str, size: int, created: str, cls: str, version: "str | None") -> tuple:
+    """A listing row as `bulk_hf` yields it: no generation, no CRC32C, `version` the object's content id."""
+    return (path, size, created, cls, None, None, version)
+
+
+#: Each object's content id: a bucket file's `xetHash`, a repo file's LFS oid, a plain git file's blob oid.
 EXPECTED_ROWS = [
-    (f"{BT}/seta-cytopathology/seed/kernel-metadata.json", 280, "2026-10-08T20:38:43.528Z", "public", None),
-    (f"{BT}/bix-asxl1/seed/kernel-metadata.json", 292, "2026-10-08T20:38:45.463Z", "public", None),
-    (f"{BT}/bix-asxl1/seed/datasets/data/manifest.json", 538, "2026-10-08T20:38:45.116Z", "public", None),
-    (f"{BFCL}/artifacts.tar.gz", 86937622, "2026-10-11T11:49:28.000Z", "public", None),
-    (f"{BFCL}/.gitattributes", 2562, "2026-10-11T11:49:28.000Z", "git", None),
-    (f"{BFCL}/@history/@unlisted", 2140, "2026-10-12T19:31:09.000Z", "public", None),
-    (f"{EXP75}/prot-exp75-cv1-1_5b-e8-lr1e-3-wd0p2-v1-bc3084/checkpoints/step-35679/d/05ae5b225d9a0a196757c8aa5f5ac078", 25169920, "2026-07-19T21:12:05.000Z", "public", None),
-    (f"{EXP75}/.gitattributes", 3899, "2026-07-19T21:12:05.000Z", "git", None),
-    ("spaces/README/.gitattributes", 1519, "2026-09-02T14:46:52.000Z", "git", None),
-    ("spaces/README/README.md", 541, "2026-09-02T14:48:43.000Z", "git", None),
+    row(f"{BT}/seta-cytopathology/seed/kernel-metadata.json", 280, "2026-10-08T20:38:43.528Z", "public", "bde0a0a685640540b7e88379b526ca7ce269a7984f185c0c78251f610a97f372"),
+    row(f"{BT}/bix-asxl1/seed/kernel-metadata.json", 292, "2026-10-08T20:38:45.463Z", "public", "f10b546859056171375dbe97245ab6bb5875c3576ea4def0fa18f55cc36afaf5"),
+    row(f"{BT}/bix-asxl1/seed/datasets/data/manifest.json", 538, "2026-10-08T20:38:45.116Z", "public", "f69f734c4f73e5b29ae8ed19db99ec8e405ee11a7471430fca375c0931cf943e"),
+    row(f"{BFCL}/artifacts.tar.gz", 86937622, "2026-10-11T11:49:28.000Z", "public", "674566f5f5afa137b202b345f8a2e8ac81be9447afcf272ff2b816a816ee941f"),
+    row(f"{BFCL}/.gitattributes", 2562, "2026-10-11T11:49:28.000Z", "git", "d572684bba89cc2f55e73acad69b5f6175b9b0b0"),
+    row(f"{BFCL}/@history/@unlisted", 2140, "2026-10-12T19:31:09.000Z", "public", None),
+    row(f"{EXP75}/prot-exp75-cv1-1_5b-e8-lr1e-3-wd0p2-v1-bc3084/checkpoints/step-35679/d/05ae5b225d9a0a196757c8aa5f5ac078", 25169920, "2026-07-19T21:12:05.000Z", "public",
+        "213759a988544fe12205d16e52865ad774da33701764dcb2d5a4506b87ae8ce9"),
+    row(f"{EXP75}/.gitattributes", 3899, "2026-07-19T21:12:05.000Z", "git", "c283a04a926e65e671cbb3290f5d9a5763dfa0b4"),
+    row("spaces/README/.gitattributes", 1519, "2026-09-02T14:46:52.000Z", "git", "a6344aac8c09253b3b630fb776ae94478aa0275b"),
+    row("spaces/README/README.md", 541, "2026-09-02T14:48:43.000Z", "git", "b1deb9aa3761d1f8cdb9296b01e33a7134c15a3a"),
 ]
 EXPECTED_TOTALS = [
     UnitTotals("buckets/biotasks", expected=1110, listed=1110),
@@ -165,19 +172,20 @@ def test_list_one_kind():
 
 
 def test_list_repo_dedupes_oids_without_commit_dates():
-    """Two paths share one LFS object: billed once, so the second lists at 0 B;
-    `commit_dates=False` reads the un-expanded tree and dates by `lastModified`."""
+    """Two paths share one LFS object: billed once, so the second lists at 0 B (its content id the same: a flip of which
+    path carries the bytes is no rewrite); `commit_dates=False` reads the un-expanded tree and dates by `lastModified`."""
     c, _ = client()
     rows, totals = bulk_hf.list_repo(c, "datasets", "open-athena", CC.split("/")[1], commit_dates=False)
     mod = "2026-10-13T14:31:23.000Z"
     assert rows == [
-        (f"{CC}/artifacts/data/closure-near-boundary-cases-v7/validation.jsonl", 11224478, mod, "public", None),
-        (f"{CC}/artifacts/data/closure-value-controls-cases-v5/validation.jsonl", 0, mod, "public", None),
-        (f"{CC}/.gitattributes", 8904, mod, "git", None),
+        row(f"{CC}/artifacts/data/closure-near-boundary-cases-v7/validation.jsonl", 11224478, mod, "public", LFS_CC),
+        row(f"{CC}/artifacts/data/closure-value-controls-cases-v5/validation.jsonl", 0, mod, "public", LFS_CC),
+        row(f"{CC}/.gitattributes", 8904, mod, "git", "f19e231cc16800345707687181adf6a8807d2769"),
     ]
     assert totals == UnitTotals(CC, expected=11224478, listed=11224478, git_bytes=8904)
 
 
+LFS_CC = "cc9f5622847dbfef55df012c7e77bfabeee17f9434db8e17e7b06b13e8c6cd75"
 OLD = "ab" * 32
 
 
@@ -194,7 +202,7 @@ def test_list_repo_lfs_files_attributes_history():
     c, _ = client(_lfs_files_fixture())
     rows, totals = bulk_hf.list_repo(c, "datasets", "open-athena", BFCL.split("/")[1], lfs_files=True)
     assert rows == EXPECTED_ROWS[3:5] + [
-        (f"{BFCL}/@history/main/artifacts.tar.gz", 2140, "2026-10-11T09:00:00.000Z", "public", None),
+        row(f"{BFCL}/@history/main/artifacts.tar.gz", 2140, "2026-10-11T09:00:00.000Z", "public", OLD),
     ]
     assert totals == UnitTotals(BFCL, expected=86939762, listed=86939762, git_bytes=2562, history=2140)
 
@@ -221,13 +229,13 @@ def test_list_repo_lfs_files_by_ref():
     rows, totals = bulk_hf.list_repo(c, "datasets", "open-athena", BFCL.split("/")[1], lfs_files=True)
     h = f"{BFCL}/@history"
     assert rows == EXPECTED_ROWS[3:5] + [
-        (f"{h}/step-100/w.bin", 30, "2026-10-01T00:00:00.000Z", "public", None),
-        (f"{h}/backup/pre/w.bin", 40, "2026-10-02T00:00:00.000Z", "public", None),
-        (f"{h}/step-200/w.bin/{sha('5')}", 50, "2026-10-03T00:00:00.000Z", "public", None),
-        (f"{h}/step-200/w.bin/{sha('6')}", 60, "2026-10-04T00:00:00.000Z", "public", None),
-        (f"{h}/refs/pr/3/w.bin", 70, "2026-10-05T00:00:00.000Z", "public", None),
-        (f"{h}/@no-ref/w.bin", 80, "2026-10-06T00:00:00.000Z", "public", None),
-        (f"{h}/@unlisted", 1810, "2026-10-12T19:31:09.000Z", "public", None),
+        row(f"{h}/step-100/w.bin", 30, "2026-10-01T00:00:00.000Z", "public", sha("3")),
+        row(f"{h}/backup/pre/w.bin", 40, "2026-10-02T00:00:00.000Z", "public", sha("4")),
+        row(f"{h}/step-200/w.bin/{sha('5')}", 50, "2026-10-03T00:00:00.000Z", "public", sha("5")),
+        row(f"{h}/step-200/w.bin/{sha('6')}", 60, "2026-10-04T00:00:00.000Z", "public", sha("6")),
+        row(f"{h}/refs/pr/3/w.bin", 70, "2026-10-05T00:00:00.000Z", "public", sha("7")),
+        row(f"{h}/@no-ref/w.bin", 80, "2026-10-06T00:00:00.000Z", "public", sha("8")),
+        row(f"{h}/@unlisted", 1810, "2026-10-12T19:31:09.000Z", "public", None),
     ]
     assert totals.history == 330
     auth = {(u.split("?")[0].endswith("/lfs-files"), hd["Authorization"]) for u, hd in replay.calls}
@@ -348,12 +356,11 @@ def test_list_hf_to_parquet(tmp_path: Path):
     assert sorted(p.name for p in out.iterdir()) == ["_SUCCESS.json", "shard-0000.parquet"]
     df = pd.read_parquet(out / "shard-0000.parquet")
     assert df.columns.tolist() == ["bucket", "name", "size_bytes", "created", "storage_class_id", "generation", "version"]
-    assert df["version"].isna().tolist() == [True] * len(EXPECTED_ROWS)  # HF has no object versions
     assert [
-        (b, n, s, c_.isoformat(), k, g) for b, n, s, c_, k, g in df.drop(columns='version').astype(object).itertuples(index=False)
+        (b, n, s, c_.isoformat(), k, g, None if v is pd.NA else v) for b, n, s, c_, k, g, v in df.astype(object).itertuples(index=False)
     ] == [
-        ("open-athena", n, s, pd.Timestamp(t).isoformat(), {"public": 1, "git": 6}[k], pd.NA)
-        for n, s, t, k, _ in EXPECTED_ROWS
+        ("open-athena", n, s, pd.Timestamp(t).isoformat(), {"public": 1, "git": 6}[k], pd.NA, v)
+        for n, s, t, k, _, _, v in EXPECTED_ROWS
     ]
     marker = json.loads((out / "_SUCCESS.json").read_text())
     assert {k: v for k, v in marker.items() if k not in ("started", "finished")} == {
