@@ -12,6 +12,7 @@ Existing threads can be adopted without changing or deleting their replies. Noth
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 import time
@@ -388,10 +389,10 @@ def starter(row: dict) -> tuple[str, str | None]:
 
 def hm(seconds: float) -> str:
     """A duration: under an hour in minutes and seconds (`9m 22s`), from an hour in hours and minutes, to the nearest
-    minute (`1h 55m`): seconds don't matter at that length."""
+    minute, a half up (`1h 55m`; as pages-kit's `took`): seconds don't matter at that length."""
     if seconds < 3600:
         return f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
-    h, m = divmod(round(seconds / 60), 60)
+    h, m = divmod(math.floor(seconds / 60 + 0.5), 60)
     return f"{h}h {m}m"
 
 

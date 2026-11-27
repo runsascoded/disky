@@ -107,8 +107,12 @@ export function stamp(t: number): string {
   return `${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}Z`
 }
 
-/** A duration, `46m 40s` (`nominal.took`). */
-export const took = (secs: number): string => `${Math.trunc(secs / 60)}m ${pad(Math.trunc(secs) % 60)}s`
+/** A duration (`nominal.hm`): under an hour `46m 40s`, from an hour `2h 3m` (to the nearest minute, a half up). */
+export function took(secs: number): string {
+  if (secs < 3600) return `${Math.trunc(secs / 60)}m ${pad(Math.trunc(secs) % 60)}s`
+  const m = Math.floor(secs / 60 + 0.5)
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+}
 
 /** Bytes at three significant figures in SI units (`289 T`, `46.8 G`, `440 M`); `sign`: `+`/`−` first (`nominal.si`). */
 export function si(n: number, sign = false): string {
