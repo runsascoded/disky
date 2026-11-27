@@ -87,15 +87,28 @@ const primaryQuotas = (cfg: DigestCfg): Quota[] => (cfg.primary ? cfg.buckets[cf
 /** A bucket's size at a scan; undefined when the scan doesn't have it. */
 const sizeOf = (b: string, r: QuotaScan, cfg: DigestCfg): number | undefined => (b === cfg.primary ? r.tb : r.extra[b])
 
-/** The change in `buckets` from `a` to `b`, over those both scans have: a bucket's first scan isn't growth. */
-function moved(buckets: string[], a: QuotaScan, b: QuotaScan, cfg: DigestCfg): number {
+/** A bucket's size at a scan as pool `pl` counts it: the primary's under the quota's classes (undefined when the scan
+ *  has no class sizes), the others' as listed (`used`). */
+function sizeIn(pl: Pool, b: string, r: QuotaScan, cfg: DigestCfg): number | undefined {
+  const cs = pl.quota.classes
+  if (b !== cfg.primary || !cs.length) return sizeOf(b, r, cfg)
+  return r.classes ? cs.reduce((t, c) => t + (r.classes![String(c)] ?? 0), 0) : undefined
+}
+
+/** The change in `buckets` from `a` to `b`, over those both scans have: a bucket's first scan isn't growth. `size`:
+ *  what a bucket holds at a scan (default its whole size; a pool's, `poolMoved`). */
+function moved(buckets: string[], a: QuotaScan, b: QuotaScan, cfg: DigestCfg,
+  size: (x: string, r: QuotaScan) => number | undefined = (x, r) => sizeOf(x, r, cfg)): number {
   let d = 0
   for (const x of buckets) {
-    const [v0, v1] = [sizeOf(x, a, cfg), sizeOf(x, b, cfg)]
+    const [v0, v1] = [size(x, a), size(x, b)]
     if (v0 !== undefined && v1 !== undefined) d += v1 - v0
   }
   return d
 }
+
+/** Pool `pl`'s change from `a` to `b`: a bucket's quota over storage classes (hf's public / private) moves by those classes alone. */
+const poolMoved = (pl: Pool, a: QuotaScan, b: QuotaScan, cfg: DigestCfg): number => moved(pl.buckets, a, b, cfg, (x, r) => sizeIn(pl, x, r, cfg))
 
 const allBuckets = (r: QuotaScan, cfg: DigestCfg): string[] => [...(cfg.primary ? [cfg.primary] : []), ...Object.keys(r.extra)]
 const sum = (buckets: string[], r: QuotaScan, cfg: DigestCfg): number => buckets.reduce((t, b) => t + (sizeOf(b, r, cfg) ?? 0), 0)
@@ -123,10 +136,9 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
     ? poolRows(last, cfg, p.alertAt, 'runway', seen).map(r => ({ ...r, mark: '' }))
     : poolRows(last, cfg, p.alertAt, p.quotas, seen)
   const inPool = new Set(pools(cfg).flatMap(pl => pl.buckets))
-  const change = (buckets: string[]): string => {
-    const d = moved(buckets, b0, last, cfg)
-    return Math.abs(d) < 0.05 ? '' : ` (${tb(d)})`
-  }
+  const delta = (d: number): string => (Math.abs(d) < 0.05 ? '' : ` (${tb(d)})`)
+  const change = (buckets: string[]): string => delta(moved(buckets, b0, last, cfg))
+  const poolChange = (pl: Pool): string => delta(poolMoved(pl, b0, last, cfg))
   const lines = [
     `${code(`trend.${deg(held ? (((mdtb / held) * 100) * 7) / days : 0)}`)} ${p.headline.map(f => figures[f]).join('')}${grouped(sum(all, last, cfg), 0)} ${u.name} total · [dashboard](${site}/)`,
     `_as of ${md(dayOf(date(last)))} ${hhmm(ts(last))}Z_`,
@@ -135,8 +147,8 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
     ...(p.quotas === 'arrow-chip' ? [CHIP_KEY] : []),
     ...compactQuietLines([
       ...rows.map(({ p: pl, v, mark, text, pct, tail }) => ({
-        text: `${mark}${name(pl)} ${grouped(v, 0)} ${u.name}${change(pl.buckets)}${members(pl)} · ${text}`,
-        quiet: !change(pl.buckets) && pct < QUIET_PCT && !tail,
+        text: `${mark}${name(pl)} ${grouped(v, 0)} ${u.name}${poolChange(pl)}${members(pl)} · ${text}`,
+        quiet: !poolChange(pl) && pct < QUIET_PCT && !tail,
       })),
       ...Object.keys(last.extra).filter(b => !inPool.has(b)).map(b => ({
         text: `${bucketLink(b, last, mtdSince, cfg)} ${grouped(last.extra[b], 0)} ${u.name}${change([b])}`,
@@ -161,7 +173,7 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
     const link = diffUrl(end.scan, dlink(end), ts(prevEnd), site)
     // each pool's name links its own diff over the week (a zone's, its bucket group's)
     const movers = rows.flatMap(({ p: pl }) => {
-      const d = moved(pl.buckets, prevEnd, end, cfg)
+      const d = poolMoved(pl, prevEnd, end, cfg)
       return Math.abs(d) >= WEEK_MOVER ? [`${poolLink(pl, end, ts(prevEnd), cfg, pl.name)} ${tb(d)}`] : []
     })
     const first = all.filter(b => (sizeOf(b, end, cfg) ?? 0) >= WEEK_MOVER && sizeOf(b, prevEnd, cfg) === undefined)

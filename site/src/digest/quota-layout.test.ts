@@ -72,4 +72,19 @@ describe("the OP's per-pool layout", () => {
       '[still] 5 TiB · 5% of 100Ti',
     ])
   })
+  it("moves a quota over storage classes by those classes alone (hf: one bucket, public and private pools)", () => {
+    const byClass: DigestCfg = { ...cfg, primary: 'org', buckets: { org: { label: 'org', path: null, zone: null, quotas: [
+      { bytes: 100 * TIB, name: '100 TiB public', short: 'pub', classes: [1] }, { bytes: 100 * TIB, name: '100 TiB private', short: 'priv', classes: [5] },
+    ] } } }
+    const at = (s: string, pub: number, priv: number): QuotaScan => ({ ...scan(s, pub + priv + 1, {}), classes: { 1: pub, 5: priv, 6: 1 } })
+    const m: QuotaRows = { template: 'quota', closed: false, pre: [], lead: [at('2026-08-31T1200', 15, 4)], rows: [at('2026-09-07T1200', 55, 4), at('2026-09-14T1200', 55, 3)] }
+    const lines = opText(m, '2026-09', byClass, { plotUrl: null, prevUrl: null }, { ...DEFAULT_PARAMS, layout: 'pools', quotas: 'off' })
+      .replace(/\]\([^)]*\)/g, ']').split('\n')
+    expect(lines.slice(4, 6)).toEqual(['[org] 55 TiB (+40.0) · 55.0% of pub (45.0 Ti free)', '[org] 3 TiB (−1.0) · 3% of priv'])
+    // each week names the pools that moved by their own classes, not the bucket's whole change
+    expect(lines.slice(lines.indexOf('*Weekly changes*') + 1).map(l => l.slice(l.indexOf(' ') + 1))).toEqual([
+      '[wk of 9/7]: **+40.0 TiB** · [org (pub)] +40.0',
+      '[wk of 9/14] _(partial)_: **−1.0 TiB** · [org (priv)] −1.0',
+    ])
+  })
 })
