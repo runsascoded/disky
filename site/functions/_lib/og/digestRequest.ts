@@ -1,8 +1,9 @@
 /** `POST /api/digest-image`'s request, validated (pure; `api/digest-image.ts` resolves a `usage` diff and renders):
  *
- *   {kind?: 'usage', title, note, month: 'YYYY-MM', from?: 'YYYY-MM-DD', today_at?: [p0, p1], points: [{scan, bytes}],
+ *   {kind?: 'usage', title, note, month: 'YYYY-MM', from?: 'YYYY-MM-DD', today_at?: [p0, p1], points: [{scan, bytes, objects?}],
  *    quota?: {bytes, name}, diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
- *     → `digestSvg`: the usage line against its quota, over the headline interval's diff map (the quota template)
+ *     → `digestSvg`: the usage line against its quota, the object count under it when every point carries `objects`
+ *       (specs/change-metrics.md §10.1), over the headline interval's diff map (the quota template)
  *   {kind: 'pools', title, note, month, from?, today_at?, alert_pct?, pools: [{name, quota, points: [{scan, bytes}]}],
  *    diff?, units?}
  *     → `poolsSvg`: every quota pool's share of its quota (one line each, the quota a rule at 100%), over the diff map
@@ -162,8 +163,11 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
   const points: DigestPoint[] = []
   for (const p of raw) {
     if (!isObj(p) || !isScanId(p.scan) || typeof p.bytes !== 'number') return 'points: [{scan, bytes}]'
-    points.push({ t: scanTime(p.scan), bytes: p.bytes })
+    if (p.objects !== undefined && !(Number.isInteger(p.objects) && (p.objects as number) >= 0)) return 'points: objects, a count'
+    points.push({ t: scanTime(p.scan), bytes: p.bytes, ...(p.objects !== undefined ? { objects: p.objects as number } : {}) })
   }
+  // the object count is drawn only for a series that has it at every scan
+  if (new Set(points.map(p => p.objects !== undefined)).size > 1) return 'points: objects on every point or none'
   points.sort((x, y) => x.t - y.t)
   const q = b.quota
   const quota = isObj(q) && typeof q.bytes === 'number' && typeof q.name === 'string' ? { bytes: q.bytes, name: q.name } : null

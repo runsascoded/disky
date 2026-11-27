@@ -759,7 +759,8 @@ class QuotaTemplate:
     def rows_json(self, month: Month) -> dict:
         """The month's scans as the site's renderer reads them (`src/digest/quota.ts` `QuotaRows`)."""
         def scan(r: Scan) -> dict:
-            return {"scan": r.scan, "slug": r.slug, "tb": r.tb, "extra": r.extra, "classes": None if r.classes is None else {str(c): v for c, v in r.classes.items()}}
+            return {"scan": r.scan, "slug": r.slug, "tb": r.tb, "extra": r.extra, "classes": None if r.classes is None else {str(c): v for c, v in r.classes.items()},
+                    "objs": r.objs}
 
         return {"template": "quota", "closed": month.closed, "pre": [scan(r) for r in month.pre],
                 "lead": [scan(r) for r in month.lead], "rows": [scan(r) for r in month.rows]}

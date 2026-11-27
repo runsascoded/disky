@@ -334,6 +334,14 @@ Each phase lands on `cloud` as `[cloud]` commits with no deployment defaults. De
 
 So the open questions of §8 close as recommended: (1) "changes", with "store versions" for interval-store rows; (2) the version token decides; (3) gross everywhere but a file's label and Δobjects; (4) byte-weighted flows yes; (5) storage-class moves ignored; (6) written up, deleted down; (7) both the cell and the panel, card later; (8) the quota digest and the run thread only; (9) root + depth 1; (10) yes; (11) yes, with phase 1b's bench; (12) after 3a's measurement.
 
+### 10.1 Phase 0 (built): the object count in the quota digest's plot
+
+The smallest clear design: a second, short panel under the bytes chart, on the same x axis.
+- **Data.** The job's rows (`QuotaTemplate.rows_json`) carry each scan's `objs`: the primary bucket's `total_objects` from its `meta.json` (`primary_totals`, every storage class), which `Scan.objs` already held. The site's `quota.imageRequest` adds `objects` to every plot point when every scan has it (a preview bundle from before has none, and draws as before).
+- **Request.** `/api/digest-image`'s `usage` points take `objects` (a count), on every point or none (`points: objects on every point or none`).
+- **Card.** `digestSvg` draws, when every point has a count, an "objects" panel (110 px) under the bytes chart: an amber line on its own autofit axis (whole-number ticks, `fmtCount`: `9,120`, `812K`, `1.24M`), the window's month shading, the first scan's dashed level, and the latest call-out (`1.25M objects`). The chart's dates move under it. Without counts the card is byte for byte what it was.
+- **Scope.** The quota template's `usage` plot (the default). The `pools` plot and the cost template's card are unchanged. The object count is the bucket's whole, while a class-scoped quota's bytes are its classes'. The `/admin/slack` preview draws it too: it posts the same request.
+
 [dp]: diff-progressive.md
 [is]: interval-store.md
 [dfn]: descriptive-field-names.md

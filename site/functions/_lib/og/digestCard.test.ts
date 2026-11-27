@@ -1,7 +1,7 @@
 /** The digest image: its chart and map texts, and the PNG it rasterizes to
  * (written to `tmp/digest-sample.png` for a look). */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { digestSvg, fmtIn, fmtT, mapSvg, niceTicks, poolsSvg, spread, TIER_COLORS, tiersSvg, yRange, type DigestCardInput, type PoolsCardInput, type TiersCardInput } from './digestCard'
+import { digestSvg, fmtCount, fmtIn, fmtT, mapSvg, niceTicks, poolsSvg, spread, TIER_COLORS, tiersSvg, yRange, type DigestCardInput, type PoolsCardInput, type TiersCardInput } from './digestCard'
 import { ensureWasm, svgToPng } from './render'
 import { diffRoot } from '../../../src/diffStyle'
 import type { DiffData } from '../../../src/diffModel'
@@ -89,6 +89,20 @@ describe('digestSvg', () => {
       '253 TB public quota', '15.4 TB · 6%',
     ])
   })
+  it('draws the object count under the chart when every point has one (the dates move under it)', () => {
+    const objects = [1_200_000, 1_230_000, 1_250_000]
+    const counted = { ...input(false), points: input(false).points.map((p, i) => ({ ...p, objects: objects[i] })) }
+    expect(texts(digestSvg(counted))).toEqual([
+      'Usage — October 2026', 'example.org · bucket · TiB',
+      '800', '850', '900', '950', '1,000',
+      '1 PiB quota', '830 TiB · 83%',
+      '1.2M', '1.22M', '1.24M',
+      '10/5', '10/12', '10/19', '10/26',
+      'objects', '1.25M objects',
+    ])
+    // one point without a count: the bytes chart alone, as before
+    expect(digestSvg({ ...counted, points: [{ t: day(1), bytes: 800 * T }, ...counted.points.slice(1)] })).toEqual(digestSvg(input(false)))
+  })
   it('adds the diff map: its title, the movement, and the cells labelled with signed changes', () => {
     expect(texts(digestSvg(input(true))).slice(13)).toEqual([
       'What changed in bucket — 9/30 → 10/14', 'grew +60.0 TiB · shrank −30.0 TiB · area = |Δ|',
@@ -143,6 +157,12 @@ describe('poolsSvg', () => {
   })
   it('a TB card gives its sizes in TB (the header names the unit; the labels don\'t repeat it)', () => {
     expect(texts(poolsSvg({ ...poolsInput(), units: 'TB' })).filter(s => s.startsWith('('))).toEqual(['(745 / 1,001)', '(97.3 / 110)', '(74.8 / 110)'])
+  })
+})
+
+describe('fmtCount', () => {
+  it('whole below 10,000, else three significant figures and a suffix (the next one up past 999.5)', () => {
+    expect([0, 9_120, 12_345, 812_000, 999_999, 1_240_000, 3_100_000_000].map(fmtCount)).toEqual(['0', '9,120', '12.3K', '812K', '1M', '1.24M', '3.1B'])
   })
 })
 

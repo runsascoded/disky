@@ -53,7 +53,8 @@
     "slug": "260830",
     "tb": 690.0,
     "extra": {},
-    "classes": {}
+    "classes": {},
+    "objs": 1000000
    }
   ],
   "lead": [
@@ -62,7 +63,8 @@
     "slug": "26083100",
     "tb": 700.0,
     "extra": {},
-    "classes": {}
+    "classes": {},
+    "objs": 1000000
    },
    {
     "scan": "2026-08-31T1201",
@@ -71,7 +73,8 @@
     "extra": {
      "hot-data": 88.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    }
   ],
   "rows": [
@@ -82,7 +85,8 @@
     "extra": {
      "hot-data": 88.6
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-01T1201",
@@ -91,7 +95,8 @@
     "extra": {
      "hot-data": 89.2
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-02T0001",
@@ -100,7 +105,8 @@
     "extra": {
      "hot-data": 90.8
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-02T1201",
@@ -109,7 +115,8 @@
     "extra": {
      "hot-data": 91.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-03T0001",
@@ -118,7 +125,8 @@
     "extra": {
      "hot-data": 91.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-04T0001",
@@ -127,7 +135,8 @@
     "extra": {
      "hot-data": 92.5
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-04T1201",
@@ -137,7 +146,8 @@
      "hot-data": 92.5,
      "more-data": 1.9
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-07T1201",
@@ -147,7 +157,8 @@
      "hot-data": 99.0,
      "more-data": 2.4
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-08T0001",
@@ -157,7 +168,8 @@
      "hot-data": 99.5,
      "more-data": 2.4
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    }
   ]
  },
@@ -170,51 +182,63 @@
   "points": [
    {
     "scan": "2026-08-30T1201",
-    "bytes": 758663023165440
+    "bytes": 758663023165440,
+    "objects": 1000000
    },
    {
     "scan": "2026-08-31T0001",
-    "bytes": 769658139443200
+    "bytes": 769658139443200,
+    "objects": 1000000
    },
    {
     "scan": "2026-08-31T1201",
-    "bytes": 775595502233190
+    "bytes": 775595502233190,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-01T0001",
-    "bytes": 780653255720960
+    "bytes": 780653255720960,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-01T1201",
-    "bytes": 784171692929843
+    "bytes": 784171692929843,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-02T0001",
-    "bytes": 782852278976512
+    "bytes": 782852278976512,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-02T1201",
-    "bytes": 786150813859840
+    "bytes": 786150813859840,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-03T0001",
-    "bytes": 836178592923648
+    "bytes": 836178592923648,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-04T0001",
-    "bytes": 833429813854208
+    "bytes": 833429813854208,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-04T1201",
-    "bytes": 770757651070976
+    "bytes": 770757651070976,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-07T1201",
-    "bytes": 772406918512640
+    "bytes": 772406918512640,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-08T0001",
-    "bytes": 868614185943040
+    "bytes": 868614185943040,
+    "objects": 1000000
    }
   ],
   "units": "TiB",
