@@ -6,12 +6,16 @@
  * or of days also writes its edits as a thrds bulk-rewrite plan (`-j`) beside it, `<job>.plan.json`, which `/admin/slack`
  * reviews and applies a selection of (`digest-reapply/[job]/[op].ts`; specs/done/digest-rewrite-review.md).
  *
- *   POST /api/digest-reapply {month, channel?, target, dry_run, params?, quota_marks?} → {run}             admin
+ *   POST /api/digest-reapply {month, channel?, target, dry_run, params?, quota_marks?, variant?} → {run}   admin
  *   GET  /api/digest-reapply → {runs: [run…]} (newest first, 20)                                              admin
- *   GET  /api/digest-reapply?job=<id> → {run, status, output: string | null}                                 admin
+ *   GET  /api/digest-reapply?job=<id> → {run, status, output: string | null, switch: plan | null}            admin
  *
  * `target`: `thread` | `op` | `YYYY-MM-DD` | `YYYY-MM-DD..YYYY-MM-DD` (days of `month`). `channel` defaults to
  * `DIGEST_CHANNEL` (the deployment's digest channel); another (a DM, to try a format first) is any Slack channel id.
+ * `variant`: a candidate reply style (`-V`). A whole-thread dry run naming another style than the thread's live one is a
+ * switch's preview: it writes the switch plan (`<job>.switch.json`, `-j`), which `PUT /api/digest-threads` stores
+ * with the admin's switch (specs/digest-thread-variant.md). The job runs as `DT_JOB_NAME` / `DT_JOB_REGION`, so the
+ * thread lease it holds names a job the next taker can see has ended.
  *
  * `DIGEST_REAPPLY` (JSON, `ReapplyConfig`) names what's the deployment's: unset, a POST answers 503. The job is its own
  * (`reapplySpec`): its image, the batch config's `REAPPLY_NEEDS` and exactly its secrets, so a deployment can run it
@@ -24,8 +28,9 @@ import { batchTaskSpec, jobStamp, secretRef, submitBatch } from '../_lib/cwBatch
 import { sweepsOff, SWEEPS_OFF } from '../_lib/dispatch.js'
 import { batchJobsUrl, gcpToken } from '../_lib/gcp.js'
 import { parseParams } from '../../src/digest/codec.js'
-import { canonicalTemplate } from '../../src/digest/templates.js'
+import { canonicalTemplate, TEMPLATES, VARIANTS } from '../../src/digest/templates.js'
 import { QUOTA_MARKS } from './digest-settings.js'
+import { parseSwitchPlan } from './digest-threads.js'
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const DAY_RE = /^(\d{4}-\d{2})-(\d{2})$/
@@ -69,7 +74,7 @@ export function reapplyConfig(raw: string | undefined): ReapplyConfig | string {
   return { ...c, template } as ReapplyConfig
 }
 
-export interface ReapplyReq { month: string; channel: string; target: string; dry_run: boolean; params: string | null; quota_marks: string | null }
+export interface ReapplyReq { month: string; channel: string; target: string; dry_run: boolean; params: string | null; quota_marks: string | null; variant: string | null }
 export interface ReapplyRun extends ReapplyReq { job_id: string; actor: string; ts: number; out: string }
 
 const inMonth = (d: string, month: string): boolean => {
@@ -80,7 +85,7 @@ const inMonth = (d: string, month: string): boolean => {
 /** The request (its channel defaulted), or why it's refused. */
 export function parseReapply(b: unknown, defaultChannel: string | undefined): ReapplyReq | string {
   if (typeof b !== 'object' || b === null || Array.isArray(b)) return 'body: a JSON object'
-  const { month, channel, target, dry_run, params, quota_marks } = b as Record<string, unknown>
+  const { month, channel, target, dry_run, params, quota_marks, variant } = b as Record<string, unknown>
   if (typeof month !== 'string' || !MONTH_RE.test(month)) return 'month: YYYY-MM'
   const ch = channel ?? defaultChannel
   if (typeof ch !== 'string' || !CHANNEL_RE.test(ch)) return 'channel: a Slack channel id (no DIGEST_CHANNEL default here)'
@@ -103,21 +108,32 @@ export function parseReapply(b: unknown, defaultChannel: string | undefined): Re
   if (quota_marks !== undefined && quota_marks !== null && (typeof quota_marks !== 'string' || !QUOTA_MARKS.includes(quota_marks))) {
     return `quota_marks: ${QUOTA_MARKS.join(' | ')}`
   }
-  return { month, channel: ch, target, dry_run, params: (params as string | null | undefined) ?? null, quota_marks: (quota_marks as string | null | undefined) ?? null }
+  const styles = [...new Set(TEMPLATES.flatMap(t => VARIANTS[t]))]
+  if (variant !== undefined && variant !== null && (typeof variant !== 'string' || !styles.includes(variant))) return `variant: ${styles.join(' | ')}`
+  return {
+    month, channel: ch, target, dry_run, params: (params as string | null | undefined) ?? null, quota_marks: (quota_marks as string | null | undefined) ?? null,
+    variant: (variant as string | null | undefined) ?? null,
+  }
 }
 
-/** A run's object key under the data bucket: its CLI output (`txt`), or its rewrite plan (`plan.json`). */
-export const runKey = (job: string, ext: 'txt' | 'plan.json'): string => `digest/reapply/${job}.${ext}`
+/** A run's object key under the data bucket: its CLI output (`txt`), its rewrite plan (`plan.json`), or its switch plan
+ *  (`switch.json`). */
+export const runKey = (job: string, ext: 'txt' | 'plan.json' | 'switch.json'): string => `digest/reapply/${job}.${ext}`
 
 /** Whether a run writes a rewrite plan: a dry run with a selector (a whole-thread run converges, which also posts). */
 export const plans = (r: Pick<ReapplyReq, 'target' | 'dry_run'>): boolean => r.dry_run && r.target !== 'thread'
 
+/** Whether a run may write a switch plan: a whole-thread dry run under a candidate variant (it writes one when the
+ *  thread's live variant is another). */
+export const switches = (r: Pick<ReapplyReq, 'target' | 'dry_run' | 'variant'>): boolean => r.dry_run && r.target === 'thread' && r.variant !== null
+
 /** The digest CLI's arguments for a request (after `reapplyScript`'s `dt-cloud digest -T … -C … -r …`); `plan`: where a
- *  run that `plans` writes its plan. */
-export function reapplyArgs(r: ReapplyReq, plan?: string): string[] {
+ *  run that `plans` writes its rewrite plan, `switchPlan` where one that `switches` writes its switch plan. */
+export function reapplyArgs(r: ReapplyReq, plan?: string, switchPlan?: string): string[] {
   const sel = r.target === 'thread' ? [] : r.target === 'op' ? ['-o'] : ['-y', r.target.includes('..') ? r.target : `${r.target}..${r.target}`]
-  return ['-m', r.month, '-c', r.channel, ...sel, ...(r.dry_run ? ['-n'] : []), ...(plan !== undefined && plans(r) ? ['-j', plan] : []),
-    ...(r.params !== null ? ['-p', r.params] : []), ...(r.quota_marks !== null ? ['-q', r.quota_marks] : [])]
+  const out = plan !== undefined && plans(r) ? ['-j', plan] : switchPlan !== undefined && switches(r) ? ['-j', switchPlan] : []
+  return ['-m', r.month, '-c', r.channel, ...sel, ...(r.dry_run ? ['-n'] : []), ...out,
+    ...(r.params !== null ? ['-p', r.params] : []), ...(r.quota_marks !== null ? ['-q', r.quota_marks] : []), ...(r.variant !== null ? ['-V', r.variant] : [])]
 }
 
 const sq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
@@ -139,14 +155,14 @@ export const reapplyScript = (args: string[], outMnt: string, c: ReapplyConfig):
  *  other store credentials. */
 export function reapplySpec(cfg: BatchConfig, jobSa: string, image: string, script: string, jobId: string, siteUrl: string, c: ReapplyConfig): unknown {
   return batchTaskSpec(cfg, jobSa, image, script, {
-    JOB_ID: jobId, SITE_URL: siteUrl, R2_BUCKET: c.r2_bucket,
+    JOB_ID: jobId, DT_JOB_NAME: jobId, DT_JOB_REGION: cfg.region, SITE_URL: siteUrl, R2_BUCKET: c.r2_bucket,
     ...(cfg.cfAccountId ? { CLOUDFLARE_ACCOUNT_ID: cfg.cfAccountId } : {}),
   }, Object.fromEntries(Object.entries(c.secrets).map(([k, v]) => [k, secretRef(cfg, v)])), 'digest')
 }
 
 type Env = BatchEnv & { DB?: D1Database; JOB_SA?: string; DIGEST_CHANNEL?: string; DIGEST_REAPPLY?: string }
 
-const COLS = 'job_id, month, channel, target, dry_run, params, quota_marks, actor, ts, out'
+const COLS = 'job_id, month, channel, target, dry_run, params, quota_marks, variant, actor, ts, out'
 const row = (r: Record<string, unknown>): ReapplyRun => ({ ...(r as unknown as ReapplyRun), dry_run: !!r.dry_run })
 
 export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
@@ -167,15 +183,15 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
 
   const jobId = `${c.template}-digest-${jobStamp()}z`
   const out = `gs://${cfg.dataBucket}/${runKey(jobId, 'txt')}`
-  const mnt = (ext: 'txt' | 'plan.json') => `/gcs/${cfg.dataBucket}/${runKey(jobId, ext)}`
-  const script = reapplyScript(reapplyArgs(req, mnt('plan.json')), mnt('txt'), c)
+  const mnt = (ext: 'txt' | 'plan.json' | 'switch.json') => `/gcs/${cfg.dataBucket}/${runKey(jobId, ext)}`
+  const script = reapplyScript(reapplyArgs(req, mnt('plan.json'), mnt('switch.json')), mnt('txt'), c)
   const spec = reapplySpec(cfg, env.JOB_SA, image, script, jobId, new URL(ctx.request.url).origin, c)
   const token = await gcpToken(env.GCP_SA_KEY)
   const sub = await submitBatch(cfg, token, jobId, spec)
   if (!sub.ok) return json({ error: `batch submit failed (${sub.status})`, detail: sub.text.slice(0, 1000) }, 500)
   const run: ReapplyRun = { ...req, job_id: jobId, actor: id.email ?? id.name ?? 'admin', ts: Math.floor(Date.now() / 1000), out }
-  await env.DB.prepare(`INSERT INTO digest_reapply (${COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(run.job_id, run.month, run.channel, run.target, run.dry_run ? 1 : 0, run.params, run.quota_marks, run.actor, run.ts, run.out).run()
+  await env.DB.prepare(`INSERT INTO digest_reapply (${COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(run.job_id, run.month, run.channel, run.target, run.dry_run ? 1 : 0, run.params, run.quota_marks, run.variant, run.actor, run.ts, run.out).run()
   return json({ run }, 200, { 'cache-control': 'no-store' })
 }
 
@@ -193,13 +209,18 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   const r = await env.DB.prepare(`SELECT ${COLS} FROM digest_reapply WHERE job_id = ?`).bind(job).first()
   if (!r) return json({ error: `no run ${job}` }, 404)
   const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET'])
-  if ('missing' in cfg || !env.GCP_SA_KEY) return json({ run: row(r), status: null, output: null }, 200, { 'cache-control': 'no-store' })
+  const run = row(r)
+  if ('missing' in cfg || !env.GCP_SA_KEY) return json({ run, status: null, output: null, switch: null }, 200, { 'cache-control': 'no-store' })
   const token = await gcpToken(env.GCP_SA_KEY)
   const auth = { authorization: `Bearer ${token}` }
-  const [jr, or] = await Promise.all([
+  const obj = (ext: 'txt' | 'switch.json') => fetch(`https://storage.googleapis.com/storage/v1/b/${cfg.dataBucket}/o/${encodeURIComponent(runKey(job, ext))}?alt=media`, { headers: auth })
+  const [jr, or, sr] = await Promise.all([
     fetch(`${batchJobsUrl(cfg, cfg.region)}/${job}`, { headers: auth }),
-    fetch(`https://storage.googleapis.com/storage/v1/b/${cfg.dataBucket}/o/${encodeURIComponent(runKey(job, 'txt'))}?alt=media`, { headers: auth }),
+    obj('txt'),
+    switches(run) ? obj('switch.json') : Promise.resolve(null),
   ])
   const status = jr.ok ? ((await jr.json()) as { status?: { state?: string } }).status?.state ?? null : null
-  return json({ run: row(r), status, output: or.ok ? await or.text() : null }, 200, { 'cache-control': 'no-store' })
+  // a switch preview whose thread is already the candidate's style writes no plan (a plain dry run): `switch` null
+  const plan = sr?.ok ? parseSwitchPlan(await sr.json().catch(() => null)) : null
+  return json({ run, status, output: or.ok ? await or.text() : null, switch: typeof plan === 'string' ? null : plan }, 200, { 'cache-control': 'no-store' })
 }

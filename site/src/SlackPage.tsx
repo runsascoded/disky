@@ -10,6 +10,7 @@ import { useDocTitle } from './title'
 import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type QuotaRows, type PreviewBundle, type PreviewReply, type RenderedReply, type ReplyCell, replies as renderReplies } from './digest'
 import { decodeParams, encodeParams, jobParams, previewMarks } from './digest/codec'
 import { RUNWAY_HUE, type Tok, tokenize } from './digest/mrkdwn'
+import { canonicalTemplate, VARIANTS } from './digest/templates'
 import './slack.scss'
 
 // /admin/slack (specs/slack-preview-page.md), admin only: the monthly digest's OP as the job posted it (its preview
@@ -19,7 +20,9 @@ import './slack.scss'
 // §4): the live settings the job renders under (`/api/digest-settings`, D1), and re-applying the digest to chosen
 // messages of the thread (`/api/digest-reapply`: a Batch job running the CLI's selectors, a dry run first). A dry run
 // of the OP or of days writes a thrds rewrite plan, reviewed here in thrds' `PlanView` and applied message by message
-// (`/api/digest-reapply/<job>/{plan,check,apply}`, specs/done/digest-rewrite-review.md).
+// (`/api/digest-reapply/<job>/{plan,check,apply}`, specs/done/digest-rewrite-review.md). The thread's reply style is
+// switched here too (specs/digest-thread-variant.md): a whole-thread preview under the new style lists what it posts and
+// deletes; switching records it (`/api/digest-threads`, with that preview's deletes) and runs the converge that does it.
 
 interface Listing { bundles: { key: string; month: string; channel: string; variant: string }[] }
 
@@ -210,9 +213,12 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
   )
 }
 
-interface Settings { template: string; params: string; quota_marks: string; updated_by: string; updated_at: number }
-interface Run { job_id: string; month: string; channel: string; target: string; dry_run: boolean; params: string | null; quota_marks: string | null; actor: string; ts: number }
-interface RunDetail { run: Run; status: string | null; output: string | null }
+interface Settings { template: string; params: string; quota_marks: string; variant: string | null; updated_by: string; updated_at: number }
+interface Run { job_id: string; month: string; channel: string; target: string; dry_run: boolean; params: string | null; quota_marks: string | null; variant: string | null; actor: string; ts: number }
+interface SwitchPlan { from: string; to: string; post: { key: string; scan: string; headline: string }[]; delete: { key: string; ts: string }[] }
+interface RunDetail { run: Run; status: string | null; output: string | null; switch: SwitchPlan | null }
+interface Thread { variant: string; deletes: string[]; plan_job: string; updated_by: string; updated_at: number }
+type Form = { params: string; quota_marks: string; variant: string | null }
 
 const MARKS = ['warning', 'circles', 'runway', 'runway-hue']
 const DONE = ['SUCCEEDED', 'FAILED', 'DELETION_IN_PROGRESS']
@@ -226,7 +232,7 @@ async function send<T>(url: string, method: string, body: unknown): Promise<T> {
 }
 
 /** The live settings: what the job renders the OP (`params`) and replies (`quota_marks`) under, over its file's. */
-function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: string[]; form: { params: string; quota_marks: string }; setForm: (f: { params: string; quota_marks: string }) => void }) {
+function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: string[]; form: Form; setForm: (f: Form) => void }) {
   const qc = useQueryClient()
   const template = b.cfg.template
   const s = useQuery({ queryKey: ['digest-settings', template], queryFn: () => getJson<{ settings: Settings | null }>(`/api/digest-settings?template=${template}`) })
@@ -238,14 +244,14 @@ function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: st
   // the form starts from the live row (none: the bundle's params; reply marks unknown to the page until set)
   const [seeded, setSeeded] = useState(false)
   useEffect(() => {
-    if (!seeded && cur) { setForm({ params: cur.params, quota_marks: cur.quota_marks }); setSeeded(true) }
+    if (!seeded && cur) { setForm({ params: cur.params, quota_marks: cur.quota_marks, variant: cur.variant }); setSeeded(true) }
   }, [cur, seeded, setForm])
   return (
     <section className="slack-act">
       <h2>Live settings</h2>
       <p className="dim">
         {s.isLoading ? 'Loading…' : cur
-          ? <>The job renders under params <code>{cur.params || '(defaults)'}</code> and quota marks <code>{cur.quota_marks}</code> (set by {cur.updated_by}, {when(cur.updated_at)}).</>
+          ? <>The job renders under params <code>{cur.params || '(defaults)'}</code> and quota marks <code>{cur.quota_marks}</code>; a new month's thread starts as <code>{cur.variant ?? "the config file's style"}</code> (set by {cur.updated_by}, {when(cur.updated_at)}).</>
           : <>No live settings: the job uses its config file's (this bundle was rendered under params <code>{b.params || '(defaults)'}</code>).</>}
         {' '}A change applies from the next converge (the next scan, or a re-apply below).
       </p>
@@ -260,9 +266,86 @@ function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: st
         })}
         <label>reply marks <select value={form.quota_marks} onChange={e => setForm({ ...form, quota_marks: e.target.value })}>
           {MARKS.map(m => <option key={m} value={m}>{m}</option>)}</select></label>
-        <ArmedButton label="save" confirm={`save as live (${template})?`} disabled={save.isPending || (cur?.params === form.params && cur?.quota_marks === form.quota_marks)} onClick={() => save.mutate()} />
+        <label>new months' style <select value={form.variant ?? ''} onChange={e => setForm({ ...form, variant: e.target.value || null })}>
+          <option value="">the config file's</option>
+          {(VARIANTS[canonicalTemplate(template) ?? 'quota'] ?? []).map(v => <option key={v} value={v}>{v}</option>)}</select></label>
+        <ArmedButton label="save" confirm={`save as live (${template})?`} disabled={save.isPending || (cur?.params === form.params && cur?.quota_marks === form.quota_marks && (cur?.variant ?? null) === form.variant)} onClick={() => save.mutate()} />
       </div>
       {save.error && <p className="err">{save.error.message}</p>}
+    </section>
+  )
+}
+
+/** A run's status, polled until it's done (`/api/digest-reapply?job=`). */
+function useRun(job: string | null) {
+  return useQuery({
+    queryKey: ['digest-reapply', job], enabled: !!job,
+    queryFn: () => getJson<RunDetail>(`/api/digest-reapply?job=${job}`),
+    refetchInterval: q => (q.state.data && DONE.includes(q.state.data.status ?? '') ? false : 5000),
+  })
+}
+
+/** The thread's reply style (specs/digest-thread-variant.md): what it was posted as, an admin's switch if one is set,
+ *  and switching it: a whole-thread preview under the new style lists the replies it posts and the ones it deletes;
+ *  "switch" records the switch with exactly those deletes (`PUT /api/digest-threads`), then runs the converge that does
+ *  it. A failed or interrupted switch is finished by the next scheduled converge, deleting only the listed replies. */
+function ThreadStyle({ b }: { b: PreviewBundle }) {
+  const qc = useQueryClient()
+  const styles = VARIANTS[canonicalTemplate(b.cfg.template) ?? 'quota'] ?? []
+  const [to, setTo] = useState(styles.find(v => v !== b.variant) ?? b.variant)
+  const [preview, setPreview] = useState<string | null>(null)
+  const [real, setReal] = useState<string | null>(null)
+  const key = ['digest-threads', b.channel, b.month]
+  const row = useQuery({ queryKey: key, queryFn: () => getJson<{ thread: Thread | null }>(`/api/digest-threads?channel=${b.channel}&month=${b.month}`) })
+  const pre = useRun(preview)
+  const done = useRun(real)
+  const dry = useMutation({
+    mutationFn: () => send<{ run: Run }>('/api/digest-reapply', 'POST', { month: b.month, channel: b.channel, target: 'thread', dry_run: true, variant: to }),
+    onSuccess: ({ run }) => { setPreview(run.job_id); setReal(null) },
+  })
+  const plan = pre.data?.status === 'SUCCEEDED' ? pre.data.switch : null
+  const go = useMutation({
+    mutationFn: async () => {
+      await send('/api/digest-threads', 'PUT', { channel: b.channel, month: b.month, variant: to, plan_job: preview })
+      return send<{ run: Run }>('/api/digest-reapply', 'POST', { month: b.month, channel: b.channel, target: 'thread', dry_run: false })
+    },
+    onSuccess: ({ run }) => { setReal(run.job_id); qc.invalidateQueries({ queryKey: key }); qc.invalidateQueries({ queryKey: ['digest-reapply'] }) },
+  })
+  const t = row.data?.thread
+  return (
+    <section className="slack-act">
+      <h2>Reply style</h2>
+      <p className="dim">
+        {b.month}'s thread was last converged as <code>{b.variant}</code>.
+        {t && <> An admin set it to <code>{t.variant}</code> ({t.updated_by}, {when(t.updated_at)}){t.variant !== b.variant && ': the switch is pending (the switch job, or the next scheduled converge, finishes it)'}.</>}
+        {' '}Switching posts the new style's replies into the same thread, then deletes the old style's: only the ones its preview listed.
+      </p>
+      {row.error && <p className="err">{row.error.message}</p>}
+      <div className="slack-controls">
+        <label>style <select value={to} onChange={e => { setTo(e.target.value); setPreview(null) }}>
+          {styles.map(v => <option key={v} value={v}>{v}{v === b.variant ? ' (current)' : ''}</option>)}</select></label>
+        <button disabled={dry.isPending || to === b.variant} onClick={() => dry.mutate()}>preview the switch</button>
+      </div>
+      {dry.error && <p className="err">{dry.error.message}</p>}
+      {preview && pre.data && !plan && <div className="slack-run">
+        <p className="dim"><code>{preview}</code>: {pre.data.status ?? 'status unknown'}{!DONE.includes(pre.data.status ?? '') && ' …'}</p>
+        <pre>{pre.data.output ?? '(no output yet)'}</pre>
+      </div>}
+      {plan && <div className="slack-switch">
+        <p>Switching {b.month} from <code>{plan.from}</code> to <code>{plan.to}</code> posts <b>{plan.post.length}</b> and deletes <b>{plan.delete.length}</b> replies.</p>
+        <details open={plan.post.length <= 8}><summary>To post ({plan.post.length})</summary>
+          <ul>{plan.post.map(p => <li key={p.key}><code>{p.key}</code> <Toks toks={tokenize(p.headline)} plot={null} /></li>)}</ul></details>
+        <details open><summary>To delete ({plan.delete.length})</summary>
+          <ul className="cols">{plan.delete.map(d => <li key={d.ts}><code>{d.key}</code> <span className="dim">{d.ts}</span></li>)}</ul></details>
+        <ArmedButton label={`switch to ${plan.to}`} disabled={go.isPending || !!real}
+          confirm={`post ${plan.post.length} ${plan.to} replies, then delete these ${plan.delete.length} ${plan.from} replies? Deletes can't be undone.`}
+          onClick={() => go.mutate()} />
+        {go.error && <p className="err">{go.error.message}</p>}
+      </div>}
+      {real && done.data && <div className="slack-run">
+        <p className="dim"><code>{real}</code>: {done.data.status ?? 'status unknown'}{!DONE.includes(done.data.status ?? '') && ' …'}</p>
+        <pre>{done.data.output ?? '(no output yet)'}</pre>
+      </div>}
     </section>
   )
 }
@@ -307,7 +390,7 @@ export function Review({ job, permalink }: { job: string; permalink: string | nu
 
 /** Re-apply the digest to chosen messages of the thread: a dry run lists what would change; the OP's or days' is reviewed
  *  and applied here message by message, a whole-thread run converges as the cron does. */
-function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_marks: string } }) {
+function Reapply({ b, form }: { b: PreviewBundle; form: Form }) {
   const qc = useQueryClient()
   const [channel, setChannel] = useState(b.channel)
   const [kind, setKind] = useState<'op' | 'days' | 'thread'>('op')
@@ -351,7 +434,8 @@ function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_
           {runs.data.runs.map(r => (
             <li key={r.job_id}><button className={job === r.job_id ? 'on' : ''} onClick={() => setJob(r.job_id)}>{when(r.ts)}</button>
               {' '}{r.dry_run ? 'preview' : <b>apply</b>} {r.target} in <code>{r.channel}</code>
-              {(r.params !== null || r.quota_marks !== null) && <> under <code>{r.params || '(defaults)'}</code> / <code>{r.quota_marks}</code></>} · {r.actor}</li>
+              {(r.params !== null || r.quota_marks !== null) && <> under <code>{r.params || '(defaults)'}</code> / <code>{r.quota_marks}</code></>}
+              {r.variant !== null && <> as <code>{r.variant}</code></>} · {r.actor}</li>
           ))}
         </ul>
       )}
@@ -374,7 +458,7 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
   const rerender = opText(b.rows, b.month, b.cfg, { ...links, plotUrl: b.plot_url === null ? null : PLOT }, decodeParams(posted))
   const matches = rerender.split('\n').map(norm).join('\n') === b.op.split('\n').map(norm).join('\n')
   const live = b.op.split('\n').map(norm)
-  const [form, setForm] = useState({ params: posted, quota_marks: 'runway' })
+  const [form, setForm] = useState<Form>({ params: posted, quota_marks: 'runway', variant: null })
   const replyCfg = b.rows.template === 'quota' ? b.reply : null
   const candReplies = (p: DigestParams) => replyCfg ? renderReplies(b.rows as QuotaRows, b.cfg, replyCfg, b.variant, { marks: p.replyMarks, total: p.replyTotal, lines: p.replyLines, collage: p.replyCollage }) : null
   const rendered = candReplies(DEFAULT_PARAMS)
@@ -410,6 +494,7 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
     </div>
     {/* a never-posted bundle's params are a try-out's: not seeded into the panels that change the live thread */}
     {b.op_ts && <>
+      <ThreadStyle b={b} />
       <LiveSettings b={b} cands={cands} form={form} setForm={setForm} />
       <Reapply b={b} form={form} />
     </>}

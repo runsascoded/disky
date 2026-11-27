@@ -53,4 +53,8 @@
     button { font-size: 11.5px; } }
   .slack-run pre { font-size: 11.5px; max-height: 420px; overflow: auto; white-space: pre-wrap; }
   .slack-rows pre { font-size: 11.5px; max-height: 360px; overflow: auto; }
+  .slack-switch { font-size: 12.5px; margin: 8px 0;
+    ul { margin: 4px 0; padding-left: 18px; max-height: 320px; overflow: auto; }
+    ul.cols { columns: 2 16em; }
+    li { break-inside: avoid; } }
 }

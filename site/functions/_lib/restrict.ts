@@ -36,7 +36,7 @@ export const RESTRICTED_BLOCKED = [
   '/api/path-index', '/v1', '/api/plans', '/api/actions', '/api/db', '/api/owners',
   '/api/estate', '/api/assignments', '/api/sweep', '/api/plan-sweep', '/api/og',
   '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/name-matches', '/api/health', '/api/scan-runs',
-  '/api/digest-image', '/api/non-live',
+  '/api/digest-image', '/api/digest-threads', '/api/non-live',
 ]
 
 export const blockedForRestricted = (pathname: string): boolean =>

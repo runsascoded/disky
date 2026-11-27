@@ -41,11 +41,23 @@ describe('/api/digest-settings', () => {
       parseSettings({ template: 'quota', params: 'qx', quota_marks: 'runway' }),
       parseSettings([]),
     ]).toEqual([
-      { template: 'quota', params: 'qh,pp', quota_marks: 'runway-hue' },
+      { template: 'quota', params: 'qh,pp', quota_marks: 'runway-hue', variant: null },
       'template: quota | cost',
       'quota_marks: warning | circles | runway | runway-hue | arrow-chip',
       'params: digest params: unreadable field "qx" in "qx"',
       'body: a JSON object',
+    ])
+  })
+
+  it('takes a variant of the template, or null: the default for a new month', () => {
+    expect([
+      parseSettings({ template: 'quota', params: '', quota_marks: 'runway', variant: 'weekly' }),
+      parseSettings({ template: 'cost', params: '', quota_marks: 'runway', variant: 'body' }),
+      parseSettings({ template: 'quota', params: '', quota_marks: 'runway', variant: null }),
+    ]).toEqual([
+      { template: 'quota', params: '', quota_marks: 'runway', variant: 'weekly' },
+      'variant: sender | weekly | null',
+      { template: 'quota', params: '', quota_marks: 'runway', variant: null },
     ])
   })
 
@@ -54,10 +66,10 @@ describe('/api/digest-settings', () => {
     expect(await get('?template=zz', viewer)).toEqual([400, { error: 'template: quota | cost' }])
     expect((await put({ template: 'quota', params: 'qr,pp', quota_marks: 'runway' }, viewer))[0]).toBe(403)
     const [s1, b1] = await put({ template: 'quota', params: 'qr,pp', quota_marks: 'runway' }, admin)
-    expect([s1, norm(b1.settings ?? null)]).toEqual([200, { template: 'quota', params: 'qr,pp', quota_marks: 'runway', updated_by: 'ops@example.test', updated_at: '<ts>' }])
+    expect([s1, norm(b1.settings ?? null)]).toEqual([200, { template: 'quota', params: 'qr,pp', quota_marks: 'runway', variant: null, updated_by: 'ops@example.test', updated_at: '<ts>' }])
     await put({ template: 'quota', params: 'qh,pp', quota_marks: 'runway-hue' }, admin)
     const [s2, b2] = await get('?template=quota', viewer)
-    expect([s2, norm(b2.settings ?? null)]).toEqual([200, { template: 'quota', params: 'qh,pp', quota_marks: 'runway-hue', updated_by: 'ops@example.test', updated_at: '<ts>' }])
+    expect([s2, norm(b2.settings ?? null)]).toEqual([200, { template: 'quota', params: 'qh,pp', quota_marks: 'runway-hue', variant: null, updated_by: 'ops@example.test', updated_at: '<ts>' }])
     expect(await put({ template: 'quota', params: '', quota_marks: 'squares' }, admin)).toEqual([400, { error: 'quota_marks: warning | circles | runway | runway-hue | arrow-chip' }])
     const log = (await db.prepare("SELECT pk, action, who, old_json, new_json FROM admin_edits WHERE tbl = 'digest_settings' ORDER BY id").all()).results
       .map(r => ({ ...r, old_json: r.old_json && JSON.parse(r.old_json as string).quota_marks, new_json: JSON.parse(r.new_json as string).quota_marks }))
@@ -70,12 +82,12 @@ describe('/api/digest-settings', () => {
   it("reads and writes a template's old name as its name, and its old-named row until the recipe re-keys it", async () => {
     // a D1 the `digest-template-rename` recipe hasn't reached: the row is still under `gcs`
     raw.prepare('INSERT INTO digest_settings (template, params, quota_marks, updated_by, updated_at) VALUES (?, ?, ?, ?, ?)').run('gcs', 'qc', 'circles', 'old@example.test', 1)
-    const was = { template: 'cost', params: 'qc', quota_marks: 'circles', updated_by: 'old@example.test', updated_at: 1 }
+    const was = { template: 'cost', params: 'qc', quota_marks: 'circles', variant: null, updated_by: 'old@example.test', updated_at: 1 }
     expect([await get('?template=cost', viewer), await get('?template=gcs', viewer)]).toEqual([[200, { settings: was }], [200, { settings: was }]])
-    expect(parseSettings({ template: 'cw', params: '', quota_marks: 'runway' })).toEqual({ template: 'quota', params: '', quota_marks: 'runway' })
+    expect(parseSettings({ template: 'cw', params: '', quota_marks: 'runway' })).toEqual({ template: 'quota', params: '', quota_marks: 'runway', variant: null })
     const [s, b] = await put({ template: 'gcs', params: 'qr,pp', quota_marks: 'runway' }, admin)
-    expect([s, norm(b.settings ?? null)]).toEqual([200, { template: 'cost', params: 'qr,pp', quota_marks: 'runway', updated_by: 'ops@example.test', updated_at: '<ts>' }])
+    expect([s, norm(b.settings ?? null)]).toEqual([200, { template: 'cost', params: 'qr,pp', quota_marks: 'runway', variant: null, updated_by: 'ops@example.test', updated_at: '<ts>' }])
     expect(raw.prepare("SELECT template, params FROM digest_settings WHERE template IN ('gcs', 'cost')").all().map(r => ({ ...r }))).toEqual([{ template: 'cost', params: 'qr,pp' }])
-    expect(await get('?template=gcs', viewer).then(([st, x]) => [st, norm(x.settings ?? null)])).toEqual([200, { template: 'cost', params: 'qr,pp', quota_marks: 'runway', updated_by: 'ops@example.test', updated_at: '<ts>' }])
+    expect(await get('?template=gcs', viewer).then(([st, x]) => [st, norm(x.settings ?? null)])).toEqual([200, { template: 'cost', params: 'qr,pp', quota_marks: 'runway', variant: null, updated_by: 'ops@example.test', updated_at: '<ts>' }])
   })
 })

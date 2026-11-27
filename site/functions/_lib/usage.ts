@@ -81,7 +81,7 @@ export class Meter {
 export const ROUTES: readonly string[] = [
   '/api/admin/history', '/api/admin/history-adopt',
   '/api/admin/r2-probe',
-  '/api/actions', '/api/admins', '/api/age-pyramid', '/api/annotations', '/api/assignments', '/api/diff', '/api/diff/level', '/api/digest-image', '/api/digest-op', '/api/digest-preview', '/api/digest-reapply', '/api/digest-settings',
+  '/api/actions', '/api/admins', '/api/age-pyramid', '/api/annotations', '/api/assignments', '/api/diff', '/api/diff/level', '/api/digest-image', '/api/digest-op', '/api/digest-preview', '/api/digest-reapply', '/api/digest-settings', '/api/digest-threads',
   '/api/dups', '/api/estate', '/api/filter-caps', '/api/filter-cover', '/api/filter-scans', '/api/footer-cache', '/api/groups',
   '/api/health', '/api/largest', '/api/me', '/api/name-matches', '/api/name-summary', '/api/name-summary-registry', '/api/non-live', '/api/owner-prices',
   '/api/owners', '/api/path-index', '/api/prefixes', '/api/series', '/api/session-monitor', '/api/slack-emoji', '/api/static-bench',

@@ -3597,7 +3597,7 @@ def _digest(
         raise UsageError("-A/--as-of previews (with -n or -W), never posts or edits (not with -o, -d or -y)")
     if selected and (edit_replies or redo_replies or platform != "slack"):
         raise UsageError("-o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
-    if plan_path and not (dry_run and (selected or switch)):
+    if plan_path and not (dry_run and (selected or (override and not (edit_replies or redo_replies)))):
         raise UsageError("-j/--plan writes a dry run's edits (-n with -o, -d or -y)")
     if preview_key:
         if selected or dry_run or edit_replies or redo_replies or platform != "slack":
@@ -3613,6 +3613,8 @@ def _digest(
                 print(f"switch plan: {len(plan['post'])} to post, {len(plan['delete'])} to delete -> {plan_path}")
             return
         print(dg.dry_run(tpl, root, m, variant))
+        if plan_path:
+            print(f"switch plan: none, {m:%Y-%m}'s thread is " + (f"already {live}" if live else "not posted yet") + "; nothing written")
         return
 
     if platform == "discord":

@@ -3,6 +3,9 @@
  * preview bundle), so nothing past it sees an alias. Pure; DOM-free. */
 export const TEMPLATES = ['quota', 'cost'] as const
 export type TemplateName = typeof TEMPLATES[number]
+/** Each template's reply styles (`digest_quota.VARIANTS`, `digest_cost.CostTemplate.variants`: keep identical), the first
+ *  its default: what `/admin/slack` switches a thread between (specs/digest-thread-variant.md). */
+export const VARIANTS: Record<TemplateName, readonly string[]> = { quota: ['sender', 'body', 'weekly'], cost: ['sender', 'weekly'] }
 /** Each template's old name (deployments' configs, scan profiles and older preview bundles still carry them). */
 export const TEMPLATE_ALIASES: Record<string, TemplateName> = { cw: 'quota', gcs: 'cost' }
 

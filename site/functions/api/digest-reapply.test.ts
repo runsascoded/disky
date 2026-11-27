@@ -15,9 +15,13 @@ describe('/api/digest-reapply', () => {
       parseReapply({ ...base, channel: 'D0CE8QE83EH', target: '2026-11-01..2026-11-02', dry_run: false, params: 'qh,pp', quota_marks: 'runway-hue' }, 'C0C1YR7D0KU'),
       parseReapply({ ...base, target: 'thread' }, 'C0C1YR7D0KU'),
     ]).toEqual([
-      { month: '2026-11', channel: 'C0C1YR7D0KU', target: 'op', dry_run: true, params: null, quota_marks: null },
-      { month: '2026-11', channel: 'D0CE8QE83EH', target: '2026-11-01..2026-11-02', dry_run: false, params: 'qh,pp', quota_marks: 'runway-hue' },
-      { month: '2026-11', channel: 'C0C1YR7D0KU', target: 'thread', dry_run: true, params: null, quota_marks: null },
+      { month: '2026-11', channel: 'C0C1YR7D0KU', target: 'op', dry_run: true, params: null, quota_marks: null, variant: null },
+      { month: '2026-11', channel: 'D0CE8QE83EH', target: '2026-11-01..2026-11-02', dry_run: false, params: 'qh,pp', quota_marks: 'runway-hue', variant: null },
+      { month: '2026-11', channel: 'C0C1YR7D0KU', target: 'thread', dry_run: true, params: null, quota_marks: null, variant: null },
+    ])
+    expect([parseReapply({ ...base, target: 'thread', variant: 'weekly' }, 'C0C1YR7D0KU'), parseReapply({ ...base, variant: 'daily' }, 'C0C1YR7D0KU')]).toEqual([
+      { month: '2026-11', channel: 'C0C1YR7D0KU', target: 'thread', dry_run: true, params: null, quota_marks: null, variant: 'weekly' },
+      'variant: sender | body | weekly',
     ])
     const T = 'target: thread | op | a day of 2026-11 | an ordered range of its days (A..B)'
     expect([
@@ -59,14 +63,19 @@ describe('/api/digest-reapply', () => {
 
   it('becomes the digest CLI’s selectors; a dry run of the OP or of days also writes its rewrite plan', () => {
     const PLAN = '/gcs/data/digest/reapply/demo-digest-20261103-120000z.plan.json'
-    const r = (o: object) => reapplyArgs({ month: '2026-11', channel: 'C1', target: 'op', dry_run: false, params: null, quota_marks: null, ...o }, PLAN)
+    const SWITCH = '/gcs/data/digest/reapply/demo-digest-20261103-120000z.switch.json'
+    const r = (o: object) => reapplyArgs({ month: '2026-11', channel: 'C1', target: 'op', dry_run: false, params: null, quota_marks: null, variant: null, ...o }, PLAN, SWITCH)
     expect([
       r({}),
       r({ dry_run: true }),
       r({ target: '2026-11-02', dry_run: true }),
       r({ target: '2026-11-01..2026-11-02', params: '', quota_marks: 'runway-hue' }),
       r({ target: 'thread', dry_run: true, params: 'qh,pp' }),
-      reapplyArgs({ month: '2026-11', channel: 'C1', target: 'op', dry_run: true, params: null, quota_marks: null }),
+      reapplyArgs({ month: '2026-11', channel: 'C1', target: 'op', dry_run: true, params: null, quota_marks: null, variant: null }),
+      // a whole-thread preview under another style: the switch plan; for real, it converges under -V
+      r({ target: 'thread', dry_run: true, variant: 'weekly' }),
+      r({ target: 'thread', variant: 'weekly' }),
+      r({ target: 'op', dry_run: true, variant: 'weekly' }),
     ]).toEqual([
       ['-m', '2026-11', '-c', 'C1', '-o'],
       ['-m', '2026-11', '-c', 'C1', '-o', '-n', '-j', PLAN],
@@ -74,6 +83,9 @@ describe('/api/digest-reapply', () => {
       ['-m', '2026-11', '-c', 'C1', '-y', '2026-11-01..2026-11-02', '-p', '', '-q', 'runway-hue'],
       ['-m', '2026-11', '-c', 'C1', '-n', '-p', 'qh,pp'],
       ['-m', '2026-11', '-c', 'C1', '-o', '-n'],
+      ['-m', '2026-11', '-c', 'C1', '-n', '-j', SWITCH, '-V', 'weekly'],
+      ['-m', '2026-11', '-c', 'C1', '-V', 'weekly'],
+      ['-m', '2026-11', '-c', 'C1', '-o', '-n', '-j', PLAN, '-V', 'weekly'],
     ])
   })
 
@@ -140,7 +152,10 @@ describe('/api/digest-reapply', () => {
           maxRunDuration: '86400s',
           volumes: [{ gcs: { remotePath: 'data' }, mountPath: '/mnt/disks/gcs/data', mountOptions: ['--implicit-dirs'] }],
           environment: {
-            variables: { DATA_BUCKET: 'data', JOB_ID: 'quota-digest-20261122-120000z', SITE_URL: 'https://demo', R2_BUCKET: 'demo-index', CLOUDFLARE_ACCOUNT_ID: 'acct' },
+            variables: {
+              DATA_BUCKET: 'data', JOB_ID: 'quota-digest-20261122-120000z', DT_JOB_NAME: 'quota-digest-20261122-120000z', DT_JOB_REGION: 'us-west1',
+              SITE_URL: 'https://demo', R2_BUCKET: 'demo-index', CLOUDFLARE_ACCOUNT_ID: 'acct',
+            },
             secretVariables: {
               SLACK_BOT_TOKEN: 'projects/p/secrets/demo-bot/versions/latest',
               R2_ACCESS_KEY_ID: 'projects/p/secrets/demo-r2-id/versions/latest',

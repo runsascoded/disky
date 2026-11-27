@@ -204,6 +204,7 @@ const SHARED_ROUTES: Record<string, Case[]> = {
     post('/api/digest-reapply/quota-digest-20261122-120000z/apply', 'admin'),
   ],
   'api/digest-settings.ts': [get('/api/digest-settings', 'viewer'), put('/api/digest-settings', 'admin')],
+  'api/digest-threads.ts': [get('/api/digest-threads?channel=C0C9J6CE8BD&month=2026-11', 'viewer'), put('/api/digest-threads', 'admin')],
   'api/dups.ts': [get(`/api/dups?${AT}`, 'viewer', { DUPS: '1' }), get(`/api/dups?${AT}`, 'unconfigured')],
   'api/estate.ts': [get(`/api/estate?${AT}`, 'viewer')],
   // Deployment config only.
@@ -391,6 +392,8 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   // Renders the request's own rows; reads nothing.
   'POST /api/digest-op': 'pathless',
   'GET /api/digest-settings': 'pathless',
+  // the row names the digest's channel and message ids
+  'GET /api/digest-threads': 'blocked',
   // By the route: its groups name paths in every bucket.
   'GET /api/dups': 'blocked',
   'GET /api/estate': 'blocked',

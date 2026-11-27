@@ -197,8 +197,14 @@ def test_cli_dry_run_writes_the_switch_plan(tmp_path: Path):
     assert r.stdout.split("\n")[0] == "digest 2026-09 in C1: switch sender -> weekly; dry-run, nothing posted or deleted"
     assert r.stdout.split("\n")[-2:] == [f"switch plan: 1 to post, 2 to delete -> {out}", ""]
     assert [d["ts"] for d in json.loads(out.read_text())["delete"]] == ["m2", "m3"]
-    # no switch (-V names the live variant): the usual dry run, and -j is refused as before
-    bad = CliRunner().invoke(cli.main, [*args[:-5], "-n", "-V", "sender", "-j", str(out)])
+    # no switch (-V names the live variant): the usual dry run, and no plan (the site's preview passes -j whenever it
+    # names a variant)
+    out.unlink()
+    same = CliRunner().invoke(cli.main, [*args[:-5], "-n", "-V", "sender", "-j", str(out)])
+    assert same.exit_code == 0, same.output
+    assert (same.stdout.split("\n")[-2:], out.exists()) == (["switch plan: none, 2026-09's thread is already sender; nothing written", ""], False)
+    # without -V, -j still needs a selector
+    bad = CliRunner().invoke(cli.main, [*args[:-5], "-n", "-j", str(out)])
     assert (bad.exit_code, bad.output.strip().split("\n")[-1]) == (2, "Error: -j/--plan writes a dry run's edits (-n with -o, -d or -y)")
 
 

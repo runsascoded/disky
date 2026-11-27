@@ -139,7 +139,7 @@ CREATE TABLE digest_reapply (
   actor       TEXT NOT NULL,
   ts          INTEGER NOT NULL,
   out         TEXT NOT NULL
-);
+, variant TEXT);
 
 CREATE TABLE digest_settings (
   template    TEXT PRIMARY KEY,
@@ -147,6 +147,17 @@ CREATE TABLE digest_settings (
   quota_marks TEXT NOT NULL,
   updated_by  TEXT NOT NULL,
   updated_at  INTEGER NOT NULL
+, variant TEXT);
+
+CREATE TABLE digest_threads (
+  channel    TEXT NOT NULL,
+  month      TEXT NOT NULL,
+  variant    TEXT NOT NULL,
+  deletes    TEXT NOT NULL,
+  plan_job   TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (channel, month)
 );
 
 CREATE TABLE footer_cache (
