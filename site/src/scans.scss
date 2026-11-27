@@ -198,6 +198,25 @@
     .fold-pad { display: inline-block; width: 14px; }
   }
   @media (max-width: 640px) { h1 { font-size: 19px; } }
+  // Store upkeep (UpkeepStrip.tsx, HealthPage.tsx's block; specs/store-upkeep-monitoring.md §3): the strip's chips
+  // wrap; each wide fact takes its own line, and on a phone its label sits over its text.
+  .upk-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 10px 0 0; font-size: 13px;
+    a { text-decoration: none; } }
+  h3 > a.sr-status { text-decoration: none; vertical-align: 1px; }
+  .upk-block { margin: 10px 0 0; padding: 6px 0 0; border-top: 1px dashed var(--line); }
+  .upk-facts { margin-top: 0;
+    .upk-wide { flex-basis: 100%; }
+    @media (max-width: 640px) { .upk-wide { flex-direction: column; gap: 0; } } }
+  .hl-store { scroll-margin-top: 20px; }
+  .upk-err { overflow-wrap: anywhere; }
+  .upk-clip { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .upk-more { font: inherit; font-size: 12px; border: 0; background: none; color: var(--s1); cursor: pointer; padding: 0 0 0 4px; }
+  .upk-history { margin: 8px 0 0; font-size: 13px;
+    summary { cursor: pointer; color: var(--ink-2); }
+    ul { list-style: none; margin: 6px 0 0; padding: 0; }
+    li { display: flex; flex-wrap: wrap; gap: 0 12px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+    .upk-h3 { flex-basis: 100%; color: var(--ink-2); }
+    @media (max-width: 640px) { .upk-h2 { flex-basis: 100%; } } }
 }
 .sr-tip { border-collapse: collapse; td { padding: 1px 6px 1px 0; } .num { text-align: right; } }
 // A status tip's issues (`IssueList`; in the tooltip's portal, so outside `.scans-page`): one block each.

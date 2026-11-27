@@ -144,7 +144,7 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
       try {
         const { doc } = await get({ FILTER_STATIC: '1', INDEX_R2: r2({ ...OBJECTS, 'static-names/CURRENT.json': { gen: 'sn1' } }) })
         expect([doc.stores.map(s => [s.kind, s.gen, s.base]), [...held.keys()].filter(k => k.startsWith('https://health.cache/'))])
-          .toEqual([[['static', 'sn1', ['01', '02'].map(D)]], ['https://health.cache/~localhost/primary/-/sn1']])
+          .toEqual([[['static', 'sn1', ['01', '02'].map(D)]], ['https://health.cache/v2/~localhost/primary/-/sn1']])
         // no pointer: no static store, as unpinned before (the colo's copy of the old pointer expired with the isolate's)
         held.clear()
         spy.mockImplementation(() => Date.UTC(2030, 0, 1) + IV_STATE_TTL)
@@ -178,6 +178,48 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
         expect(await read(bad)).toEqual([['interval', null, null, [plan.output]], ['static', null, null, []]])
       }
       expect(await read(undefined)).toEqual([['interval', null, null, [plan.output]], ['static', null, null, []]])
+    })
+
+    it('each store\'s upkeep (specs/store-upkeep-monitoring.md): its maintenance rows, `compaction.json`; another D1 store\'s and another prefix\'s rows left out', async () => {
+      const NOW = Date.UTC(2026, 9, 8) / 1000
+      const { db, raw } = await sqliteD1()
+      raw.exec(`
+INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_ts, gen, machine, spot, cost_usd, error, failed_phase, source, updated_ts, store) VALUES
+  ('st-fold', '${D('02')}', 'compact', NULL, 'succeeded', 1000, 4600, 'static-names/sn0 → sn1', 'n2-highmem-16', 1, 0.9, NULL, NULL, 'job', 4600, 'primary'),
+  ('st-merge', '${D('05')}', 'merge', NULL, 'failed', ${NOW - 7200}, ${NOW - 6600}, 'static-names/sn1', NULL, NULL, NULL, 'Boom', 'carry L1', 'job', ${NOW - 6600}, 'primary'),
+  ('meta-merge', '${D('05')}', 'merge', NULL, 'failed', ${NOW - 3600}, ${NOW - 3000}, 'static-names/sn1', NULL, NULL, NULL, 'Other', NULL, 'job', ${NOW - 3000}, 'meta'),
+  ('iv-merge', '${D('06')}', 'merge', NULL, 'running', ${NOW - 600}, NULL, 'interval-store/iv1', NULL, NULL, NULL, NULL, NULL, 'job', ${NOW - 60}, 'primary'),
+  ('meta-fold', '${D('06')}', 'compact', NULL, 'failed', ${NOW - 900}, ${NOW - 800}, 'history/meta/interval-store/iv1', NULL, NULL, NULL, 'Meta', NULL, 'job', ${NOW - 800}, 'primary'),
+  ('r6', '${D('06')}', 'scan', NULL, 'succeeded', 100, 400, NULL, NULL, NULL, NULL, NULL, NULL, 'job', 400, 'primary');
+INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status, note) VALUES
+  ('iv-merge', 'carry L1', 0, ${NOW - 500}, NULL, 'running', 'building 2 runs → deltas/2026-10-05_2026-10-06');
+`)
+      const att = (a: Record<string, unknown>) => ({
+        machine: null, spot: null, cost_usd: null, error: null, failed_phase: null, note: null, lost: false, mem_peak_bytes: null, mem_limit_bytes: null, ...a,
+      })
+      const IV_MERGE = att({ run_id: 'iv-merge', kind: 'merge', status: 'running', scan: D('06'), gen: 'interval-store/iv1', started_ts: NOW - 600, finished_ts: null, secs: 600, note: 'building 2 runs → deltas/2026-10-05_2026-10-06' })
+      const ST_FOLD = att({ run_id: 'st-fold', kind: 'compact', status: 'succeeded', scan: D('02'), gen: 'static-names/sn0 → sn1', started_ts: 1000, finished_ts: 4600, secs: 3600, machine: 'n2-highmem-16', spot: true, cost_usd: 0.9, mem_limit_bytes: 128 * 2 ** 30 })
+      const ST_MERGE = att({ run_id: 'st-merge', kind: 'merge', status: 'failed', scan: D('05'), gen: 'static-names/sn1', started_ts: NOW - 7200, finished_ts: NOW - 6600, secs: 600, error: 'Boom', failed_phase: 'carry L1' })
+      const spy = vi.spyOn(Date, 'now').mockImplementation(() => NOW * 1000)
+      try {
+        const { doc } = await get({ DB: db, INDEX_R2: r2({ ...OBJECTS, 'static-names/sn1/compaction.json': { from: 'sn0', manifest: 'manifests/2026-10-02.json', runs: [], base_scans: 1, scans: 2, level: 5 } }), INTERVAL_STORE_GEN: 'iv1', STATIC_GEN: 'sn1' })
+        expect(doc.stores.map(s => [s.kind, s.prefix, s.upkeep])).toEqual([
+          ['interval', 'interval-store', {
+            policy: 'level:5', status: 'carrying', why: null, overdue_s: null,
+            fold: { due: null, attempts: [], failing: 0, running: null, usual_s: null, last: null },
+            carry: { due: [{ inputs: ['deltas/2026-10-05', 'deltas/2026-10-06'], output: 'deltas/2026-10-05_2026-10-06', level: 1, first: D('05'), last: D('06'), scans: 2 }], failing: 0, running: IV_MERGE, last: null },
+            history: [IV_MERGE],
+          }],
+          ['static', 'static-names', {
+            policy: 'level:5', status: 'failing', why: 'carries: 1 failed merge in a row; the last: Boom', overdue_s: null,
+            fold: { due: null, attempts: [], failing: 0, running: null, usual_s: 3600, last: { from: 'sn0', gen: 'sn1', ts: UPLOADED.getTime() / 1000, scans: 2, rule: 'level 5', run: ST_FOLD } },
+            carry: { due: [], failing: 1, running: null, last: ST_MERGE },
+            history: [ST_MERGE, ST_FOLD],
+          }],
+        ])
+      } finally {
+        spy.mockRestore()
+      }
     })
   })
 })

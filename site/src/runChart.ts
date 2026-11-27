@@ -1,6 +1,6 @@
 import { enumParam, type Param } from 'use-prms'
 import type { HistoryPoint } from './runHistory'
-import { STATUS_FILTERS } from './scanRunsModel'
+import { MAINT_KINDS, STATUS_FILTERS } from './scanRunsModel'
 
 const { ceil, floor, log10, max, min, pow, round } = Math
 export interface RunWindow { end: number | null; duration: number | null }
@@ -53,7 +53,14 @@ export const runSpanParam: Param<RunSpan | null> = {
 }
 /** /scans' kinds: comma-separated includes and `!kind` excludes; absent = all, `!` = none. */
 export const runKindParam: Param<string> = { encode: k => k || undefined, decode: s => s ?? '' }
-export const runKindTokens = (filter: string): string[] => filter.split(',').filter(Boolean)
+/** Kind groups a filter may name, each standing for its kinds (`!group` excludes them all): `upkeep`, the stores'
+ *  carries and folds (`MAINT_KINDS`: `compact`, `race`, `merge`; specs/store-upkeep-monitoring.md §3). */
+export const RUN_KIND_GROUPS: Record<string, readonly string[]> = { upkeep: MAINT_KINDS }
+/** A filter's tokens, each group expanded to its kinds. */
+export const runKindTokens = (filter: string): string[] => filter.split(',').filter(Boolean).flatMap(k => {
+  const neg = k.startsWith('!'), name = k.replace(/^!/, ''), group = Object.hasOwn(RUN_KIND_GROUPS, name) ? RUN_KIND_GROUPS[name] : null
+  return group ? group.map(g => (neg ? `!${g}` : g)) : [k]
+})
 export const runFilterKinds = (filter: string): string[] => runKindTokens(filter).map(k => k.replace(/^!/, '')).filter(Boolean)
 export function runKindMatches(filter: string, kind: string): boolean {
   const tokens = runKindTokens(filter)
