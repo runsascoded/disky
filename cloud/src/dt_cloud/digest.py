@@ -462,7 +462,10 @@ def deg(pct_signed: float, mult: float = 1.0) -> int:
 
 
 def _tb(v: float) -> str:
-    return f"+{v:.1f}" if v >= 0 else f"{MINUS}{abs(v):.1f}"
+    """A signed size delta to one place: a delta that rounds to zero is `+0.0` whichever its sign (`-0.0 >= 0` is true,
+    so a small negative sum rendered `+-0.0`: r2's weekly reply for 11/16, 2026-11-26)."""
+    s = f"{abs(v):.1f}"
+    return f"{MINUS}{s}" if v < 0 and s != "0.0" else f"+{s}"
 
 
 def _pct(dtb: float, tb: float) -> str:

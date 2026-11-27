@@ -1719,3 +1719,10 @@ def test_icons_dir_resolves_beside_the_config_from_a_task_work_dir(tmp_path, mon
     monkeypatch.chdir(work)
     assert (_icons_dir("job/icons-x", app / "job" / "digest.yml"), _icons_dir("/abs/icons", app / "job" / "digest.yml")) == (
         app / "job" / "icons-x", Path("/abs/icons"))
+
+
+def test_a_delta_that_rounds_to_zero_reads_plus_zero():
+    """`digest._tb`: `round(-0.04, 1)` is `-0.0`, which once rendered `+-0.0` (r2's weekly reply for 11/16); any delta that
+    rounds to zero reads `+0.0`, and the rest keep their sign."""
+    assert [E._tb(v) for v in (round(-0.04, 1), -0.04, 0.0, 0.04, 0.05, -0.06, 12.34, -12.34)] == [
+        "+0.0", "+0.0", "+0.0", "+0.0", "+0.1", f"{E.MINUS}0.1", "+12.3", f"{E.MINUS}12.3"]
