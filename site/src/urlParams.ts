@@ -296,6 +296,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'When present, the size-over-time chart plots object counts instead of stored bytes. The values (`ym`) and range (`xr`) apply to it the same way. When absent, it plots bytes.',
     examples: [''],
   },
+  chg: {
+    label: 'Changes over time',
+    description: 'When present, the size-over-time chart plots object counts over a strip of each day’s objects added and modified (up) and deleted (down), from the store’s change counters (the store root and its top level; a week a bar past 90 days). Wins over `obj`. When absent, the chart plots bytes or objects.',
+    examples: [''],
+  },
   og: {
     label: 'Preview token',
     description: 'A per-view token that lets link unfurlers show a detailed preview card. It grants no access, and is removed from the address bar on load so a re-share doesn\'t carry it.',

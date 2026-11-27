@@ -6,7 +6,7 @@ import type { Annotation, Series as TsSeries } from '@disk-tree/react'
 import { slotColor } from './colors'
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useMemo, useRef, useState } from 'react'
-import { boolParam, useUrlState } from 'use-prms'
+import { boolParam, useUrlState, useUrlStates } from 'use-prms'
 import { shortName } from './UserChip'
 import { useStore, useStoreFetch } from './store'
 import { useUnits } from './units'
@@ -31,6 +31,8 @@ import { useActions } from 'use-kbd'
 import { autoScans, brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
 import { useWidth } from './useWidth'
 import { XRangeControls } from './XRangeControls'
+import { ChangeLegend, ChangeStrip } from './ChangeStrip'
+import type { FlowPoint } from './changeBars'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
@@ -38,7 +40,8 @@ import { XRangeControls } from './XRangeControls'
 // precomputed per prefix and nothing is floored.
 
 interface Pt { x: number; y: number; y0?: number }
-interface Series { path: string; chunks?: number; failed?: string[]; points: { date: string; bytes: number; objects: number; missing?: string[] }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; bytes: number; objects: number }[] }[] }
+/** A point's change flows (`added`, `deleted`, `modified`, …) where the store counted its scan (specs/change-metrics.md §4.1). */
+interface Series { path: string; chunks?: number; failed?: string[]; points: (FlowPoint & { date: string; bytes: number; objects: number; missing?: string[] })[]; unindexed?: string[]; roots?: { path: string; points: { date: string; bytes: number; objects: number }[] }[]; changes?: { from: string; mods_by: { token: number; size: number; mtime: number } } }
 
 // Default prominence-suppression radius for the local-extrema callouts, in days
 // (≈6 scans at the 12-hourly cadence): peaks/dips within this of a more
@@ -135,13 +138,16 @@ function ValuesToggle({ v, set }: { v: Values; set: (m: Values) => void }) {
   )
 }
 
-// What the chart counts (`?obj` = objects; bytes the default): a store's object count drives its scans' listing and
-// indexing time (and per-request costs) as its bytes drive storage cost, and the series answers both per point.
-type Metric = 'bytes' | 'objects'
+// What the chart counts (`?obj` = objects, `?chg` = changes; bytes the default): a store's object count drives its
+// scans' listing and indexing time (and per-request costs) as its bytes drive storage cost, and the series answers both
+// per point. Changes: the objects line over a strip of each day's objects added, modified and deleted
+// (specs/change-metrics.md §4.2).
+type Metric = 'bytes' | 'objects' | 'changes'
 function MetricToggle({ v, set }: { v: Metric; set: (m: Metric) => void }) {
   const opts: [Metric, string, string][] = [
     ['bytes', 'bytes', 'Stored bytes per scan'],
     ['objects', 'objects', 'Objects per scan: what listing and indexing time grow with'],
+    ['changes', 'changes', 'Objects per scan, over each day’s objects written (added, then modified: up) and deleted (down)'],
   ]
   return (
     <span className="gran" role="radiogroup" aria-label="What the chart counts">
@@ -250,11 +256,14 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const values: Values = ymP === 'd' ? 'delta' : ymP === 'p' ? 'pct' : 'abs'
   const setValues = (m: Values) => setYmP(m === 'delta' ? 'd' : m === 'pct' ? 'p' : undefined)
   const relative = values !== 'abs'
-  const [objP, setObjP] = useUrlState('obj', boolParam)
-  const metric: Metric = objP ? 'objects' : 'bytes'
-  const setMetric = (m: Metric) => setObjP(m === 'objects')
-  const val = (p: { bytes: number; objects: number }) => (metric === 'objects' ? p.objects : p.bytes)
-  const noun = metric === 'objects' ? 'objects' : 'bytes'
+  // One writer for both flags: a switch is one history entry
+  const { values: metricP, setValues: setMetricP } = useUrlStates({ obj: boolParam, chg: boolParam })
+  const metric: Metric = metricP.chg ? 'changes' : metricP.obj ? 'objects' : 'bytes'
+  const setMetric = (m: Metric) => setMetricP({ obj: m === 'objects', chg: m === 'changes' })
+  /** The line counts objects (`objects`, and `changes`' level). */
+  const counts = metric !== 'bytes'
+  const val = (p: { bytes: number; objects: number }) => (counts ? p.objects : p.bytes)
+  const noun = counts ? 'objects' : 'bytes'
   // Local-peak/dip callouts (specs/done/obs-axis-indexing.md): on by default, radius
   // is the prominence-suppression distance in days (`?ex=0` off; `?exr=<days>`),
   // floor the least prominence that earns a label, as % of the trace's range
@@ -413,8 +422,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   // A fitted axis can span a sliver of a large total: its labels (ticks,
   // tooltip, callouts) carry enough decimals to tell the ticks apart.
   const tickStep = yTickValues && yTickValues.length > 1 ? yTickValues[1] - yTickValues[0] : 0
-  const fmtVal = metric === 'objects' ? fmtCount : fmtBytes
-  const fmtFit = (y: number) => (metric === 'objects' ? fmtCountStep(y, tickStep) : fmtBytesStep(y, tickStep, units, suffixB))
+  const fmtVal = counts ? fmtCount : fmtBytes
+  const fmtFit = (y: number) => (counts ? fmtCountStep(y, tickStep) : fmtBytesStep(y, tickStep, units, suffixB))
   const fmtY = values === 'pct' ? fmtPct : relative ? (y: number) => signed(y, fmtVal(Math.abs(y))) : yFrom === 'data' ? fmtFit : fmtVal
   const annotations = useMemo((): Annotation[] => {
     const radius = extrema ? radiusDays * DAY : undefined
@@ -498,12 +507,12 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
               : pool === 'owned'
                 ? <>Bytes owned by a person{prefix ? <> under <code>{prefix}</code></> : ''}, per scan.</>
                 : paths?.length
-                  ? <>{metric === 'objects' ? 'Objects' : 'Stored bytes'} under “{filterLabel}” ({paths.length} {paths.length === 1 ? 'prefix' : 'prefixes'}) per scan.</>
+                  ? <>{counts ? 'Objects' : 'Stored bytes'} under “{filterLabel}” ({paths.length} {paths.length === 1 ? 'prefix' : 'prefixes'}) per scan.</>
                 : prefix
-                  ? <>{metric === 'objects' ? 'Objects' : 'Stored bytes'} under <code>{prefix}</code> per scan.</>
+                  ? <>{counts ? 'Objects' : 'Stored bytes'} under <code>{prefix}</code> per scan.</>
                   : roots.length
-                    ? <>{metric === 'objects' ? 'Objects' : 'Stored bytes'} per scan, one {stacked ? 'band' : 'line'} per bucket{genesis != null && <> — the total is dashed before every bucket was in the scan</>}.</>
-                    : <>Total {metric === 'objects' ? 'objects' : 'stored bytes'} per scan ({scopeLabel}).</>}
+                    ? <>{counts ? 'Objects' : 'Stored bytes'} per scan, one {stacked ? 'band' : 'line'} per bucket{genesis != null && <> — the total is dashed before every bucket was in the scan</>}.</>
+                    : <>Total {counts ? 'objects' : 'stored bytes'} per scan ({scopeLabel}).</>}
           {relative && <> Shown as {values === 'pct' ? 'growth' : `${noun} gained`} since each trace’s first shown scan.</>}
           {' '}Each point is that scan’s own index row — exact, at any depth. Click a point to view that scan; drag to set the diff window. It opens on the newest scans that fit its width (with the diff window in view); drag across the strip under the chart to zoom, or double-click it (or press “all”) for every scan.
         </>}>
@@ -596,7 +605,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           highlightXs={manualLegend && manualLit ? manualXs : undefined}
           yTickValues={yTickValues}
           yFrom={relative ? 'zero' : yFrom}
-          yLabel={values === 'pct' ? 'growth' : relative ? `${noun} since start` : metric === 'objects' ? 'objects' : 'stored bytes'}
+          yLabel={values === 'pct' ? 'growth' : relative ? `${noun} since start` : counts ? 'objects' : 'stored bytes'}
           height={220}
           annotations={annotations}
           onPickX={onPickDate || canNote ? pickX : undefined}
@@ -618,12 +627,19 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
             />
           </Explain>
         )}
+        {metric === 'changes' && total.length > 1 && (
+          <ChangeStrip
+            points={(seriesQ.data?.points ?? []).filter(p => inXDomain(xRange, xOfScan(p.date, times)))}
+            xMin={total[0].x} xMax={total[total.length - 1].x} xOf={d => xOfScan(d, times)} label={fmt}
+          />
+        )}
         {seriesQ.isPlaceholderData && <Busy label="loading series…" />}
         </div>
       ) : (
         <SeriesEmpty err={refused ?? (seriesQ.isError ? seriesQ.error : undefined)} loading={seriesQ.isLoading} onRetry={() => void seriesQ.refetch()} />
       )}
       {gaps.note && !tooMany && <p className="gap-note">{gaps.note}</p>}
+      {metric === 'changes' && series.length > 0 && <ChangeNote data={seriesQ.data} prefix={prefix} scoped={!!(user || pool || paths?.length || filterLabel)} fmt={fmt} />}
       {/* A union's points before some member's first scan: partial totals, named — never a zero for it. */}
       {!tooMany && <SeriesMissingNote points={seriesQ.data?.points} />}
       {(roots.length > 0 || manualLegend) && (
@@ -657,5 +673,29 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
         </div>
       )}
     </section>
+  )
+}
+
+/** Under the change strip: its legend, and where there's nothing to draw, why: the store counts changes at its root and
+ *  top level, unscoped, from the scan its counting started at (specs/change-metrics.md §4.1); a count by size or mtime
+ *  (no version token recorded) is footnoted. */
+function ChangeNote({ data, prefix, scoped, fmt }: { data?: Series; prefix: string; scoped: boolean; fmt: ScanLabel }) {
+  const why = scoped
+    ? 'Changes are counted for the unscoped store, not for a user, owner pool or filter.'
+    : prefix.includes('/')
+      ? 'Changes are tracked at the store root and its top level.'
+      : !data?.changes
+        ? 'No change counts here yet: the store counts them from its next scan (or a backfill).'
+        : null
+  if (why) return <p className="change-note">{why}</p>
+  const by = data!.changes!.mods_by
+  const guessed = by.size + by.mtime
+  return (
+    <>
+      <ChangeLegend />
+      <p className="change-note">
+        Counted from {fmt(data!.changes!.from)}{guessed > 0 ? ` · ${guessed.toLocaleString('en-US')} modified objects decided by size or mtime (no version recorded)` : ''}.
+      </p>
+    </>
   )
 }
