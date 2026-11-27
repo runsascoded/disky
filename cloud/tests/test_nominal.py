@@ -824,6 +824,17 @@ def test_a_date_only_scan_id_in_a_stores_series_reads_as_its_midnight():
     assert N.store_line(cfg, 'Data', 'primary', {'points': points}) == '[Data](https://site.test/): 1.50 M · 12 objects · +500 K over 7d.'
 
 
+def test_a_store_line_gives_the_newest_scans_changes():
+    """Where the store counted the newest scan (its point's change flows), its objects added, deleted and modified."""
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans'))
+    points = [dict(date='2026-10-15T0800', bytes=1_000_000, objects=10, added=4, deleted=1, modified=0),
+              dict(date='2026-10-22T0800', bytes=1_500_000, objects=1_212, added=1_204, deleted=2, modified=31)]
+    assert [N.store_line(cfg, 'Data', 'primary', {'points': ps}) for ps in (points, points[:1])] == [
+        '[Data](https://site.test/): 1.50 M · 1,212 objects (+1,204 −2 ~31) · +500 K over 7d.',
+        '[Data](https://site.test/): 1.00 M · 10 objects (+4 −1 ~0).',
+    ]
+
+
 class Pins(Slack):
     """The fake Slack with the channel's pins and canvas."""
 

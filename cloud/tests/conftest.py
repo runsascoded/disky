@@ -99,6 +99,8 @@ def _deployment_env(monkeypatch):
     from dt_cloud import digest_quota
 
     monkeypatch.setattr(digest_quota, "site_triggers", lambda cfg: {})
+    # …and its change counters (`/api/series`): none, unless a test says otherwise
+    monkeypatch.setattr(digest_quota, "site_changes", lambda cfg: {})
     # …and its live settings (`/api/digest-settings`): none, so the config file's stand
     from dt_cloud import digest
 
