@@ -4,6 +4,7 @@
 // a timeline (`stackTiers`, rendered by `pyrmts-react`'s `CoverTimeline`).
 import type { PyramidCoverSegment, PyramidTierCoverStatus } from 'pyrmts'
 import { scanTime } from './scanSlug'
+import { byRunTime, isLost, isMaintenance, machineMemBytes, notedPeakBytes, runSecs, type ScanRun, type ScanRunPhase, type ScanRunStatus } from './scanRunsModel'
 
 /** The binary counter folds runs into a new base generation (a compaction) at this level (`append_runner.COMPACT_LEVEL`):
  *  a manifest's `compact_level` overrides it. */
@@ -25,6 +26,9 @@ export type StoreKind = 'interval' | 'static'
 /** One store's stack as read from R2: its generation, the base's scans, the newest manifest's runs (oldest first). */
 export interface StoreRead {
   kind: StoreKind
+  /** The store's key prefix (`interval-store`, `INTERVAL_STORE_PREFIX`'s, `static-names`): its generation is under
+   *  `<prefix>/<gen>/`, and its maintenance rows' `gen` (`maint_runs`) starts `<prefix>/`. */
+  prefix: string
   gen: string
   /** The newest manifest's file name (`manifests.ts`), null when the generation is its base alone. */
   manifest: string | null
@@ -163,10 +167,13 @@ export interface StoreHealth extends StoreRead {
   cut: { light: string | null; drill: string | null; anchors: string | null }
   /** The merge holding (or that last held) the lease, from its status record: null when none is recorded. */
   merge: MergeState | null
+  /** Its carries and folds at a glance (specs/store-upkeep-monitoring.md). */
+  upkeep: Upkeep
 }
 
-/** `now`: epoch s (a merge's age). */
-export function storeHealth(s: StoreRead, now: number = Math.floor(Date.now() / 1000)): StoreHealth {
+/** `now`: epoch s (a merge's age). `inputs`: what the upkeep block reads beyond the stack (D1's maintenance rows, the
+ *  manifests' uploads, the generation's `compaction.json`); none, it is the stack's alone. */
+export function storeHealth(s: StoreRead, now: number = Math.floor(Date.now() / 1000), inputs: UpkeepInputs = NO_UPKEEP_INPUTS): StoreHealth {
   const drilled = new Set(s.runs.filter(r => r.tiers?.drill).map(r => r.key))
   const { after, carries } = planCarries(s.runs, drilled, s.compact_level)
   const all = [...s.base, ...s.runs.flatMap(r => r.scans)]
@@ -178,12 +185,262 @@ export function storeHealth(s: StoreRead, now: number = Math.floor(Date.now() / 
   const light = tier(r => r.r2 && (r.tiers?.light ?? true), !s.error)
   const drill = s.kind === 'static' ? tier(r => r.r2 && !!r.tiers?.drill, !!s.base_tiers?.drill) : { scans: null, cut: null }
   const anchors = s.kind === 'static' ? tier(r => r.r2 && !!r.tiers?.anchors, !!s.base_tiers?.anchors) : { scans: null, cut: null }
+  const merge = mergeState(s.merging, now)
   return {
     ...s, carries, compaction: compaction(after, s.compact_level), newest: all.length ? all[all.length - 1] : null,
     served: { light: light.scans ?? [], drill: drill.scans, anchors: anchors.scans },
     cut: { light: light.cut, drill: drill.cut, anchors: anchors.cut },
-    merge: mergeState(s.merging, now),
+    merge, upkeep: upkeep(s, after, carries, merge, inputs, now),
   }
+}
+
+// ── Upkeep (specs/store-upkeep-monitoring.md) ──────────────────────────────
+
+/** A fold due this long past `since_ts` without an attempt is overdue: its chip turns red (and Phase 3's alert fires).
+ *  Ryan's 11-27 answer 2: 30 min; a constant until the thresholds move to D1, editable on /admin (Phase 3). */
+export const OVERDUE_S = 1800
+/** A running fold past this many times its usual duration (`usual_s`) is stuck. */
+export const STUCK_FACTOR = 2
+/** The store's newest upkeep attempts `history` keeps. */
+export const HISTORY_N = 20
+/** The succeeded folds whose median duration is the usual one. */
+export const USUAL_N = 3
+
+/** Worst first: the strip's order. `off` (policy `none`) and `fold-queued` (`compacting.json`'s `queued`) arrive with
+ *  Phase 2's manifest policy and compaction lease mirror; Phase 1 never reports them. */
+export const UPKEEP_STATUSES = ['failing', 'stuck', 'fold-due', 'fold-queued', 'folding', 'carrying', 'carry-due', 'off', 'ok'] as const
+export type UpkeepStatus = typeof UPKEEP_STATUSES[number]
+
+/** One upkeep job's run (a `scan_runs` row of kind `compact`, `race` or `merge`; `maint_runs`). */
+export interface Attempt {
+  run_id: string
+  kind: string
+  status: ScanRunStatus
+  /** The newest scan it folds or carries, and its `<prefix>/<gen>` (a finished fold's `<prefix>/<gen> → <new>`). */
+  scan: string
+  gen: string | null
+  started_ts: number | null
+  finished_ts: number | null
+  secs: number | null
+  machine: string | null
+  spot: boolean | null
+  cost_usd: number | null
+  error: string | null
+  failed_phase: string | null
+  /** A running attempt's live phase note (its newest running phase's), else null. */
+  note: string | null
+  /** Running, with no write for `LOST_S` (`scanRunsModel.isLost`). */
+  lost: boolean
+  /** The highest `RSS peak N GiB` its phase notes name (answer 7: parsed until a column holds it), and its machine's
+   *  memory (`machineMemBytes`); null when unknown. */
+  mem_peak_bytes: number | null
+  mem_limit_bytes: number | null
+}
+
+/** Why a fold is due, and since which scan: the one whose append completed the pair (its manifest's R2 upload). */
+export interface FoldDue { why: string; since_scan: string; since_ts: number | null }
+
+/** The fold that made the current generation: its `compaction.json` (`from`, `scans`, the rule) and upload, and the
+ *  succeeded `compact` row whose `gen` ends `→ <gen>`. */
+export interface LastFold { from: string; gen: string; ts: number | null; scans: number | null; rule: string; run: Attempt | null }
+
+export interface Upkeep {
+  /** The compaction policy (`append_runner.Policy`): the manifest's level until manifests carry it (Phase 2). */
+  policy: string
+  status: UpkeepStatus
+  /** Why the status (a failure streak and its last error, what is stuck, the due rule); null for the others. */
+  why: string | null
+  /** `fold-due` only: seconds since `fold.due.since_ts`. */
+  overdue_s: number | null
+  fold: {
+    due: FoldDue | null
+    /** This generation's `compact` attempts since due (each folding a scan at or past `since_scan`), newest first. */
+    attempts: Attempt[]
+    /** Consecutive failed attempts, newest first to the first success (a `nop`, superseded or not due, a cancel and a
+     *  candidate build count as neither; a running one is passed over). */
+    failing: number
+    running: Attempt | null
+    /** The median duration of the store's last `USUAL_N` succeeded folds. */
+    usual_s: number | null
+    last: LastFold | null
+  }
+  carry: {
+    /** The carries due that no merge has planned. */
+    due: Carry[]
+    /** Consecutive failed `merge` attempts of this generation (as `fold.failing`); at least 1 when the merge record
+     *  says `failed`. */
+    failing: number
+    running: Attempt | null
+    /** The store's newest finished merge. */
+    last: Attempt | null
+  }
+  /** The store's newest `HISTORY_N` upkeep attempts (every generation), newest first. */
+  history: Attempt[]
+}
+
+/** `compaction.json` (`append_runner.compact_store`, `compaction_doc`), the fields /health reads. */
+export interface CompactionRecord { from: string; scans?: number; level?: number; rule?: string; why?: string | null; candidate?: boolean }
+
+/** What a store's upkeep reads beyond its stack: the D1 store's runs (every kind; the store's are picked by `gen`) and
+ *  their phases, its manifests' R2 uploads (file name → epoch s), and its generation's `compaction.json` (null: built,
+ *  not folded). */
+export interface UpkeepInputs {
+  runs: readonly ScanRun[]
+  phases: readonly ScanRunPhase[]
+  uploads: ReadonlyMap<string, number | null>
+  compaction: { doc: CompactionRecord; ts: number | null } | null
+}
+
+export const NO_UPKEEP_INPUTS: UpkeepInputs = { runs: [], phases: [], uploads: new Map(), compaction: null }
+
+/** A `scan_runs` row as an upkeep attempt. */
+export function attempt(r: ScanRun, phases: readonly ScanRunPhase[], now: number): Attempt {
+  const mine = phases.filter(p => p.run_id === r.run_id)
+  const live = r.status === 'running' ? [...mine].filter(p => p.status === 'running').sort((a, b) => (b.started_ts ?? 0) - (a.started_ts ?? 0) || b.seq - a.seq)[0] : undefined
+  return {
+    run_id: r.run_id, kind: r.kind, status: r.status, scan: r.scan, gen: r.gen,
+    started_ts: r.started_ts, finished_ts: r.finished_ts, secs: runSecs(r, now),
+    machine: r.machine, spot: r.spot == null ? null : !!r.spot, cost_usd: r.cost_usd,
+    error: r.error, failed_phase: r.failed_phase, note: live?.note ?? null, lost: isLost(r, now),
+    mem_peak_bytes: notedPeakBytes(mine.map(p => p.note)), mem_limit_bytes: machineMemBytes(r.machine),
+  }
+}
+
+/** How an attempt counts toward a failure streak: a success ends it (a candidate build, `→ … (a candidate, not
+ *  promoted)`, isn't one: the generation it folds is still served), a failure adds to it, the rest pass. */
+const outcome = (r: ScanRun): 'succeeded' | 'failed' | 'running' | null =>
+  r.status === 'running' ? 'running' : r.status === 'failed' ? 'failed' : r.status === 'succeeded' && !(r.gen ?? '').includes('(a candidate') ? 'succeeded' : null
+
+/** Consecutive failures, newest first (`rows` newest first), to the first success. */
+function streak(rows: readonly ScanRun[]): number {
+  let n = 0
+  for (const r of rows) {
+    const o = outcome(r)
+    if (o === 'succeeded') break
+    if (o === 'failed') n++
+  }
+  return n
+}
+
+/** The median of `xs`; null for none. */
+function median(xs: readonly number[]): number | null {
+  if (!xs.length) return null
+  const s = [...xs].sort((a, b) => a - b), m = Math.floor(s.length / 2)
+  return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2)
+}
+
+/** The fold due under a level policy (`compaction_why`'s level rule over `after`, the runs past the due carries), and
+ *  the scan since which: the newer run of the first adjacent pair at `level - 1` ends at it. Due-ness is monotone within
+ *  a generation (runs only gain scans, and the pair never merges further), so that scan's append made it due; its
+ *  manifest's upload (`<scan>.json`, else its earliest revision's) is when. */
+export function foldDue(after: readonly StackRun[], level: number, uploads: ReadonlyMap<string, number | null>): FoldDue | null {
+  const i = after.findIndex((r, j) => j > 0 && r.level === level - 1 && after[j - 1].level === level - 1)
+  if (i < 0) return null
+  const a = after[i - 1], b = after[i]
+  const ts = [...uploads].filter(([n]) => n === `${b.last}.json` || n.startsWith(`${b.last}.m`)).map(([, t]) => t).filter((t): t is number => t != null)
+  return { why: `level ${level}: two runs at level ${level - 1} (${a.key}, ${b.key})`, since_scan: b.last, since_ts: ts.length ? Math.min(...ts) : null }
+}
+
+/** A store's upkeep (specs/store-upkeep-monitoring.md §2): its fold (due since, attempts, failures, the running one, the
+ *  last), its carries, the history, and one status — the first that holds of: `failing` (the newest finished fold or
+ *  carry attempt failed, nothing running), `stuck` (a running attempt lost, the merge record stuck, a fold past
+ *  `STUCK_FACTOR` × its usual), `folding` / `carrying`, `fold-due` (no attempt since), `carry-due`, `ok`. */
+export function upkeep(s: StoreRead, after: readonly StackRun[], carries: readonly Carry[], merge: MergeState | null, inputs: UpkeepInputs, now: number): Upkeep {
+  const root = `${s.prefix}/${s.gen}`
+  const store = [...inputs.runs.filter(r => isMaintenance(r.kind) && (r.gen ?? '').startsWith(`${s.prefix}/`))].sort(byRunTime).reverse()
+  const ofGen = (kind: string) => store.filter(r => r.kind === kind && (r.gen === root || (r.gen ?? '').startsWith(`${root} `)))
+  const att = (r: ScanRun) => attempt(r, inputs.phases, now)
+  const running = (rows: readonly ScanRun[]) => { const r = rows.find(x => x.status === 'running'); return r ? att(r) : null }
+
+  const due = s.error ? null : foldDue(after, s.compact_level, inputs.uploads)
+  const folds = ofGen('compact')
+  const since = due ? folds.filter(r => r.scan >= due.since_scan) : []
+  const usual_s = median(store.filter(r => r.kind === 'compact' && outcome(r) === 'succeeded').map(r => runSecs(r, now)).filter((x): x is number => x != null).slice(0, USUAL_N))
+  const c = inputs.compaction
+  const lastRow = c && store.find(r => r.kind === 'compact' && r.status === 'succeeded' && (r.gen ?? '').endsWith(`→ ${s.gen}`))
+  const fold: Upkeep['fold'] = {
+    due, attempts: since.map(att), failing: streak(since), running: running(folds), usual_s,
+    last: c ? { from: c.doc.from, gen: s.gen, ts: c.ts, scans: c.doc.scans ?? null, rule: c.doc.why ?? `level ${c.doc.level ?? s.compact_level}`, run: lastRow ? att(lastRow) : null } : null,
+  }
+  const merges = ofGen('merge')
+  const planned = new Set(merge && merge.status !== 'failed' ? merge.merges.map(x => x.output) : [])
+  const lastMerge = store.find(r => r.kind === 'merge' && r.status !== 'running')
+  const carry: Upkeep['carry'] = {
+    due: carries.filter(x => !planned.has(x.output)),
+    failing: Math.max(streak(merges), merge?.status === 'failed' ? 1 : 0),
+    running: running(merges),
+    last: lastMerge ? att(lastMerge) : null,
+  }
+
+  const lastErr = (r: ScanRun | undefined) => (r?.error ? `; the last: ${r.error}` : '')
+  const quiet = (a: Attempt) => `no record write for ${dur(now - (store.find(r => r.run_id === a.run_id)?.updated_ts ?? now))}`
+  const merging = merge !== null && merge.status !== 'failed'
+  const overstay = !!fold.running && usual_s != null && fold.running.secs != null && fold.running.secs > STUCK_FACTOR * usual_s
+  let status: UpkeepStatus, why: string | null = null
+  if (fold.failing && !fold.running) {
+    status = 'failing'
+    why = `fold: ${plural(fold.failing, 'failed attempt')} in a row${lastErr(since.find(r => r.status === 'failed'))}`
+  } else if (carry.failing && !carry.running && !merging) {
+    status = 'failing'
+    const f = merges.find(r => r.status === 'failed')
+    why = `carries: ${plural(carry.failing, 'failed merge')} in a row${f ? lastErr(f) : merge?.why ? `; the last: ${merge.why}` : ''}`
+  } else if (fold.running?.lost || carry.running?.lost || merge?.status === 'stuck' || overstay) {
+    status = 'stuck'
+    why = fold.running?.lost ? `fold ${fold.running.run_id}: ${quiet(fold.running)}`
+      : carry.running?.lost ? `merge ${carry.running.run_id}: ${quiet(carry.running)}`
+        : merge?.status === 'stuck' ? `merge: ${merge.why}`
+          : `fold running ${dur(fold.running!.secs!)}, past ${STUCK_FACTOR}× its usual ${dur(usual_s!)}`
+  } else if (fold.running) status = 'folding'
+  else if (carry.running || merging) status = 'carrying'
+  else if (due && !since.some(r => outcome(r) !== null)) {
+    status = 'fold-due'
+    why = due.why
+  } else if (carry.due.length) status = 'carry-due'
+  else status = 'ok'
+  return {
+    policy: `level:${s.compact_level}`, status, why,
+    overdue_s: status === 'fold-due' && due?.since_ts != null ? Math.max(0, now - due.since_ts) : null,
+    fold, carry, history: store.slice(0, HISTORY_N).map(att),
+  }
+}
+
+/** The status as a chip's text: `failing ×4`, `fold due`, `ok`. */
+export function upkeepLabel(u: Upkeep): string {
+  return u.status === 'failing' ? `failing ×${u.fold.failing || u.carry.failing}` : u.status.replace('-', ' ')
+}
+
+/** The `sr-status` class a status's chip wears (§3): red failing and an overdue fold, amber stuck and a fold due, blue
+ *  work in progress, green ok, grey the rest. */
+export function upkeepChip(u: Pick<Upkeep, 'status' | 'overdue_s'>): string {
+  switch (u.status) {
+    case 'failing': return 'failed'
+    case 'stuck': return 'warn'
+    case 'fold-due': return u.overdue_s != null && u.overdue_s >= OVERDUE_S ? 'failed' : 'warn'
+    case 'folding': case 'carrying': case 'fold-queued': return 'running'
+    case 'ok': return 'succeeded'
+    case 'off': return 'cancelled'
+    default: return ''
+  }
+}
+
+/** The stores worst first (`UPKEEP_STATUSES`' order, stable), each with its anchor on /health (`upkeep-<kind>`). */
+export function upkeepStrip(stores: readonly Pick<StoreHealth, 'kind' | 'upkeep'>[]): { kind: StoreKind; upkeep: Upkeep; anchor: string }[] {
+  return [...stores].sort((a, b) => UPKEEP_STATUSES.indexOf(a.upkeep.status) - UPKEEP_STATUSES.indexOf(b.upkeep.status))
+    .map(s => ({ kind: s.kind, upkeep: s.upkeep, anchor: `upkeep-${s.kind}` }))
+}
+
+/** A maintenance run's store's block on /health (`upkeep-static`, `upkeep-interval`) from its `gen`
+ *  (`<prefix>/<gen>[ → …]`); null for a row of neither store. */
+export function upkeepAnchor(gen: string | null | undefined): string | null {
+  const prefix = (gen ?? '').split(' ')[0].split('/').slice(0, -1).join('/')
+  return prefix === 'static-names' ? 'upkeep-static' : prefix === 'interval-store' || prefix.endsWith('/interval-store') ? 'upkeep-interval' : null
+}
+
+/** A peak against its machine's memory, in GiB: `371/384G`, `371G` (no limit known), null (no peak). */
+export function peakLabel(a: Pick<Attempt, 'mem_peak_bytes' | 'mem_limit_bytes'>): string | null {
+  if (a.mem_peak_bytes == null) return null
+  const g = (b: number) => Math.round(b / 2 ** 30)
+  return a.mem_limit_bytes == null ? `${g(a.mem_peak_bytes)}G` : `${g(a.mem_peak_bytes)}/${g(a.mem_limit_bytes)}G`
 }
 
 // ── Coverage ───────────────────────────────────────────────────────────────
@@ -293,9 +550,12 @@ export interface HealthDoc {
 export interface HealthJob { scan: string; status: string; started_ts?: number | null }
 
 /** The /health document from the sources: the stores' reads, the per-scan path store's scans, and the scan jobs (which
- *  are running, matched by scan id; when each scan's job started, for its age). */
-export function healthDoc(reads: readonly StoreRead[], perScan: readonly string[], jobs: readonly HealthJob[], now: number): HealthDoc {
-  const stores = reads.map(r => storeHealth(r, now))
+ *  are running, matched by scan id; when each scan's job started, for its age). `upkeep`: the D1 store's maintenance
+ *  rows (`scan_runs`, every kind: filtered per store here) and their phases, and per store kind its manifests' uploads
+ *  and `compaction.json`. */
+export function healthDoc(reads: readonly StoreRead[], perScan: readonly string[], jobs: readonly HealthJob[], now: number,
+  upkeep: { runs: readonly ScanRun[]; phases: readonly ScanRunPhase[]; stores?: Partial<Record<StoreKind, Pick<UpkeepInputs, 'uploads' | 'compaction'>>> } = { runs: [], phases: [] }): HealthDoc {
+  const stores = reads.map(r => storeHealth(r, now, { runs: upkeep.runs, phases: upkeep.phases, ...(upkeep.stores?.[r.kind] ?? { uploads: new Map(), compaction: null }) }))
   const live = jobs.filter(j => j.status === 'running')
   const running = new Set(live.map(j => j.scan))
   const started = new Map<string, number>()

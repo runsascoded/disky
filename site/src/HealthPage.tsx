@@ -2,9 +2,8 @@
 // stack drawn as binary-counter shards over the scan timeline (`pyrmts-react`'s `CoverTimeline`, the timeline the
 // pyrmts consumers' /health pages share), every scan's coverage and its gaps, and freshness; the last scan job comes
 // from /scans' own fetch (`useScanRuns`).
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { CoverTimeline } from 'pyrmts-react'
 import 'pyrmts-react/styles.css'
 import type { PyramidTierCoverStatus } from 'pyrmts'
@@ -13,17 +12,17 @@ import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
 import { useDocTitle } from './title'
 import {
-  type Cell, type Column, COLUMN_LABELS, coverageEvents, type HealthDoc, liveColumns, type MergeState, mergeLine, stackTiers, type StoreHealth,
+  type Attempt, type Cell, type Column, COLUMN_LABELS, coverageEvents, dur, type HealthDoc, liveColumns, type MergeState, mergeLine, peakLabel, stackTiers,
+  type StoreHealth, STUCK_FACTOR, type Upkeep, upkeepChip, upkeepLabel,
 } from './healthModel'
 import { phaseOrder } from './scanRunsModel'
 import { scanTime } from './scanSlug'
-import { colorer, fmtDur, fmtRunTime, getJson, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
 import { Pager, usePaged } from './Pager'
 import { StickyTable } from './stickyHead'
+import { UpkeepStrip, useHealth } from './UpkeepStrip'
 import './scans.scss'
 import './health.scss'
-
-const useHealth = () => useQuery<HealthDoc, Error>({ queryKey: ['health'], queryFn: () => getJson('/api/health'), refetchInterval: 60_000, staleTime: 30_000 })
 
 const DAY = 86_400_000
 const WINDOWS = [['7d', 7], ['30d', 30], ['90d', 90], ['all', 0]] as const
@@ -129,6 +128,97 @@ function MergeLine({ m, now }: { m: MergeState; now: number }) {
   )
 }
 
+// ── Upkeep (specs/store-upkeep-monitoring.md §3) ──────────────────────────
+
+const UPKEEP_TIP: Record<Upkeep['status'], string> = {
+  failing: 'The newest finished fold (compaction) or carry (merge) attempt failed, and none is running.',
+  stuck: "A running fold or merge stopped writing its record (30 min), the merge's status record stopped refreshing, or a fold has run past twice its usual duration.",
+  'fold-due': 'A compaction is due and no attempt has been recorded since: red once it is 30 min overdue.',
+  'fold-queued': 'A compaction job is submitted and waiting for its VM.',
+  folding: 'A compaction job is running.',
+  carrying: 'A merge job is building the due carries.',
+  'carry-due': "Carries are due; the next append's merge job builds them.",
+  off: 'Compactions are off for this generation (policy none).',
+  ok: 'Nothing due, nothing failing.',
+}
+const ATTEMPT_KIND: Record<string, string> = { compact: 'fold', merge: 'carry', race: 'race' }
+
+/** An error's text, clipped at 3 lines with a toggle when long. */
+function Clip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  const long = text.length > 160
+  return <span className="upk-err"><span className={long && !open ? 'upk-clip' : undefined}>{text}</span>{long && <button type="button" className="upk-more" onClick={() => setOpen(o => !o)}>{open ? 'less' : 'more'}</button>}</span>
+}
+
+const runLink = (a: Attempt) => <Link to={`/scans/${encodeURIComponent(a.run_id)}`}>run</Link>
+
+/** An attempt's figures: `2h31m · n2-highmem-48 · peak 371/384G · $4.10`. */
+function figures(a: Attempt): string {
+  const peak = peakLabel(a)
+  return [a.secs == null ? null : fmtDur(a.secs), a.machine && `${a.machine}${a.spot ? ' (spot)' : ''}`, peak && `peak ${peak}`, a.cost_usd == null ? null : `$${a.cost_usd.toFixed(2)}`].filter(Boolean).join(' · ')
+}
+
+function FoldLine({ u, now }: { u: Upkeep; now: number }) {
+  const f = u.fold, last = f.attempts.find(a => a.status !== 'running')
+  if (f.running) {
+    const r = f.running
+    return <>running {r.secs == null ? '' : fmtDur(r.secs)}{f.usual_s != null && <span className="dim"> (usual {fmtDur(f.usual_s)}; stuck past {STUCK_FACTOR}×)</span>}{r.note && <span className="dim"> · {r.note}</span>} · {runLink(r)}{f.failing > 0 && <span className="hl-err"> · after {f.failing} failed</span>}</>
+  }
+  if (!f.due) return <span className="dim">not due</span>
+  const since = f.due.since_ts
+  return <>
+    <Tooltip content={<>Due since scan <code>{f.due.since_scan}</code>'s append{since == null ? ' (its manifest upload time is unknown)' : ''}.</>}>
+      <span>due since {since == null ? <code>{f.due.since_scan}</code> : <>{fmtRunTime(since)} ({dur(Math.max(0, now - since))} ago)</>}</span>
+    </Tooltip>: {f.due.why}
+    {f.attempts.length > 0 && <div>
+      {f.attempts.length} attempt{f.attempts.length === 1 ? '' : 's'}{f.failing ? <span className="hl-err">, {f.failing === f.attempts.length ? 'all' : f.failing} failed</span> : null}
+      {last && <> · last {last.started_ts == null ? '' : fmtRunTime(last.started_ts)}, {last.status}{last.failed_phase && <> in {last.failed_phase}</>}{figures(last) && <> after {figures(last)}</>} · {runLink(last)}</>}
+      {last?.error && <div><Clip text={last.error} /></div>}
+    </div>}
+  </>
+}
+
+function HistoryRow({ a }: { a: Attempt }) {
+  return (
+    <li>
+      <span className="upk-h1"><span className="nb">{a.started_ts == null ? '—' : fmtRunTime(a.started_ts)}</span> · {ATTEMPT_KIND[a.kind] ?? a.kind} · <span className={`sr-status ${a.status === 'nop' ? '' : a.lost ? 'lost' : a.status}`}>{a.lost ? 'lost' : a.status}</span> · <Link to={`/scans/${encodeURIComponent(a.run_id)}`}><code>{a.scan}</code></Link></span>
+      {figures(a) && <span className="upk-h2 dim">{figures(a)}</span>}
+      {(a.error ?? a.note) && <span className="upk-h3">{a.failed_phase && <>{a.failed_phase}: </>}<Clip text={(a.error ?? a.note)!} /></span>}
+    </li>
+  )
+}
+
+/** A store's upkeep: status, fold, last fold, carries, history. */
+function UpkeepBlock({ s, now }: { s: StoreHealth; now: number }) {
+  const u = s.upkeep, f = u.fold, c = u.carry
+  return (
+    <div className="upk-block">
+      <dl className="sr-facts upk-facts">
+        <div><dt>upkeep</dt><dd><Tooltip content={u.why ?? UPKEEP_TIP[u.status]}><span className={`sr-status ${upkeepChip(u)}`}>{upkeepLabel(u)}</span></Tooltip>{u.why && <span className="dim"> {u.why}</span>}</dd></div>
+        <div><dt>policy</dt><dd><code>{u.policy}</code></dd></div>
+        <div className="upk-wide"><dt>fold</dt><dd><FoldLine u={u} now={now} /></dd></div>
+        <div className="upk-wide"><dt>last fold</dt><dd>{f.last ? <>
+          <code>{f.last.from}</code> → <code>{f.last.gen}</code>{f.last.ts != null && <>, {fmtRunTime(f.last.ts)}</>}{f.last.scans != null && <> · {f.last.scans} scans</>}
+          {f.last.run && figures(f.last.run) && <> · {figures(f.last.run)}</>}{f.last.run && <> · {runLink(f.last.run)}</>}
+          <span className="dim"> · {f.last.rule}</span>
+        </> : <span className="dim">none: this generation was built, not folded</span>}</dd></div>
+        <div className="upk-wide"><dt>carries</dt><dd>
+          {c.running ? <>running {c.running.secs == null ? '' : fmtDur(c.running.secs)}{c.running.note && <span className="dim"> · {c.running.note}</span>} · {runLink(c.running)}</>
+            : c.due.length ? <>{c.due.length} due</> : <span className="dim">none due</span>}
+          {c.failing > 0 && !c.running && <span className="hl-err"> · {c.failing} failed in a row</span>}
+          {c.last && <span className="dim"> · last {c.last.started_ts == null ? '' : fmtRunTime(c.last.started_ts)}, {c.last.status}{c.last.secs != null && <>, {fmtDur(c.last.secs)}</>}</span>}
+        </dd></div>
+      </dl>
+      {u.history.length > 0 && (
+        <details className="upk-history">
+          <summary>history ({u.history.length})</summary>
+          <ul>{u.history.map(a => <HistoryRow key={a.run_id} a={a} />)}</ul>
+        </details>
+      )}
+    </div>
+  )
+}
+
 function StoreSection({ s, doc, genesis, now }: { s: StoreHealth; doc: HealthDoc; genesis: number; now: number }) {
   const tiers = useMemo(() => stackTiers(s, doc.scans, now), [s, doc.scans, now])
   const c = s.compaction
@@ -139,9 +229,9 @@ function StoreSection({ s, doc, genesis, now }: { s: StoreHealth; doc: HealthDoc
   }, [s])
   const pct = Math.min(100, (c.run_scans / c.capacity) * 100)
   return (
-    <section className="hl-store">
-      <h3>{STORE_NAMES[s.kind]} <code className="dim">{s.gen}</code></h3>
-      {s.error ? <p className="hl-err">Couldn't read the generation: <code>{s.error}</code></p> : (<>
+    <section className="hl-store" id={`upkeep-${s.kind}`}>
+      <h3>{STORE_NAMES[s.kind]} <code className="dim">{s.gen}</code> <a href={`#upkeep-${s.kind}`} className={`sr-status ${upkeepChip(s.upkeep)}`}>{upkeepLabel(s.upkeep)}</a></h3>
+      {s.error ? <><p className="hl-err">Couldn't read the generation: <code>{s.error}</code></p><UpkeepBlock s={s} now={doc.now} /></> : (<>
         <dl className="sr-facts">
           <div><dt>base</dt><dd>{s.base.length} scans{s.base.length ? <> · {s.base[0]} → {s.base[s.base.length - 1]}</> : null}</dd></div>
           <div><dt>runs</dt><dd>{s.runs.length} · {s.runs.reduce((n, r) => n + r.scans.length, 0)} scans</dd></div>
@@ -166,6 +256,7 @@ function StoreSection({ s, doc, genesis, now }: { s: StoreHealth; doc: HealthDoc
         {(['light', 'drill', 'anchors'] as const).map(t => s.cut[t] && (
           <p key={t} className="hl-cut">The {t === 'light' ? (s.kind === 'interval' ? 'stack' : 'suffix tier') : `${t} tier`} is cut at <code>{s.cut[t]}</code>: its scans and every later run's aren't served from it.</p>
         ))}
+        <UpkeepBlock s={s} now={doc.now} />
         <Timeline tiers={tiers} genesis={genesis} now={now} />
       </>)}
     </section>
@@ -194,10 +285,18 @@ function LastRun() {
 
 export function HealthPage() {
   const q = useHealth()
+  const { hash } = useLocation()
   const [win, setWin] = useState<Win>('30d')
   const [showAll, setShowAll] = useState(false)
   useDocTitle('Health')
   const doc = q.data
+  // a link to a store's upkeep (`/health#upkeep-static`, from /scans): its section once the document has drawn it
+  const loaded = !!doc
+  useEffect(() => {
+    if (!loaded || !hash.startsWith('#upkeep-')) return
+    const frame = window.requestAnimationFrame(() => document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [loaded, hash])
   const now = (doc?.now ?? 0) * 1000
   const genesis = useMemo(() => {
     const days = WINDOWS.find(w => w[0] === win)![1]
@@ -215,6 +314,7 @@ export function HealthPage() {
       <h1>Health</h1>
       <p className="sub">What this deployment serves for each scan, and how fresh it is: the path index (the map, every scan) and the append-only stores scans are added to as runs — the static name index (the map's name filter and /names) and the interval store, where configured. Each scan job's run is on <Link to="/scans">Scan runs</Link>.</p>
       {q.isLoading ? <p>Loading…</p> : q.error ? <p className="err">{q.error.message}</p> : doc && (<>
+        <UpkeepStrip doc={doc} onPage />
         <section className="hl-fresh">
           <h3>Freshness</h3>
           <dl className="sr-facts">

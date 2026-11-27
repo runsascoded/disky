@@ -25,6 +25,8 @@ import { useIsAdmin, useStores } from './auth'
 import { HistoryAdmin, useHistoryConfigured } from './HistoryAdmin'
 import { retentionLabel, retentionRunSelectable, retentionScans, retentionSpanScans, toggleRetentionScan, type RetentionPlan, type RetentionScan, type RetentionSource } from './scanRetention'
 import { DEFAULT_STORE, type Store } from './stores'
+import { upkeepAnchor } from './healthModel'
+import { ScansUpkeepStrip } from './UpkeepStrip'
 import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
@@ -497,6 +499,7 @@ export function ScansPage() {
   const kinds = [...new Set([...runs.map(r => r.run.kind), ...runFilterKinds(kind)])].sort()
   useActions({
     'runs:all-types': { label: 'Show all job types', group: 'Job types', keywords: ['scans', 'AL', 'access logs', 'filter'], handler: () => setKind('') },
+    'runs:upkeep': { label: 'Show only upkeep (folds and carries)', group: 'Job types', keywords: ['filter', 'compact', 'merge', 'race', 'maintenance', 'upkeep'], handler: () => setKind('upkeep') },
     ...Object.fromEntries(kinds.flatMap(k => [
       [`runs:only:${k}`, { label: `Show only ${runKindLabel(k)}`, group: 'Job types', keywords: ['filter', k], handler: () => setKind(k) }],
       [`runs:include:${k}`, { label: `Include ${runKindLabel(k)}`, group: 'Job types', keywords: ['show', 'filter', k], handler: () => setKind(includeRunKind(kind, k, true)) }],
@@ -519,6 +522,7 @@ export function ScansPage() {
         <RunScanButton block={q.data?.dispatch} runs={runs} queryKey={['scan-runs', store.key]} />
       </div>
       <p className="sub">Scans, access-log ingests and maintenance jobs: timing, status and compute estimates. Output size measures the generated scan files (listings, indexes, snapshots); its change compares those files with earlier scans. The stores they append to are on <Link to="/health">Health</Link>.</p>
+      {store.key === DEFAULT_STORE.key && <ScansUpkeepStrip />}
       {canRetention && <div className="sr-retention-toggle"><button type="button" aria-expanded={retentionOpen} aria-controls="history" onClick={() => retentionOpen ? closeRetention() : setRetentionOpen(true)}>{retentionOpen ? 'Close retention controls' : 'Manage retained scans'}</button><span className="dim">{retentionOpen ? 'Review a proposal or choose scans on the existing chart and table.' : 'Preview policies and build new history versions.'}</span></div>}
       {retentionOn && <HistoryAdmin onPlanChange={onPlanChange} manualScans={manualScans} onManualScansChange={setManualScans}
         spanScans={spanScans} onHoverScan={setHoverScan} onSelectionModeChange={setSelectionMode} onSourceChange={onSourceChange} jobsTarget={jobsTarget} />}
@@ -528,6 +532,7 @@ export function ScansPage() {
         <div className="run-filters">
           <fieldset className="sr-type-filters"><legend>Job types</legend>
             <button type="button" className="sr-all-types" disabled={!kind} onClick={() => setKind('')}>All</button>
+            <Tooltip content="The stores' upkeep jobs: compactions (folds), their races, and merges (carries)."><button type="button" className="sr-all-types" disabled={kind === 'upkeep'} onClick={() => setKind('upkeep')}>Upkeep</button></Tooltip>
             {kinds.map(k => <span key={k} className={`sr-type-filter ${kindClass(k)}${runKindMatches(kind, k) ? '' : ' excluded'}`}>
               <label><input type="checkbox" checked={runKindMatches(kind, k)} onChange={e => setKind(includeRunKind(kind, k, e.target.checked))} />{runKindLabel(k)} <span className="dim">{runs.filter(r => r.run.kind === k).length}</span></label>
               <Tooltip content={`Show only ${runKindLabel(k)}`}><button type="button" aria-label={`Show only ${runKindLabel(k)}`} onClick={() => setKind(k)}>only</button></Tooltip>
@@ -994,7 +999,7 @@ export function ScanRunPage() {
       {q.isLoading ? <p>Loading run…</p> : q.error ? <p className="err">{q.error.message}</p> : d && r && <>
         <h1><code>{r.scan}</code>{(kinds.size > 1 || !isScanProducer(r.kind)) && <> <span className="dim"><KindLabel run={r} /></span></>}</h1>
         {r.kind === 'access-ingest' && <p className="sub">An independent hourly access-log ingest. It updates the aggregates used by future scans; it does not publish a snapshot or change an existing scan’s recorded read data.</p>}
-        {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
+        {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.{store.key === DEFAULT_STORE.key && upkeepAnchor(r.gen) && <> Its store's upkeep is on <Link to={`/health#${upkeepAnchor(r.gen)}`}>Health</Link>.</>}</p>}
         <p className="sub">
           <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} runHref={scanHref} jobs={jobs} />{liveDetail && <Live live={liveDetail} inline />}
           {latest && <> <Tooltip content={`The newest ${isScanProducer(r.kind) ? 'scan' : r.kind} run recorded here.`}><span className="sr-latest">latest</span></Tooltip></>}

@@ -12,6 +12,9 @@ import { storeKey, withStore } from '../_lib/stores.js'
 
 /** How long a computed document stands (s). */
 export const HEALTH_TTL = 60
+/** The document's shape: part of its cache key, so a deploy never serves a colo's copy of the old one (2: each store's
+ *  `prefix` and `upkeep`, specs/store-upkeep-monitoring.md). */
+export const HEALTH_V = 2
 
 const colo = (): Cache | null => (typeof caches === 'undefined' ? null : (caches as unknown as { default: Cache }).default)
 
@@ -29,7 +32,7 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
   const generation = `${env.INTERVAL_STORE_PREFIX ? `${env.INTERVAL_STORE_PREFIX}:` : ''}${env.INTERVAL_STORE_GEN ?? '-'}`
   // Its deployment environment's (`cacheEnvTag`; prod's keys unchanged): a PR preview's document is its own.
   const tag = cacheEnvTag(env, ctx.request)
-  const key = new Request(`https://health.cache/${tag ? `~${encodeURIComponent(tag)}/` : ''}${encodeURIComponent(storeKey(env))}/${encodeURIComponent(generation)}/${encodeURIComponent(env.STATIC_GEN ?? '-')}`)
+  const key = new Request(`https://health.cache/v${HEALTH_V}/${tag ? `~${encodeURIComponent(tag)}/` : ''}${encodeURIComponent(storeKey(env))}/${encodeURIComponent(generation)}/${encodeURIComponent(env.STATIC_GEN ?? '-')}`)
   const cache = colo()
   if (cache && !fresh) {
     const hit = await cache.match(key)

@@ -92,6 +92,24 @@ export const isScanProducer = (kind: string): boolean => !isMaintenance(kind) &&
 export const maintStore = (run: Pick<ScanRun, 'kind' | 'gen'>): string | null =>
   isMaintenance(run.kind) && run.gen?.includes('/') ? run.gen.split('/')[0] : null
 
+/** GiB of memory per vCPU by a GCE machine type's family and shape (N2 and N2D alike; specs/store-upkeep-monitoring.md
+ * §2.1). */
+const MEM_PER_CPU_GIB: Record<string, number> = { highmem: 8, standard: 4, highcpu: 1 }
+
+/** A machine type's memory in bytes (`n2-highmem-48` → 384 GiB), null for a type the table doesn't know. */
+export function machineMemBytes(machine: string | null | undefined): number | null {
+  const m = /^(?:n2|n2d)-(highmem|standard|highcpu)-(\d+)$/.exec(machine ?? '')
+  return m ? MEM_PER_CPU_GIB[m[1]] * Number(m[2]) * 2 ** 30 : null
+}
+
+/** The highest `RSS peak N GiB` a run's phase notes name (a fold's progress and end notes,
+ * `append_runner.compact_store`), in bytes; null when none does. */
+export function notedPeakBytes(notes: readonly (string | null)[]): number | null {
+  let peak: number | null = null
+  for (const n of notes) for (const m of (n ?? '').matchAll(/RSS peak (\d+(?:\.\d+)?) GiB/g)) peak = Math.max(peak ?? 0, Math.round(Number(m[1]) * 2 ** 30))
+  return peak
+}
+
 /** Seconds without a write after which a running run reads as quiet: five missed heartbeats. A running run's record
  * is touched every 60 s (its job's `scan-run supervise -H`; each running phase's process, `$DT_HEARTBEAT_S`, with the
  * phase's live note; a maintenance job's recorder), however long its phase, so a quiet run's job has likely stalled or

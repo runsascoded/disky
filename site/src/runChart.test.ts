@@ -79,6 +79,14 @@ describe('/scans\' filters in the URL (`k`, `st`)', () => {
     expect(filters.map(selected)).toEqual([['scan', 'compact'], kinds, ['scan', 'access-ingest'], [], ['access-ingest'], kinds])
     expect(runKindMatches(filters[5], 'future-job')).toBe(false)
   })
+  it('`upkeep` names the maintenance kinds (specs/store-upkeep-monitoring.md); toggling one of them expands it', () => {
+    const ks = ['scan', 'compact', 'race', 'merge', 'access-ingest']
+    expect(['upkeep', '!upkeep', 'scan,upkeep', 'toString'].map(f => ks.filter(k => runKindMatches(f, k)))).toEqual([
+      ['compact', 'race', 'merge'], ['scan', 'access-ingest'], ['scan', 'compact', 'race', 'merge'], [],
+    ])
+    expect([includeRunKind('upkeep', 'compact', false), includeRunKind('upkeep', 'scan', true), includeRunKind('!upkeep', 'merge', true)]).toEqual(['merge,race', 'compact,merge,race,scan', '!compact,!race'])
+    expect([runFilterKinds('upkeep'), runKindParam.encode('upkeep'), runKindParam.decode('upkeep')]).toEqual([['compact', 'race', 'merge'], 'upkeep', 'upkeep'])
+  })
   it('a kind is its own name, a status a `STATUS_FILTERS` key; each absent on its default, and an unknown status reads as none', () => {
     expect([runKindParam.encode(''), runKindParam.encode('scan'), runKindParam.decode(undefined), runKindParam.decode('merge')]).toEqual([undefined, 'scan', '', 'merge'])
     expect([runStatusParam.encode(''), runStatusParam.encode('attention'), runStatusParam.encode('nop')]).toEqual([undefined, 'attention', 'nop'])

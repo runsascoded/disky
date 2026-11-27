@@ -29,8 +29,9 @@ import { compressors } from './zstd.js'
 import { firstOccurrence, type HexRule, occurs } from './hexRuns.js'
 import { Memo, type Req } from './shared.js'
 
-/** A generation's key prefix in the deployment's `INDEX_R2` bucket. */
-export const staticPrefix = (gen: string): string => `static-names/${gen}`
+/** The static name index's key prefix in the deployment's `INDEX_R2` bucket, and a generation's under it. */
+export const STATIC_PREFIX = 'static-names'
+export const staticPrefix = (gen: string): string => `${STATIC_PREFIX}/${gen}`
 /** The deployment's generation, its `STATIC_GEN` var (e.g. gcs's `2026-10-08c`, cw's `2026-10-09cw`) — a pin, or the
  *  primary's `static-names/CURRENT.json` as the request resolved it (`index.ts` `withStaticGen`): required with the
  *  static index on, one path segment. */
