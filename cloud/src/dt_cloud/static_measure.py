@@ -39,6 +39,9 @@ MEASURE_COLS = "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"
 #: Input rows (base measurement, run headers and counts) per `q` range `measure_kind` joins and writes at a time: cw's
 #: 2026-11-22..25 compactions, joining every range at once over `gov_reports`' growth, ran DuckDB out of 251 GiB.
 MEASURE_CHUNK_ROWS = 50_000_000
+#: `$DT_MEASURE_VERIFY=N`: N ranges (evenly spaced) of a cut measurement also joined the uncut way, over the whole
+#: tables, and compared row for row (a mismatch raises): the cut checked on real data, at ~one uncut range's cost apiece.
+MEASURE_VERIFY_ENV = "DT_MEASURE_VERIFY"
 #: The sampled `q` values the ranges are cut from
 RANGE_SAMPLE_ROWS = 100_000
 #: DuckDB's Arrow batch (`to_arrow_table`'s, `to_arrow_reader`'s default) and pyarrow's default row group: `write_sorted`
@@ -352,13 +355,13 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
         finally:
             con.execute(f"SET partitioned_write_max_open_files = {opened}")
 
-    def part(i: int, lo: str | None, hi: str | None) -> str:
+    def part(i: int, lo: str | None, hi: str | None, uncut: bool = False) -> str:
         def of(t: str, col: str = "q") -> str:
-            if split is None:
+            if split is None or uncut:
                 return f"(SELECT * FROM {t} WHERE {q_range_sql(col, lo, hi)})"
             files = sorted(str(f) for f in (split / t / f"r={i}").glob("*.parquet"))
             return f"(SELECT * FROM read_parquet({_files(files)}, hive_partitioning = false))" if files else f"(SELECT * FROM {t} LIMIT 0)"
-        bx = (of("im_bx") if split is not None else
+        bx = (of("im_bx") if split is not None and not uncut else
               f"(SELECT * FROM im_bx SEMI JOIN (SELECT c0 AS c FROM im_mt WHERE {q_range_sql('q', lo, hi)}) USING (c))" if long
               else of("im_bx", "c"))
         return f"""SELECT q::VARCHAR AS q, len(string_split(dir, '/'))::INTEGER AS k, dir::VARCHAR AS dir, rows::BIGINT AS rows FROM (
@@ -369,10 +372,23 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
                 LEFT JOIN {bx} AS bx ON bx.c = {bc} AND bx.dir = x.dir)
             WHERE rows >= {floor} ORDER BY q, k, dir"""
 
+    n_verify = int(os.environ.get(MEASURE_VERIFY_ENV) or 0) if split is not None else 0
+    verify = {round(j * (len(ranges) - 1) / max(1, n_verify - 1)) for j in range(n_verify)} if n_verify > 1 else ({len(ranges) // 2} if n_verify else set())
+
     def batches():
         prog = Progress(f"measure {kind}", len(ranges), unit="q ranges")
         for i, (lo, hi) in enumerate(ranges):
-            yield from con.execute(part(i, lo, hi)).to_arrow_reader(ARROW_BATCH_ROWS)
+            if i in verify:
+                cut = con.execute(part(i, lo, hi)).to_arrow_table()
+                set_stage(f"measure {kind}: range {i} checked uncut")
+                t1 = monotonic()
+                whole = con.execute(part(i, lo, hi, uncut=True)).to_arrow_table()
+                if not cut.equals(whole):
+                    raise RuntimeError(f"measure {kind}: range {i} [{lo}, {hi}) cut ({cut.num_rows:,} rows) differs from uncut ({whole.num_rows:,})")
+                err(f"measure {kind}: range {i} [{lo}, {hi}): cut = uncut, {cut.num_rows:,} rows (uncut in {fmt_secs(monotonic() - t1)})")
+                yield from cut.to_batches(ARROW_BATCH_ROWS)
+            else:
+                yield from con.execute(part(i, lo, hi)).to_arrow_reader(ARROW_BATCH_ROWS)
             prog.tick()
         prog.done()
 
