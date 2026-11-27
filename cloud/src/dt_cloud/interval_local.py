@@ -43,13 +43,12 @@ import shutil
 from pathlib import Path
 from time import monotonic
 
-from click import Choice, IntRange, command, option
+from click import IntRange, command, option
 
 from . import append_runner as ar
 from . import heartbeat as hb
 from . import interval_append as ia
 from . import interval_compact as ic
-from . import interval_changes as ichg
 from . import interval_churn as ich
 from . import interval_level as ilv
 from . import interval_store as ist
@@ -115,13 +114,11 @@ def attach_attribution(scans: dict, root: str, local: Path) -> dict:
 
 
 def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k: int = RANGES, rg_rows: int = ist.SERVED_RG,
-              threads: int = 4, mem: str = "4GB", jobs: int = 1, attribution: bool = False, level: bool = False,
-              mtime: str = ichg.MTIME_DEFAULT) -> dict:
+              threads: int = 4, mem: str = "4GB", jobs: int = 1, attribution: bool = False, level: bool = False) -> dict:
     """A base generation over `scans` (`find_scans`' doc; their files under `mount`) in `gen_dir`, every stage in turn
     (with `"generation": true` in its `scans.json` when some scan's sort carries the objects' `generation`):
     ranges → path and read versions (`build_range`, checked against every scan) → folded (`fold_range`) → their churn
-    (`interval_churn.churn_gen`; `"churn": true` in `scans.json`) and the scans' change counters (`interval_changes`, under
-    `mtime`: `changes.json`) → owner slices
+    (`interval_churn.churn_gen`; `"churn": true` in `scans.json`) → owner slices
     (`build_slices_range`, checked) → slices with their path's total (`slice_totals_range`) → with `attribution`, the
     attribution table over the covered scans (`build_attribution_range`, checked; `"attribution": true`) → the served
     sorts (`cut`, dyadic segments over the scans' stamps; with `level`, the level sort too, `"level": true`) and their churn
@@ -160,8 +157,6 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
     if level:
         doc = ilv.record_level(doc)
     ich.churn_gen(con, gen_dir, ranges["k"], ich.churn_from(doc["scans"])["ts"], work, jobs=jobs)
-    # The scans' change counters, from the same folded versions (`changes.json`; none before the churn base).
-    ichg.write_doc(gen_dir / ichg.DOC, ichg.gen_counters(con, gen_dir, doc["scans"], identity=ist.has_generation(doc), mtime=mtime))
     t = done("churn", t)
     # The owner axis, from the versions: a generation whose scans name no owner builds no slices.
     doc["slices"] = ist.owners_of(digests)
@@ -222,14 +217,13 @@ def open_state_files(root: str, runs: list[str], name: str, sliced: bool = True,
 
 
 def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: str, rg_rows: int = ist.SERVED_RG,
-                attributed: bool = False, tree: tm.Budget | None = None, budget: int | None = None, mtime: str = ichg.MTIME_DEFAULT) -> dict:
+                attributed: bool = False, tree: tm.Budget | None = None, budget: int | None = None) -> dict:
     """Scan `scan` appended to the generation in `gen_dir` (the base, its runs and manifests) as the run `deltas/<id>/`, and
     published (`manifests/<id>.json`): per key range `append_range` over the refolded open versions (`open_state_sql`),
     the run's served sorts (`cut_run`) and `meta.json`, then `publish_run`. `attributed`: the run carries the attribution
     table (`scan` covered when its entry names an `attribution.parquet`), as the staged chain's `prepare` pins it. `tree`:
     the process tree's budget the cut is planned under (`cut_run`). `budget`: each range's sub-ranges' estimated bytes
-    (`interval_append.append_range`; None: each range whole). `mtime`: what its mtimes say about a rewrite (the change
-    counters, `interval_changes`, in the run's `meta.json`)."""
+    (`interval_append.append_range`; None: each range whole)."""
     t0 = monotonic()
     disk = DiskPeak(work)
     d = scan["id"]
@@ -272,14 +266,13 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
         with tm.phase("append churn"):
             ich.apply_run(con, run, st, ranges, int(scan["ts"]), run, open_rows=lambda name: f"SELECT * FROM read_parquet({q(str(st / 'pvl' / f'{name}.parquet'))})")
     shutil.rmtree(run / "state")
-    changes = ia.scan_changes(con, store, base, str(run), scan, mtime=mtime)
     t1 = monotonic()
     docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows, sliced=sliced, generation=gen_col, churn=churn, tree=tree, level=level)
     cut_s = round(monotonic() - t1, 1)
     with tm.phase("append check"):
         cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col, churn=churn, level=level)
     new = {"key": rk, "first": d, "last": d, "level": 0, "scans": [d]}
-    meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs, ia.run_attribution(pinned), changes), "cut_s": cut_s, "check": cut,
+    meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs, ia.run_attribution(pinned)), "cut_s": cut_s, "check": cut,
             "check_s": round(monotonic() - t1 - cut_s, 1)}
     (run / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     manifest = ia.publish_run(store, d)
@@ -321,9 +314,8 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, k: int, compact_level: int
 @option("-r", "--rg-rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id (inclusive; default: the newest)")
-@option("-T", "--mtime", type=Choice(ichg.MTIMES), default=ichg.MTIME_DEFAULT, envvar="INTERVAL_STORE_MTIME", show_envvar=True, help=ichg.MTIME_HELP)
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after)")
-def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, threads, rg_rows, scans_root, through, mtime, work) -> None:
+def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, threads, rg_rows, scans_root, through, work) -> None:
     """Build a base generation of the interval store on this machine, every stage in-process: the staged (Batch) path's
     stages over a local work dir, then the generation copied into the store (data first, `scans.json` last). Prints a
     JSON summary."""
@@ -342,7 +334,7 @@ def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, thread
         if gen_dir.exists():
             shutil.rmtree(gen_dir)
         summary = build_gen(scans, scans["mount"], gen_dir, w / "build", gen=gen, k=k, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs,
-                            attribution=attribution, level=level, mtime=mtime)
+                            attribution=attribution, level=level)
         summary["files"] = len(upload_new(store, gen_dir, prefix, {}, publish_order, tier=publish_tier))
     if ic.current(store) is None:
         ic.set_current(store, gen)  # the store's first generation: what unpinned readers and `add` follow
@@ -369,10 +361,9 @@ def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, thread
 @option("-r", "--rg-rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group (the runs', and a compacted generation's)")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
-@option("-T", "--mtime", type=Choice(ichg.MTIMES), default=ichg.MTIME_DEFAULT, envvar="INTERVAL_STORE_MTIME", show_envvar=True, help=ichg.MTIME_HELP)
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
 def add_cmd(attribution, sub_budget, compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads,
-            rg_rows, scans_root, through, mtime, work) -> None:
+            rg_rows, scans_root, through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's published files are never rewritten; new ones go
     to the store data first, `meta.json`s next, manifests last. Then the runs a carry folded are deleted from the store
@@ -420,8 +411,7 @@ def add_cmd(attribution, sub_budget, compact, read_from, gen, grace_s, compact_n
                 err(f"{', '.join(late)}: the sorts carry `{ist.GENERATION}`, generation {gen} doesn't; appended without it "
                     "(`interval-store backfill-generation` folds it into a new generation that does)")
         with tm.phase("append"):
-            added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed, tree=tree, budget=budget,
-                                 mtime=mtime)
+            added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed, tree=tree, budget=budget)
                      for s in pending]
         # The append's database idle from here (the carries and the compaction open their own, each budget measured
         # with what this process then holds): its pages back first.

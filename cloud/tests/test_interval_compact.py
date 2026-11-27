@@ -113,7 +113,7 @@ def test_add_compacts_every_two_to_the_level_scans(run):
         "level": LEVEL}
     # The compacted generation is a base: no runs, no manifests.
     assert sorted(p.name for p in (root / "g.c002").iterdir()) == sorted(
-        ["changes.json", "compaction.json", "pv", "pvl", "ranges.json", "rd", "scans.json", "served", *(["sv", "svt"] if run["owned"] else [])])
+        ["compaction.json", "pv", "pvl", "ranges.json", "rd", "scans.json", "served", *(["sv", "svt"] if run["owned"] else [])])
 
 
 @pytest.mark.parametrize("gen,through", [("g.c001", DATES[5]), ("g.c002", DATES[9])])
