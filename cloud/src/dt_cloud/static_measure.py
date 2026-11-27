@@ -251,11 +251,19 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
     drill, then the runs', oldest first), the base's `roots-measure/` `meas`, and (long) the members' `members` parquet
     (column `q`). The floor crossers' base rows are counted on `jobs` processes (default: every CPU) when there are at least
     `PARALLEL_MIN` of them. Returns counts."""
-    from .heartbeat import Progress
+    from .heartbeat import Progress, fmt_secs, set_stage
 
     jobs = jobs or os.cpu_count() or 1
     runs = list(enumerate(tiers))[1:]
     long = kind == "long"
+
+    def build(table: str, what: str, sql: str) -> None:
+        """`CREATE OR REPLACE TEMP TABLE table AS sql`, named on the liveness line while it runs and logged after (rows,
+        seconds): each is one statement over the whole corpus, minutes long on cw's."""
+        set_stage(f"measure {kind}: {what} ({table})")
+        t = monotonic()
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {table} AS {sql}")
+        err(f"measure {kind}: {what} ({table}): {con.execute(f'SELECT count(*) FROM {table}').fetchone()[0]:,} rows in {fmt_secs(monotonic() - t)}")
     if long:
         cols = ", ".join(f"coalesce(a{i}.canonical, m.q) AS c{i}" for i in range(len(tiers)))
         joins = " ".join(f"LEFT JOIN im_a{i} AS a{i} USING (q)" for i in range(len(tiers)))
@@ -264,7 +272,7 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
             con.execute(f"CREATE OR REPLACE TEMP TABLE im_a{i} AS SELECT q, canonical FROM im_a{i}_in")
             con.unregister(f"im_a{i}_in")
         # each member's canonical per tier; `base`: the base knows it (else it has no base roots)
-        con.execute(f"""CREATE OR REPLACE TEMP TABLE im_mt AS SELECT m.q, {cols}, a0.q IS NOT NULL AS base
+        build("im_mt", "members' canonicals", f"""SELECT m.q, {cols}, a0.q IS NOT NULL AS base
             FROM (SELECT DISTINCT q FROM read_parquet({q(members)})) AS m {joins}""")
 
     def keyed(i: int, sql: str) -> str:
@@ -277,18 +285,17 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
     # Every table the `q` ranges below read is stored sorted by `q`, so a range's filter reads its own row groups (DuckDB's
     # zone maps), not the whole table once per range: cw's 2026-11-27 compaction rescanned its ~5B run counts and 2.0B
     # base counts for each of ~100 ranges, 5.5 min apiece.
-    con.execute(f"""CREATE OR REPLACE TEMP TABLE im_h AS SELECT q, dir, arg_max(rows, tier) AS rows
+    build("im_h", f"the {len(heads)} runs' rollup heads", f"""SELECT q, dir, arg_max(rows, tier) AS rows
         FROM ({_union(heads, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows, NULL::INTEGER AS tier")}) GROUP BY q, dir
         ORDER BY q""")
-    con.execute(f"""CREATE OR REPLACE TEMP TABLE im_d AS SELECT q, dir, sum(rows)::BIGINT AS rows
+    build("im_d", f"the {len(dcs)} runs' counts", f"""SELECT q, dir, sum(rows)::BIGINT AS rows
         FROM ({_union(dcs, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows")}) GROUP BY q, dir ORDER BY q""")
     top = sorted(str(p) for p in (meas / "short" / "top").glob("*.parquet")) if not long else []
     base = sd.meas_sql(kind, sorted(str(p) for p in (meas / SUBS[kind]).glob("*.parquet")), top)
-    con.execute(f"CREATE OR REPLACE TEMP TABLE im_b AS SELECT b.q, b.dir, b.rows FROM ({base}) AS b"
-                + (" SEMI JOIN im_mt USING (q)" if long else "") + " ORDER BY q")
+    build("im_b", "the base measurement", f"SELECT b.q, b.dir, b.rows FROM ({base}) AS b" + (" SEMI JOIN im_mt USING (q)" if long else "") + " ORDER BY q")
     # touched below the base's floor, no header: the base's rows there are counted (per base canonical)
     c0, mt = ("mt.c0", "JOIN im_mt AS mt USING (q) WHERE mt.base") if long else ("d.q", "")
-    con.execute(f"""CREATE OR REPLACE TEMP TABLE im_c AS SELECT DISTINCT {c0} AS c, d.dir
+    build("im_c", "floor crossers", f"""SELECT DISTINCT {c0} AS c, d.dir
         FROM im_d AS d ANTI JOIN im_h USING (q, dir) ANTI JOIN im_b USING (q, dir) {mt}""")
     n = con.execute("SELECT count(*) FROM im_c").fetchone()[0]
     con.execute("CREATE OR REPLACE TEMP TABLE im_bx (c VARCHAR, dir VARCHAR, rows BIGINT)")
@@ -307,7 +314,7 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
     # The base counts keyed by the rows that read them, once, sorted by `q`: a short literal's count (`im_bx.c`) is its
     # own `q`'s; a member's is its base canonical's (`im_mt.c0`), read only where its row is a run count's (a base row
     # has its own rows; the counted `(c0, dir)`s came from the counts, `im_c`).
-    con.execute("CREATE OR REPLACE TEMP TABLE im_bq AS " + (
+    build("im_bq", "base counts by row", (
         """SELECT d.q, d.dir, bx.rows FROM im_d AS d JOIN im_mt AS mt USING (q) JOIN im_bx AS bx ON bx.c = mt.c0 AND bx.dir = d.dir
         ORDER BY d.q""" if long else "SELECT c AS q, dir, rows FROM im_bx ORDER BY c"))
     con.execute("DROP TABLE im_bx")
