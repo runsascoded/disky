@@ -12,6 +12,9 @@ beyond the newest `keep` are deleted (the serving VM may still be mapping the pr
 `submit` runs `build` as a Batch job of its own (§6.3): the writer's loader holds the store's rows in RAM once (gcs: 117
 GB), so it gets its own machine (default a spot n2-highmem-16) rather than sizing the scan's. One job per pack
 (`job_id`), submitted and not waited on.
+
+`pull` is the serving side's: the pointer's pack mirrored to a local dir, checked and renamed into place, where `vmd`
+maps it (specs/vm-pilot.md: the box's pack sync).
 """
 from __future__ import annotations
 
@@ -142,6 +145,43 @@ def prune(store: Store, keep: int, current_key: str) -> list[str]:
     if old:
         store.delete(old)
     return old
+
+
+#: `pull`'s files in a tenant's pack dir: the pack `vmd` maps (renamed over in place, which its watcher sees as a new
+#: pack) and the pointer it was pulled under.
+PULLED = "current.fsb"
+PULLED_POINTER = "current.json"
+
+
+def pull(root: str, dest: Path) -> dict:
+    """Mirror the pack `root`'s `vm-pack/CURRENT.json` names to `dest/current.fsb` (specs/vm-pilot.md: the box's pack
+    sync), the pointer to `dest/current.json`; `{"state": "none"}` when the store has no pack yet.
+
+    A no-op (`"state": "current"`) when `dest/current.json` already names that key and checksum and the pack is there at
+    its size. Otherwise the pack is downloaded beside the old one, checked against the pointer's `sha256` (a mismatch
+    raises, leaving the old pack in place), then renamed over `current.fsb`, and only then is the pointer written: the
+    serving process keeps the old pack mapped until it sees the new file."""
+    store = Store(store_url(root))
+    if not store.exists(POINTER):
+        return {"state": "none"}
+    cur = store.read_json(POINTER)
+    pack, have = dest / PULLED, dest / PULLED_POINTER
+    if have.exists() and pack.exists():
+        prev = json.loads(have.read_text())
+        if (prev.get("key"), prev.get("sha256")) == (cur["key"], cur["sha256"]) and pack.stat().st_size == cur["bytes"]:
+            return {**cur, "state": "current"}
+    dest.mkdir(parents=True, exist_ok=True)
+    tmp = dest / f".{PULLED}.tmp"
+    t0 = time.monotonic()
+    store.get(cur["key"], tmp)
+    if (got := sha256(tmp)) != cur["sha256"]:
+        tmp.unlink()
+        raise ValueError(f"{store.uri(cur['key'])}: sha256 {got} differs from {POINTER}'s {cur['sha256']}")
+    tmp.replace(pack)
+    ptmp = dest / f".{PULLED_POINTER}.tmp"
+    ptmp.write_text(json.dumps(cur) + "\n")
+    ptmp.replace(have)
+    return {**cur, "state": "pulled", "pull_s": round(time.monotonic() - t0, 1)}
 
 
 # The Batch job (§6.3): `build` on a machine of its own, submitted by the scan step and not waited on.
@@ -378,6 +418,15 @@ def submit_cmd(service_account: str | None, ssd_gb: int, env_items: tuple[str, .
                  memory_mib=memory_mib, env=pairs(env_items, "-e"), secrets=pairs(secret_items, "-s"),
                  cross_region=cross_region, dry_run=dry_run)
     print(json.dumps(doc))
+
+
+@cli.command("pull")
+@option("-d", "--dest", type=PathType(file_okay=False, path_type=Path), required=True, help="The tenant's pack dir: `current.fsb` (what vmd maps) + `current.json`")
+@option("-o", "--store", "root", required=True, help="The store (a dir or a gs:// / s3:// / r2:// URL) holding vm-pack/")
+def pull_cmd(dest: Path, root: str) -> None:
+    """Mirror the store's current pack to DEST (idempotent; sha256-checked, then renamed into place). Prints the pointer
+    with `state`: `pulled`, `current` (nothing to do) or `none` (no pack published yet)."""
+    print(json.dumps(pull(root, dest)))
 
 
 @cli.command("current")

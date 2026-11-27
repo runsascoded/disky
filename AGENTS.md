@@ -211,7 +211,10 @@ dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N]  # VM mode's pack (spe
                           # `options.vm-pack.batch` (its keys = submit's options) it submits; without, builds in the task. `fsb`
                           # in the image: `job/Dockerfile` build arg `FSB=build` (default `none`). The
                           # server is `bench/full-scan`'s `vmd -c CONF` (tenants' packs mapped; `/v1/view`, `/v1/shard`, `/v1/merge`,
-                          # `/v1/status`, HMAC per tenant); `fsb shard PACK -n N` cuts physical shard packs
+                          # `/v1/status`, HMAC per tenant); `fsb shard PACK -n N` cuts physical shard packs.
+                          # `vm-pack pull -o STORE -d DIR`: the serving side's (the VM pilot's pack sync): the pointer's pack
+                          # to `DIR/current.fsb` (sha256-checked, renamed into place) + `DIR/current.json`; `state` pulled |
+                          # current (no-op) | none (nothing published)
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
