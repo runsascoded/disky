@@ -37,7 +37,8 @@ import re
 import secrets
 import sys
 import time
-from collections.abc import Collection, Iterable
+from collections import OrderedDict
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -568,6 +569,31 @@ class Unit:
     reply: Reply
 
 
+@dataclass(frozen=True)
+class DayLine:
+    """One day's line in a weekly reply (`weekly_units`): its UTC ``date``, the ``scan`` it renders, the line."""
+
+    date: dt.date
+    scan: str
+    line: str
+
+
+def weekly_units(lines: list[DayLine], summary: Callable[[int, int], str], sender: dict[str, str]) -> list[Unit]:
+    """The ``weekly`` variant's replies: one per ISO week (`week_of`; a week split by the month's ends is the part in
+    the month), keyed ``wk-<its Monday>``, sent as ``wk of <M/D>`` with ``sender``'s icon. Slack edits only a reply's
+    body, never its sender name or icon, so all that changes is in the body: the week so far (``summary(i, j)`` over
+    ``lines[i..j]``, from its second day), then each day's line, oldest first. Its ``scan`` is the newest day's, so a
+    converge edits it as each day lands."""
+    weeks: OrderedDict[dt.date, list[int]] = OrderedDict()
+    for i, line in enumerate(lines):
+        weeks.setdefault(week_of(line.date), []).append(i)
+    out = []
+    for wk, idx in weeks.items():
+        body = "\n".join([*([summary(idx[0], idx[-1])] if len(idx) > 1 else []), *(lines[i].line for i in idx)])
+        out.append(Unit(f"wk-{wk:%Y-%m-%d}", lines[idx[-1]].scan, Reply(f"wk of {wk.month}/{wk.day}", body, **sender)))
+    return out
+
+
 def emoji_name(d: int) -> str:
     """Discord application-emoji name for a signed arrow degree (`emoji_vocab`'s ``trend.<d>``). Discord emoji names
     are ``[A-Za-z0-9_]`` only (no ``-``), so a negative reads ``arrow_degm30`` where the Slack custom emoji is
@@ -869,8 +895,9 @@ def pages_deploy(icons_dir: Path, project: str, branch: str) -> str | None:
     return m.group(0) if m else None
 
 
-def _record(tpl: Template, ts: str, scan: str) -> str | dict:
-    return {"ts": ts, "scan": scan} if tpl.track_scan else ts
+def _record(tpl: Template, ts: str, scan: str, variant: str | None = None) -> str | dict:
+    """A posted reply's state: ``{ts, scan}`` when the template tracks scans or edits this variant's replies, else the ts."""
+    return {"ts": ts, "scan": scan} if tpl.track_scan or variant in tpl.edited_variants else ts
 
 
 def _ts(rec: str | dict) -> str:
@@ -1248,11 +1275,11 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
             if new and reply_delay:
                 time.sleep(reply_delay)
             rm = client.post(r.body, thread_id=op_ts, username=r.username, icon_url=r.icon_url, icon_emoji=r.icon_emoji)
-            posted[u.key] = _record(tpl, rm.id, u.scan)
+            posted[u.key] = _record(tpl, rm.id, u.scan, variant)
             new += 1
             save_state(path, state)   # persist after each → a spaced backfill is resumable
             _err(f"digest: reply {u.key} ({u.scan}) -> {rm.id}")
-        elif edit_replies or (variant in tpl.edited_variants and have["scan"] != u.scan):
+        elif edit_replies or (variant in tpl.edited_variants and (have.get("scan") if isinstance(have, dict) else None) != u.scan):
             client.edit(_ts(have), r.body)
             if isinstance(have, dict):
                 have["scan"] = u.scan

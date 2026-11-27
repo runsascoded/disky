@@ -737,6 +737,34 @@ def test_reply_body_variant():
     )
 
 
+def test_weekly_variant_is_a_reply_per_week_edited_as_days_land():
+    # 9/1 and 9/2 share the ISO week of 8/31: the week so far (+10.0 on 705 over 48 h = 4.96%/wk → deg40), then each
+    # day's `body` line; sent as `wk of 8/31` with the OP's icon (a sender is fixed at post time); the newest day's scan
+    tpl = D.QuotaTemplate(CFG)
+    assert tpl.units(MONTH, "weekly") == [E.Unit("wk-2026-08-31", "2026-09-02T1200", E.Reply(
+        "wk of 8/31",
+        "\n".join([
+            ":arrow_deg40: *week:* **+10.0 TiB (1.4%)**",
+            f":arrow_deg50: [9/1]({SITE}/?d=26090112-1d#over-time) — **713 TiB (+8.0, 1.1%)** · "
+            f"[main]({SITE}/main-data?d=26090112-1d#over-time): 78.4% of 1P (197.0 Ti free)",
+            f":arrow_deg30: [9/2]({SITE}/?d=26090212-1d#over-time) — **715 TiB (+2.0, 0.3%)** · "
+            f"[main]({SITE}/main-data?d=26090212-1d#over-time): 78.6% of 1P (195.0 Ti free)",
+        ]),
+        icon_emoji=":calendar:",
+    ))]
+    assert tpl.edited_variants == ("body", "weekly")
+
+
+def test_weekly_units_split_by_iso_week():
+    # 11/1 (a Sunday) closes the week of 10/26; a one-day week has no summary line
+    lines = [E.DayLine(date(2026, 11, d), f"2026-11-0{d}T0700", f"day {d}") for d in (1, 2, 3)]
+    units = E.weekly_units(lines, lambda i, j: f"sum {i}..{j}", {"icon_emoji": ":calendar:"})
+    assert units == [
+        E.Unit("wk-2026-10-26", "2026-11-01T0700", E.Reply("wk of 10/26", "day 1", icon_emoji=":calendar:")),
+        E.Unit("wk-2026-11-02", "2026-11-03T0700", E.Reply("wk of 11/2", "sum 1..2\nday 2\nday 3", icon_emoji=":calendar:")),
+    ]
+
+
 def test_reply_first_day_ever():
     # no prior scan: zero delta, flat arrow, link without a look-back
     day = D.day_rows(D.Month(lead=[], rows=MONTH.rows[:2]), "sender", 12)[0]

@@ -23,9 +23,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import emoji_vocab as V
 from .digest import (
-    AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _tb, deg,
-    list_scans, load_window, read_metas, scan_slugs, scan_ts, scans_as_of, site_render, window_scans,
+    AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DayLine, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _tb,
+    deg, list_scans, load_window, read_metas, scan_slugs, scan_ts, scans_as_of, site_render, weekly_units, window_scans,
     window_start,
 )
 
@@ -153,11 +154,37 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     url = f"{cfg.site_url}/?d={_dlink(r.date, r.slug)}#diff"
     link = f"· [view →]({url})" if platform == "discord" else f"[{LINK_ARROW}]({url})"
     body = f"${r.cost:,}/mo ({_usd(dcost)}) {link}"
-    # project the scan's Δ% over its real interval to a weekly rate (a day: ×7)
-    # (a daily scan keeps the fixed ×7 even across a missed day)
-    hours = (scan_ts(r.date) - scan_ts(r.prev)).total_seconds() / 3600 if r.prev and "T" in r.date + r.prev else 24
-    avatar = f"{cfg.need('icons_base')}/arrows/av_deg{deg(_pct_val(dtb, r.tb), 168 / hours if hours > 0 else 7)}.png?v={AVATAR_REV}"
+    avatar = f"{cfg.need('icons_base')}/arrows/av_deg{_deg(r)}.png?v={AVATAR_REV}"
     return Reply(sender, body, icon_url=avatar)
+
+
+def _hours(r: Scan) -> float:
+    """``r``'s interval from the scan before it, in hours (24 when either id has no time: a daily scan keeps the fixed
+    day even across a missed one)."""
+    return (scan_ts(r.date) - scan_ts(r.prev)).total_seconds() / 3600 if r.prev and "T" in r.date + r.prev else 24
+
+
+def _deg(r: Scan) -> int:
+    """``r``'s trend arrow: its Δ% projected over its real interval to a weekly rate (a day: ×7)."""
+    hours = _hours(r)
+    return deg(_pct_val(r.dtb or 0, r.tb), 168 / hours if hours > 0 else 7)
+
+
+def day_line(r: Scan, cfg: DigestConfig) -> DayLine:
+    """``r``'s line in a weekly reply: its arrow, its day linked to its diff, the size and $/mo with their changes."""
+    d, dtb, dcost = r.day, r.dtb or 0, r.dcost or 0
+    url = f"{cfg.site_url}/?d={_dlink(r.date, r.slug)}#diff"
+    return DayLine(d, r.date, f"{V.trend(_deg(r))} [{d.month}/{d.day}]({url}) — **{r.tb:,.0f} TiB** ({_tb(dtb)}, "
+                              f"{_pct(dtb, r.tb)}%) · ${r.cost:,}/mo ({_usd(dcost)})")
+
+
+def week_summary(rows: list[Scan]) -> str:
+    """A weekly reply's first line: the week so far over ``rows`` (its days), its arrow at the week's rate."""
+    tb = rows[-1].tb
+    dtb, dcost = round(sum(r.dtb or 0 for r in rows), 1), sum(r.dcost or 0 for r in rows)
+    hours = sum(_hours(r) for r in rows)
+    d = deg(_pct_val(dtb, tb), 168 / hours if hours > 0 else 1)
+    return f"{V.trend(d)} *week:* **{_tb(dtb)} TiB ({_pct(dtb, tb)}%)** · {_usd(dcost)}/mo"
 
 
 def load_month(root: str, month: dt.date, prices: dict[str, float], triggers: Mapping[str, str] | None = None,
@@ -182,8 +209,8 @@ def load_month(root: str, month: dt.date, prices: dict[str, float], triggers: Ma
 class CostTemplate:
     """The `cost` template over a :class:`DigestConfig` (see `digest.Template`)."""
 
-    variants = ("sender",)
-    edited_variants = ()
+    variants = ("sender", "weekly")
+    edited_variants = ("weekly",)
     track_scan = False
 
     def __init__(self, cfg: DigestConfig, as_of: dt.date | None = None):
@@ -217,6 +244,9 @@ class CostTemplate:
         return {"template": "cost", "pre": [row(r) for r in data.pre], "rows": [row(r) for r in data.rows]}
 
     def units(self, data: Month, variant: str, platform: str = "slack") -> list[Unit]:
+        if variant == "weekly":
+            rows = data.rows
+            return weekly_units([day_line(r, self.cfg) for r in rows], lambda i, j: week_summary(rows[i:j + 1]), self.cfg.op_sender())
         return [Unit(r.date[:10], r.date, reply(r, self.cfg, platform)) for r in data.rows]
 
     def provisional(self, data: Month, variant: str) -> None:

@@ -51,12 +51,12 @@ from pathlib import Path
 from . import emoji_vocab as V
 
 from .digest import (
-    AVATAR_REV, HOURS_PER_WEEK, LINK_ARROW, TIB, UNITS, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
+    AVATAR_REV, HOURS_PER_WEEK, LINK_ARROW, TIB, UNITS, DayLine, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
     _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, read_metas, site_render,
-    scan_slugs, scan_ts, scans_as_of, window_scans, window_start,
+    scan_slugs, scan_ts, scans_as_of, weekly_units, window_scans, window_start,
 )
 
-VARIANTS = ("sender", "body")
+VARIANTS = ("sender", "body", "weekly")
 # a provisional reply's avatar: neutral (no trend), and fixed at post time like its sender
 PROVISIONAL_ICON = ":hourglass_flowing_sand:"
 
@@ -626,6 +626,20 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
 
 
+def day_line(day: DayRow, cfg: DigestConfig) -> DayLine:
+    """``day``'s line in a weekly reply: the ``body`` variant's."""
+    return DayLine(dt.date.fromisoformat(day.date), day.scan, reply(day, "body", cfg).body)
+
+
+def week_summary(days: list[DayRow], cfg: DigestConfig) -> str:
+    """A weekly reply's first line: the week so far over ``days``, its arrow at the week's rate."""
+    tb = _headline(days[-1], cfg)[0]
+    dtb = round(sum(_headline(d, cfg)[1] for d in days), 1)
+    hours = sum(d.hours or 24 for d in days)
+    d = deg(_pct_val(dtb, tb), HOURS_PER_WEEK / hours)
+    return f"{V.trend(d)} *week:* **{_tb(dtb)} {cfg.unit.name} ({_pct(dtb, tb)}%)**"
+
+
 def scan_triggers(runs: Iterable[Mapping]) -> dict[str, str]:
     """Each scan's trigger: its first run's (by start; a hand resume of a cron scan doesn't make it manual), from
     `scan_runs` rows. A scan whose first run recorded none is absent."""
@@ -685,7 +699,7 @@ class QuotaTemplate:
     """The `quota` template over a :class:`DigestConfig` (see `digest.Template`)."""
 
     variants = VARIANTS
-    edited_variants = ("body",)
+    edited_variants = ("body", "weekly")
     track_scan = True
 
     def __init__(self, cfg: DigestConfig, as_of: dt.date | None = None):
@@ -720,6 +734,9 @@ class QuotaTemplate:
                 "alert_pct": c.alert_pct, "op_sender": c.op_sender(), "avatar_rev": AVATAR_REV, "triggers": triggers}
 
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:
+        if variant == "weekly":
+            days = day_rows(month, "body", self.cfg.reply_hour)
+            return weekly_units([day_line(d, self.cfg) for d in days], lambda i, j: week_summary(days[i:j + 1], self.cfg), self.cfg.op_sender())
         return [Unit(day.date, day.scan, reply(day, variant, self.cfg)) for day in day_rows(month, variant, self.cfg.reply_hour)]
 
     def alert(self, month: Month) -> str | None:

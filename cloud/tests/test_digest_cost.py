@@ -76,6 +76,21 @@ def test_reply_shrink():
     )
 
 
+def test_weekly_variant_is_a_reply_per_week():
+    # 8/3 and 8/4 share the week of 8/3: the week so far (+10.0 on 3,000 over 48 h = 1.17%/wk → deg20), then each day,
+    # its arrow as its daily avatar's, its day linked to its diff
+    assert TPL.units(D.Month(rows=ROWS, pre=[]), "weekly") == [E.Unit("wk-2026-08-03", "2026-08-04", E.Reply(
+        "wk of 8/3",
+        "\n".join([
+            ":arrow_deg20: *week:* **+10.0 TiB (0.3%)** · +$205/mo",
+            ":arrow_deg50: [8/3](https://site.example.org/?d=260803#diff) — **3,030 TiB** (+30.0, 1.0%) · $19,784/mo (+$615)",
+            ":arrow_deg-40: [8/4](https://site.example.org/?d=260804#diff) — **3,010 TiB** (−20.0, 0.7%) · $19,374/mo (−$410)",
+        ]),
+        icon_emoji=":calendar:",
+    ))]
+    assert (TPL.variants, TPL.edited_variants) == (("sender", "weekly"), ("weekly",))
+
+
 def test_reply_discord_link_text():
     # Discord: the bare glyph is too small, so the link reads "view →"
     assert D.reply(ROWS[0], CFG, platform="discord").body == "$19,784/mo (+$615) \u00b7 [view \u2192](https://site.example.org/?d=260803#diff)"
