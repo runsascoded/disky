@@ -10,6 +10,7 @@ vi.mock('./plans', () => ({
   useExecJobs: () => ({ data: { jobs: [] } }),
   useRunFiles: () => [],
 }))
+vi.mock('./RunProgress', () => ({ useRunHistories: () => [{ data: { samples: [] } }] }))
 vi.mock('./StagedRuns', () => ({ RunDetail: ({ run }: { run: { deleted_objects: number } }) => `${run.deleted_objects} deleted` }))
 vi.mock('./SiteNav', () => ({ SiteNav: () => null }))
 vi.mock('./SiteKbd', () => ({ SiteKbd: () => null }))
