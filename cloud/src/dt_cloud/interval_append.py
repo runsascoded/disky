@@ -65,6 +65,7 @@ import pyarrow as pa
 from click import Choice, IntRange, UsageError, argument, command, group, option
 
 from . import append_runner as ar
+from . import interval_changes as ichg
 from . import interval_churn as ich
 from . import interval_level as ilv
 from . import interval_store as ist
@@ -770,15 +771,18 @@ def missing_files(runs: list[dict], exists: Callable[[str], bool], sliced: bool 
     return [f"{r['key']}/{f}" for r in runs for f in run_files(sliced, bool(covered.intersection(r.get("scans", [])))) if not exists(f"{r['key']}/{f}")]
 
 
-def manifest(gen: str, base: dict, runs: list[dict], attribution: list[str] | None = None) -> dict:
+def manifest(gen: str, base: dict, runs: list[dict], attribution: list[str] | None = None, changes: dict[str, dict] | None = None) -> dict:
     """`manifests/<D>.json`: the base's scans and the runs (oldest first) with each run scan's epoch (`stamps`, what
     a reader tests `vf ≤ D < vt` at); in an attributed lineage, `"attribution"`: the run scans the attribution table
-    covers (present, maybe empty, once a run carried the table; a revision keeps it, its scans unchanged)."""
+    covers (present, maybe empty, once a run carried the table; a revision keeps it, its scans unchanged). `changes`: the
+    run scans' change counters (`interval_changes`, each run's `meta.json` `"changes"`), present once a run had them."""
     scans = [*(s["id"] for s in base["scans"]), *(s for r in runs for s in r["scans"])]
     stamps = {s: ts for r in runs for s, ts in r["stamps"].items()}
+    run_scans = {s for r in runs for s in r["scans"]}
     return {"gen": gen, "date": scans[-1], "base_scans": len(base["scans"]), "scans": scans, "stamps": dict(sorted(stamps.items())),
             "runs": [{k: r[k] for k in ("key", "first", "last", "level", "scans", "rows", "bytes") if k in r} for r in runs],
-            **({ist.ATTRIBUTION: attribution} if attribution is not None else {})}
+            **({ist.ATTRIBUTION: attribution} if attribution is not None else {}),
+            **({ichg.KEY: {s: e for s, e in sorted(changes.items()) if s in run_scans}} if changes is not None else {})}
 
 
 def run_attribution(pinned: dict) -> list[str] | None:
@@ -789,12 +793,15 @@ def run_attribution(pinned: dict) -> list[str] | None:
     return [s["id"] for s in pinned["scans"] if s.get(ist.ATTRIBUTION_SRC)]
 
 
-def run_meta(gen: str, run: dict, stamps: dict[str, int], docs: dict, attribution: list[str] | None = None) -> dict:
-    """A run's `meta.json`; `attribution` (an attributed lineage's run): the run's scans the attribution table covers."""
+def run_meta(gen: str, run: dict, stamps: dict[str, int], docs: dict, attribution: list[str] | None = None, changes: dict[str, dict] | None = None) -> dict:
+    """A run's `meta.json`; `attribution` (an attributed lineage's run): the run's scans the attribution table covers;
+    `changes`: its scans' change counters (`interval_changes`: an appended scan's from its deltas, a merged run's its
+    inputs'), none for a scan at or before the churn base."""
     return {"gen": gen, "key": run["key"], "first": run["first"], "last": run["last"], "level": run["level"], "scans": run["scans"],
             "stamps": stamps, "rows": sum(d["rows"] for s, d in docs.items() if s == "path"),
             "bytes": sum(d["bytes"] + d["groups_bytes"] for d in docs.values()), "sorts": docs,
-            **({ist.ATTRIBUTION: attribution} if attribution is not None else {})}
+            **({ist.ATTRIBUTION: attribution} if attribution is not None else {}),
+            **({ichg.KEY: changes} if changes is not None else {})}
 
 
 def publish_run(store: ar.RunStore, scan: str) -> dict:
@@ -818,7 +825,9 @@ def publish_run(store: ar.RunStore, scan: str) -> dict:
         # The attribution table's run scans: the earlier manifest's and this run's (its `meta.json`, an attributed run's).
         at = None if ist.ATTRIBUTION not in m and ist.ATTRIBUTION not in meta else [*m.get(ist.ATTRIBUTION, []), *meta.get(ist.ATTRIBUTION, [])]
         covered.update(at or [])
-        return manifest(store.gen, base, [{**r, "stamps": {s: stamps[s] for s in r["scans"]}} for r in after], at)
+        # The run scans' change counters: the earlier manifest's and this run's (an append before the counters has none).
+        ch = None if ichg.KEY not in m and ichg.KEY not in meta else {**m.get(ichg.KEY, {}), **meta.get(ichg.KEY, {})}
+        return manifest(store.gen, base, [{**r, "stamps": {s: stamps[s] for s in r["scans"]}} for r in after], at, ch)
     return ar.publish_scan(store, scan, new, doc, lambda runs: missing_files(runs, store.exists, ist.sliced(base), covered))
 
 
@@ -843,7 +852,7 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, gen: str, k: in
     metas = [json.loads((d / "meta.json").read_text()) for d in dirs]
     stamps = {sid: ts for m in metas for sid, ts in m["stamps"].items()}
     at = [s for m in metas for s in m.get(ist.ATTRIBUTION, [])] if any(ist.ATTRIBUTION in m for m in metas) else None
-    meta = {**run_meta(gen, run, stamps, docs, at), "merge_s": merge_s, "cut_s": cut_s}
+    meta = {**run_meta(gen, run, stamps, docs, at, ichg.union(metas)), "merge_s": merge_s, "cut_s": cut_s}
     (outp / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     log(f"merge {run['key']}: {len(dirs)} runs merged in {merge_s}s, cut in {cut_s}s ({meta['bytes']:,} B)")
     return {"rows": meta["rows"], "bytes": meta["bytes"], "s": {"merge": merge_s, "cut": cut_s}}
@@ -1414,8 +1423,9 @@ def _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, pe
 @option("-n", "--dry-run", is_flag=True, help="Print the manifest (and the carries it makes due); cut and write nothing")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-s", "--skip-published", is_flag=True, help="Exit 0 when `manifests/<D>.json` exists (a retried publish+r2 task goes on to the copy)")
+@option("-t", "--mtime", type=Choice(ichg.MTIMES), default=ichg.MTIME_DEFAULT, envvar="INTERVAL_STORE_MTIME", show_envvar=True, help=ichg.MTIME_HELP)
 @option("-T", "--tmp", default="/stage/tmp", help="Scratch dir")
-def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, mem, dry_run, threads, skip_published, tmp) -> None:
+def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, mem, dry_run, threads, skip_published, mtime, tmp) -> None:
     """Cut the run's served sorts (`deltas/<D>/served/`, then its `meta.json`), then write `manifests/<D>.json` once: the
     newest earlier manifest's runs plus D's at level 0 (`publish_run`), after checking every file of every run it lists.
     No carries: those run apart (`carry`, the merge stage)."""
@@ -1445,7 +1455,7 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
         err(f"{rk}: cut")
     else:
         with tm.watch(mem, f"publish {scan}"):
-            _cut_published(store, st, bucket, scratch, gen, ranges_gen, prefix, rk, scan, mount, mem, threads, tmp)
+            _cut_published(store, st, bucket, scratch, gen, ranges_gen, prefix, rk, scan, mount, mem, threads, tmp, mtime)
     print(json.dumps(publish_run(store, scan), indent=1))
     write_marker(st, gen, ranges_gen, scan)
 
@@ -1456,8 +1466,20 @@ def store_leveled(st: Store, prefix: str, base: dict) -> bool:
     return ilv.leveled(base) or st.exists(f"{prefix}/{ilv.LEVEL_DOC}")
 
 
+def scan_changes(con, store: ar.RunStore, base: dict, root: str, scan: dict, *, mtime: str) -> dict[str, dict]:
+    """Scan `scan`'s change counters (`interval_changes.run_counters`) from its run's `pvl` deltas under `root`, against
+    the scan before it (the newest earlier manifest's newest); `{}` (none: absent, not zero) at or before the churn base."""
+    prev = latest_key(store.keys("manifests/"), before=scan["id"])
+    since = scans_of(base, store.read_json(prev)["runs"] if prev else [])[-1]
+    if not ichg.counts(scan_entry(store.read_json, base, since), scan):
+        return {}
+    got = ichg.run_counters(con, root, scan, since, identity=ist.has_generation(base), mtime=mtime)
+    err(ichg.note(f"{scan['id']}: changes since {since}", got[scan["id"]]))
+    return got
+
+
 def _cut_published(store, st: Store, bucket: str, scratch: str, gen: str, ranges_gen: str, prefix: str, rk: str, scan: str, mount: str, mem: str,
-                   threads: int, tmp: str) -> None:
+                   threads: int, tmp: str, mtime: str = ichg.MTIME_DEFAULT) -> None:
     """`publish`'s cut: the run's churn (when the generation carries it), its served sorts, their check, `meta.json`."""
     pinned = store.read_json(f"{rk}/scans.json")
     s = pinned["scans"][0]
@@ -1474,13 +1496,14 @@ def _cut_published(store, st: Store, bucket: str, scratch: str, gen: str, ranges
         root = str(publish_churn(con, st, Store(store_url(scratch)), prefix, rk, scan, int(s["ts"]), Path(mount) / prefix / rk,
                                  st.read_json(f"{PREFIX}/{ranges_gen}/ranges.json"), Path(tmp), sl))
     lv = store_leveled(st, prefix, base)
+    changes = scan_changes(con, store, base, root, s, mtime=mtime)
     docs = cut_run(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn, tree=tree, level=lv)
     cut_s = round(monotonic() - t0, 1)
     cut = check_cut(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn, level=lv)
     Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
     shutil.rmtree(outp)
     new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
-    meta = {**run_meta(gen, new, {scan: s["ts"]}, docs, run_attribution(pinned)), "cut_s": cut_s, "check": cut,
+    meta = {**run_meta(gen, new, {scan: s["ts"]}, docs, run_attribution(pinned), changes), "cut_s": cut_s, "check": cut,
             "check_s": round(monotonic() - t0 - cut_s, 1)}
     store.create(f"{rk}/meta.json", json.dumps(meta, indent=1) + "\n")
     err(f"{rk}: cut in {meta['cut_s']}s ({meta['bytes']:,} B)")

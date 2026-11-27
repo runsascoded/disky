@@ -165,6 +165,11 @@ dt-cloud interval-store backfill-level -g GEN -o STORE  # The level index (specs
                           # path, ts, name)`, cut into GEN's `served/level.*` and each listed run's, nothing else written
                           # (not `scans.json`, not `CURRENT.json`); needs churn. Appends, carries and compactions then carry
                           # it. New builds opt in with `build -l` (`"level": true`); without either, no served byte changes
+dt-cloud interval-store backfill-changes -g GEN -o STORE [-a COPY]… [-T write|coarse]  # The change counters (specs/change-metrics.md
+                          # §10.2, `interval_changes.py`: each scan's added / deleted / modified objects and bytes at the root and
+                          # depth 1, vs the scan before): `GEN/changes.json` for every counted scan its newest manifest doesn't carry,
+                          # from the base's pieces + the runs' deltas; written once (also to each `-a` copy). Appends carry their own
+                          # (run `meta.json` + manifest `changes`), builds and compactions write `changes.json`; `-T` on `build`/`add`
 dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE  # A generation folded into NEW (a dir or
                           # URL store; never over one) whose object versions carry their GCS `generation`, read once from
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier
