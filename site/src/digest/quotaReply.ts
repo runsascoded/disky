@@ -147,16 +147,20 @@ function groupUsed(g: string[], s: QuotaScan, q: Quota, cfg: DigestCfg): number 
   return g[0] === cfg.primary ? scoped(s.tb, s.classes, q) : size(g[0])
 }
 
+/** Group `g`'s runway against one quota `q` (`_quota_runway`), with what `q` counts at the day's scan. */
+function quotaRunway(g: string[], day: DayRow, q: Quota, cfg: DigestCfg): { r: Runway; v: number } {
+  const v = groupUsed(g, day.s, q, cfg)
+  const hist = day.hist.filter(x => x.scan < day.s.scan).map(x => [scanTime(x.scan), groupUsed(g, x, q, cfg)] as [number, number])
+  return { r: runway(q.bytes / cfg.unit.bytes - v, growth(hist, scanTime(day.s.scan), v)), v }
+}
+
 /** The group's shortest runway over its quotas (`_group_runway`), with what that quota counts at the day's scan. */
 function groupRunway(g: string[], day: DayRow, cfg: DigestCfg): { r: Runway; v: number } | null {
   const qs = g.length > 1 ? cfg.buckets[g[0]].quotas.slice(0, 1) : cfg.buckets[g[0]]?.quotas ?? []
   if (!qs.length) return null
-  const t = scanTime(day.s.scan)
   let best: { r: Runway; v: number } | null = null
   for (const q of qs) {
-    const v = groupUsed(g, day.s, q, cfg)
-    const hist = day.hist.filter(x => x.scan < day.s.scan).map(x => [scanTime(x.scan), groupUsed(g, x, q, cfg)] as [number, number])
-    const r = runway(q.bytes / cfg.unit.bytes - v, growth(hist, t, v))
+    const { r, v } = quotaRunway(g, day, q, cfg)
     if (!best || r.days < best.r.days) best = { r, v }
   }
   return best
@@ -185,6 +189,16 @@ function tail(day: DayRow, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, sep:
     const b = cfg.buckets[cfg.primary!]
     const qs = b?.quotas ?? []
     const link = diffUrl(day.s.scan, dlink(day.s), day.since, cfg.site_url, !b || b.path === null ? cfg.primary! : b.path)
+    if (qs.length && b && RUNWAY_MARKS.includes(marks)) {
+      // under runway marks each quota is a pool of its own (hf: public, private): its mark, brief clause and runway
+      const rows = qs.map(q => {
+        const { r, v } = quotaRunway([cfg.primary!], day, q, cfg)
+        const f = (v / (q.bytes / cfg.unit.bytes)) * 100
+        const t = runwayText(r, cfg, r.since != null ? poolUrl([cfg.primary!], day.s, r.since, cfg) : undefined)
+        return { text: `${poolMark(marks as PoolMark, r, f, v, b.shape ?? 'circle')}${quotaClause(v, q, cfg, true)}${t}`, quiet: f < QUIET_PCT && !t }
+      })
+      return `${(sep === '\n' ? compactQuietLines(rows) : rows.map(x => x.text)).join(sep)} [${LINK_ARROW}](${link})`
+    }
     const body = qs.length ? qs.map(q => quotaClause(scoped(day.s.tb, day.s.classes, q), q, cfg)).join(', ') : `${grouped(day.s.tb, 0)} ${cfg.unit.short}`
     return `${body} [${LINK_ARROW}](${link})`
   }

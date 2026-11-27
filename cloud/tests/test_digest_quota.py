@@ -170,6 +170,15 @@ def test_class_scoped_quotas():
         E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free) [↗︎]({SITE}/?d=261001-1d#over-time)",
                 icon_url="https://icons.example.org/arrows/av_deg70.png?v=4"),
     ]
+    # under runway marks each quota is its own pool: its chip, brief clause and runway (the filling one's linked over its
+    # look-back), each on its own line under `reply_lines`, ` · `-joined without
+    link = f"{SITE}/?d=261001-1d#over-time"
+    priv = f":pool-chip-4-80: 10% of 5.1T private, +0.5 T/d [over 1d]({link}), ≈10d to full"
+    assert [D.reply(d, "sender", replace(cfg, quota_marks="arrow-chip", reply_lines=lines)).body
+            for lines in (True, False) for d in D.day_rows(month, "sender", 0)] == [
+        f":pool-chip-8-60: 6% of 253T public\n{priv} [↗︎]({link})",
+        f":pool-chip-8-60: 6% of 253T public · {priv} [↗︎]({link})",
+    ]
     # a class-scoped quota over a meta without `class_bytes` refuses rather than counting every byte
     bare = D.rows_from_meta([("2026-10-01T0800", {"total_bytes": TB, "total_objects": 1})], "org", unit=TB)
     with pytest.raises(ValueError) as e:

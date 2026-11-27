@@ -1,0 +1,453 @@
+{
+ "cfg": {
+  "template": "quota",
+  "title": "S3 usage",
+  "site_url": "https://cw.example.org",
+  "host": "cw.example.org",
+  "unit": {
+   "name": "TiB",
+   "bytes": 1099511627776,
+   "short": "Ti"
+  },
+  "primary": "main-data",
+  "buckets": {
+   "main-data": {
+    "label": "main",
+    "path": null,
+    "zone": null,
+    "quotas": [
+     {
+      "bytes": 1000555581276160,
+      "name": "910 TiB public",
+      "short": "910Ti public",
+      "classes": [
+       1
+      ]
+     },
+     {
+      "bytes": 54975581388800,
+      "name": "50 TiB private",
+      "short": "50Ti private",
+      "classes": [
+       5
+      ]
+     }
+    ]
+   }
+  },
+  "prices": {},
+  "icons_base": "https://icons.example.org"
+ },
+ "rows": {
+  "template": "quota",
+  "closed": false,
+  "pre": [
+   {
+    "scan": "2026-10-28T0001",
+    "slug": "26102800",
+    "tb": 621.0,
+    "extra": {},
+    "classes": {
+     "1": 600.0,
+     "5": 20.0,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-28T0601",
+    "slug": "26102806",
+    "tb": 622.2,
+    "extra": {},
+    "classes": {
+     "1": 600.5,
+     "5": 20.75,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-28T1201",
+    "slug": "26102812",
+    "tb": 623.5,
+    "extra": {},
+    "classes": {
+     "1": 601.0,
+     "5": 21.5,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-28T1801",
+    "slug": "26102818",
+    "tb": 624.8,
+    "extra": {},
+    "classes": {
+     "1": 601.5,
+     "5": 22.25,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-29T0001",
+    "slug": "26102900",
+    "tb": 626.0,
+    "extra": {},
+    "classes": {
+     "1": 602.0,
+     "5": 23.0,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-29T0601",
+    "slug": "26102906",
+    "tb": 627.2,
+    "extra": {},
+    "classes": {
+     "1": 602.5,
+     "5": 23.75,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-29T1201",
+    "slug": "26102912",
+    "tb": 628.5,
+    "extra": {},
+    "classes": {
+     "1": 603.0,
+     "5": 24.5,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-29T1801",
+    "slug": "26102918",
+    "tb": 629.8,
+    "extra": {},
+    "classes": {
+     "1": 603.5,
+     "5": 25.25,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-30T0001",
+    "slug": "26103000",
+    "tb": 631.0,
+    "extra": {},
+    "classes": {
+     "1": 604.0,
+     "5": 26.0,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-30T0601",
+    "slug": "26103006",
+    "tb": 632.2,
+    "extra": {},
+    "classes": {
+     "1": 604.5,
+     "5": 26.75,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-30T1201",
+    "slug": "26103012",
+    "tb": 633.5,
+    "extra": {},
+    "classes": {
+     "1": 605.0,
+     "5": 27.5,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-30T1801",
+    "slug": "26103018",
+    "tb": 634.8,
+    "extra": {},
+    "classes": {
+     "1": 605.5,
+     "5": 28.25,
+     "6": 1.0
+    }
+   }
+  ],
+  "lead": [
+   {
+    "scan": "2026-10-31T0001",
+    "slug": "26103100",
+    "tb": 636.0,
+    "extra": {},
+    "classes": {
+     "1": 606.0,
+     "5": 29.0,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-31T0601",
+    "slug": "26103106",
+    "tb": 637.2,
+    "extra": {},
+    "classes": {
+     "1": 606.5,
+     "5": 29.75,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-31T1201",
+    "slug": "26103112",
+    "tb": 638.5,
+    "extra": {},
+    "classes": {
+     "1": 607.0,
+     "5": 30.5,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-10-31T1801",
+    "slug": "26103118",
+    "tb": 639.8,
+    "extra": {},
+    "classes": {
+     "1": 607.5,
+     "5": 31.25,
+     "6": 1.0
+    }
+   }
+  ],
+  "rows": [
+   {
+    "scan": "2026-11-01T0001",
+    "slug": "26110100",
+    "tb": 641.0,
+    "extra": {},
+    "classes": {
+     "1": 608.0,
+     "5": 32.0,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-01T0601",
+    "slug": "26110106",
+    "tb": 642.2,
+    "extra": {},
+    "classes": {
+     "1": 608.5,
+     "5": 32.75,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-01T1201",
+    "slug": "26110112",
+    "tb": 643.5,
+    "extra": {},
+    "classes": {
+     "1": 609.0,
+     "5": 33.5,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-01T1801",
+    "slug": "26110118",
+    "tb": 644.8,
+    "extra": {},
+    "classes": {
+     "1": 609.5,
+     "5": 34.25,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-02T0001",
+    "slug": "26110200",
+    "tb": 646.0,
+    "extra": {},
+    "classes": {
+     "1": 610.0,
+     "5": 35.0,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-02T0601",
+    "slug": "26110206",
+    "tb": 647.2,
+    "extra": {},
+    "classes": {
+     "1": 610.5,
+     "5": 35.75,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-02T1201",
+    "slug": "26110212",
+    "tb": 648.5,
+    "extra": {},
+    "classes": {
+     "1": 611.0,
+     "5": 36.5,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-02T1801",
+    "slug": "26110218",
+    "tb": 649.8,
+    "extra": {},
+    "classes": {
+     "1": 611.5,
+     "5": 37.25,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-03T0001",
+    "slug": "26110300",
+    "tb": 651.0,
+    "extra": {},
+    "classes": {
+     "1": 612.0,
+     "5": 38.0,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-03T0601",
+    "slug": "26110306",
+    "tb": 652.2,
+    "extra": {},
+    "classes": {
+     "1": 612.5,
+     "5": 38.75,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-04T0001",
+    "slug": "26110400",
+    "tb": 653.5,
+    "extra": {},
+    "classes": {
+     "1": 613.0,
+     "5": 39.5,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-04T0601",
+    "slug": "26110406",
+    "tb": 654.8,
+    "extra": {},
+    "classes": {
+     "1": 613.5,
+     "5": 40.25,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-04T1201",
+    "slug": "26110412",
+    "tb": 656.0,
+    "extra": {},
+    "classes": {
+     "1": 614.0,
+     "5": 41.0,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-04T1801",
+    "slug": "26110418",
+    "tb": 657.2,
+    "extra": {},
+    "classes": {
+     "1": 614.5,
+     "5": 41.75,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-05T0001",
+    "slug": "26110500",
+    "tb": 658.5,
+    "extra": {},
+    "classes": {
+     "1": 615.0,
+     "5": 42.5,
+     "6": 1.0
+    }
+   },
+   {
+    "scan": "2026-11-05T0601",
+    "slug": "26110506",
+    "tb": 659.8,
+    "extra": {},
+    "classes": {
+     "1": 615.5,
+     "5": 43.25,
+     "6": 1.0
+    }
+   }
+  ]
+ },
+ "reply": {
+  "quota_marks": "arrow-chip",
+  "total_headline": false,
+  "reply_lines": true,
+  "reply_hour": 12,
+  "provisional": false,
+  "alert_pct": null,
+  "op_sender": {
+   "icon_emoji": ":calendar:"
+  },
+  "avatar_rev": 4,
+  "triggers": {
+   "2026-11-02T1201": "manual"
+  }
+ },
+ "variant": "sender",
+ "replies": [
+  {
+   "key": "2026-11-04",
+   "scan": "2026-11-04T1201",
+   "username": "11/4 — 656 TiB (+3.8, 0.6%)",
+   "body": ":pool-chip-8-30: 67.5% of 910Ti public (296.0 Ti free)\n:pool-chip-3-70: 82.0% of 50Ti private (9.0 Ti free), +2.8 Ti/d [over 7d](https://cw.example.org/main-data?d=26110412-7d#over-time), ≈3d to full [↗︎](https://cw.example.org/main-data?d=26110412-1d6h#over-time)",
+   "icon_url": "https://icons.example.org/arrows/av_deg40.png?v=4",
+   "icon_emoji": null
+  },
+  {
+   "key": "2026-11-03",
+   "scan": "2026-11-03T0601",
+   "username": "11/3 — 652 TiB (+2.4, 0.4%)",
+   "body": ":pool-chip-8-30: 67.3% of 910Ti public (297.5 Ti free)\n:pool-chip-3-80: 77.5% of 50Ti private (11.2 Ti free), +3.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110306-3d#over-time), ≈4d to full [↗︎](https://cw.example.org/main-data?d=26110306-12h#over-time)",
+   "icon_url": "https://icons.example.org/arrows/av_deg40.png?v=4",
+   "icon_emoji": null
+  },
+  {
+   "key": "2026-11-02",
+   "scan": "2026-11-02T1801",
+   "username": "11/2 — 650 TiB (+6.3, 1.0%)",
+   "body": ":pool-chip-8-30: 67.2% of 910Ti public (298.5 Ti free)\n:pool-chip-3-80: 74.5% of 50Ti private (12.8 Ti free), +3.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110218-3d#over-time), ≈4d to full [↗︎](https://cw.example.org/main-data?d=26110218-1d6h#over-time)",
+   "icon_url": "https://icons.example.org/arrows/av_deg40.png?v=4",
+   "icon_emoji": null
+  },
+  {
+   "key": "2026-11-01",
+   "scan": "2026-11-01T1201",
+   "username": "11/1 — 644 TiB (+5.0, 0.8%)",
+   "body": ":pool-chip-8-30: 66.9% of 910Ti public (301.0 Ti free)\n:pool-chip-3-80: 67.0% of 50Ti private (16.5 Ti free), +3.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110112-3d#over-time), ≈6d to full [↗︎](https://cw.example.org/main-data?d=26110112-1d#over-time)",
+   "icon_url": "https://icons.example.org/arrows/av_deg40.png?v=4",
+   "icon_emoji": null
+  }
+ ]
+}
