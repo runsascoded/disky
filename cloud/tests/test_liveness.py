@@ -2,6 +2,9 @@
 and `Progress` (a long loop's rate-limited progress lines), on fake clocks."""
 from __future__ import annotations
 
+import os
+import re
+
 import pyarrow as pa
 import pytest
 
@@ -20,7 +23,10 @@ class Clock:
 
 
 @pytest.fixture(autouse=True)
-def fresh_stage():
+def fresh_stage(monkeypatch):
+    for name in ("_waits", "_children"):
+        monkeypatch.setattr(H, name, {})
+    monkeypatch.setattr(H, "_duckdb", [])
     H.set_stage(None)
     yield
     H.set_stage(None)
@@ -181,3 +187,102 @@ def test_liveness_peak_is_the_trees_and_cpu_never_negative():
         "[alive] 2m · - · RSS 28.00 GiB (peak 28.00 GiB) · CPU 0%",
         "[alive] 3m · - · RSS 10.00 GiB (peak 28.00 GiB) · CPU 100%",
     ]
+
+
+def test_liveness_shows_a_child_commands_latest_line_and_a_statements_progress():
+    """A nested `dt-cloud` starts no liveness of its own: its parent's line shows the child's stage and latest line (aged
+    once two intervals old), and a watched DuckDB statement's progress beside the stage's detail."""
+    clock = Clock()
+    lines: list[str] = []
+    child = Tail(clock)
+    progress = iter([None, "SQL 37%", "SQL 37% ∥ 4%"])
+    script = [
+        lambda: H.set_stage("static-names", clock),
+        lambda: child.feed("2026-11-26T0603 drill: start"),
+        lambda: child.feed("sn-drill-2026-11-26-0603-061200 RUNNING for 3m, 1/4 tasks done"),
+    ]
+    beats = iter(script)
+
+    def wait(s: float) -> bool:
+        try:
+            next(beats)()
+        except StopIteration:
+            return True
+        clock.t += s
+        return False
+
+    live = Liveness(lines.append, 60.0, disk_path="/stage", clock=clock, wait=wait, cpu=lambda: 0.0,
+                    rss=lambda: (GiB, GiB), disk=lambda: None, progress=lambda: next(progress), child=lambda: child)
+    live.started = clock()
+    live._last = (clock(), 0.0)
+    live._run()
+    assert lines == [
+        "[alive] 1m · static-names (1m) · RSS 1.00 GiB (peak 1.00 GiB) · CPU 0%",
+        "[alive] 2m · static-names SQL 37% (2m) · ↳ 2026-11-26T0603 drill: start · RSS 1.00 GiB (peak 1.00 GiB) · CPU 0%",
+        "[alive] 3m · static-names SQL 37% ∥ 4% (3m) · ↳ 2026-11-26T0603 drill · sn-drill-2026-11-26-0603-061200 RUNNING for 3m, "
+        "1/4 tasks done · RSS 1.00 GiB (peak 1.00 GiB) · CPU 0%",
+    ]
+
+
+def test_a_pumped_command_is_the_child_while_its_output_is_open():
+    tail = Tail(Clock())
+    assert H.current_child() is None
+    r, w = os.pipe()
+    t = tail.pump(os.fdopen(r, "rb"), None)
+    assert H.current_child() is tail
+    with os.fdopen(w, "wb") as f:
+        f.write(b"index: 3/9 buckets\n")
+    t.join(5)
+    assert (H.current_child(), tail.latest()[0]) == (None, "index: 3/9 buckets")
+
+
+class Con:
+    """A DuckDB connection's surface `watch_duckdb` uses: `execute` (logged) and `query_progress` (the next value, or a
+    raise once closed)."""
+
+    def __init__(self, progress: list[float]):
+        self.progress, self.sql, self.closed = iter(progress), [], False
+
+    def execute(self, sql: str) -> None:
+        self.sql.append(sql)
+
+    def query_progress(self) -> float:
+        if self.closed:
+            raise RuntimeError("Connection already closed!")
+        return next(self.progress)
+
+
+def test_duckdb_progress_over_the_watched_connections():
+    """Each watched connection turns on its progress tracking; the line shows those running a statement (`-1`: idle);
+    a closed one is dropped; a collected one is never kept alive."""
+    import gc
+
+    a, b = Con([12.4, -1.0, 99.6]), Con([-1.0, 40.0])
+    assert H.watch_duckdb(a) is a
+    H.watch_duckdb(b)
+    gone = Con([50.0])
+    H.watch_duckdb(gone)
+    del gone
+    gc.collect()
+    assert (a.sql, H.duckdb_progress(), H.duckdb_progress()) == (
+        ["SET enable_progress_bar = true; SET enable_progress_bar_print = false"], "SQL 12%", "SQL 40%")
+    b.closed = True
+    assert (H.duckdb_progress(), len(H._duckdb)) == ("SQL 100%", 1)
+
+
+def test_duckdb_progress_reads_a_running_statement_from_another_thread():
+    """The real thing: `query_progress()` on the liveness thread while `execute` runs on another (it releases the GIL,
+    and the read doesn't wait on it); idle again, nothing shows."""
+    import threading
+
+    import duckdb
+
+    con = H.watch_duckdb(duckdb.connect())
+    con.execute("SET threads = 2; CREATE TABLE src AS SELECT i, i % 100 AS k FROM range(3000000) r(i)")
+    seen: list[str | None] = []
+    run = threading.Thread(target=con.execute, args=("CREATE TABLE w AS SELECT k, i, sum(i) OVER (PARTITION BY k ORDER BY i) s FROM src",))
+    run.start()
+    while run.is_alive():
+        seen.append(H.duckdb_progress())
+        run.join(0.01)
+    assert ([s for s in seen if s is not None and not re.fullmatch(r"SQL \d+%", s)], H.duckdb_progress()) == ([], None)

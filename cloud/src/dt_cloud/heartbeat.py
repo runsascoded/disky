@@ -10,7 +10,9 @@ phase (static-names, path-index: an hour or two between phase boundaries) from a
   counted, logged once per `warn_every` failures, and never reaches the step.
 - `run_teed`: `subprocess.run`'s shape (the scan steps' `sh_impl`), its output also fed to a `Tail`.
 - `Liveness` / `start_liveness`: a Batch task's own `[alive] …` stderr line every interval (its stage, RSS, work disk,
-  CPU), and `Progress`: a long loop's rate-limited progress lines (the section at the end).
+  CPU), and `Progress`: a long loop's rate-limited progress lines (the section at the end). A waiting stage's detail is
+  the jobs it waits on (`set_wait`), a DuckDB statement's progress is read while it runs (`watch_duckdb`), and a child
+  command's latest line shows through (`current_child`).
 
 The record writes themselves (`scan_runs.phase_beat_sql`, `JobRun.heartbeat`) live with the recorder; the run-level
 beat between phases is `scan-run supervise -H` (`JobRun.beat`)."""
@@ -135,9 +137,22 @@ class Tail:
         with self._lock:
             return self._line, self._stage, self._at
 
+    def note(self, now: float, interval: float) -> str | None:
+        """`[<stage> · ]<latest line>[ (<age> ago)]` (the age once the line is two intervals, and a minute, old); the
+        stage left out while the latest line is its own `<stage>: start`. None before any line or stage."""
+        line, stage, at = self.latest()
+        parts = []
+        if stage and line != f"{stage}: start":
+            parts.append(clip(stage, STAGE_CHARS))
+        if line:
+            age = now - at if at is not None else 0
+            parts.append(clip(line, LINE_CHARS) + (f" ({fmt_secs(age)} ago)" if age >= max(2 * interval, 60) else ""))
+        return " · ".join(parts) or None
+
     def pump(self, src: IO[bytes], dst: IO | None) -> threading.Thread:
         """A daemon thread copying `src` to `dst` (bytes as they come: a `\\r` progress bar stays live) and feeding
-        each line here, until EOF."""
+        each line here, until EOF. While it reads, this is a child of the process's (`current_child`): its liveness
+        line shows the child's latest line."""
         def run() -> None:
             pending = b""
             try:
@@ -151,14 +166,42 @@ class Tail:
             except (OSError, ValueError):  # the pipe closed under us: the command is gone
                 pass
             finally:
+                _close_child(self)
                 try:
                     src.close()
                 except OSError:
                     pass
 
+        _open_child(self)
         t = threading.Thread(target=run, daemon=True, name="heartbeat-tail")
         t.start()
         return t
+
+
+_child_lock = threading.Lock()
+#: The `Tail`s whose commands' output is being read (`Tail.pump`), by `id`, in the order each was first opened, with the
+#: number of their streams still open.
+_children: dict[int, list] = {}
+
+
+def _open_child(tail: Tail) -> None:
+    with _child_lock:
+        _children.setdefault(id(tail), [tail, 0])[1] += 1
+
+
+def _close_child(tail: Tail) -> None:
+    with _child_lock:
+        if (e := _children.get(id(tail))) is not None:
+            e[1] -= 1
+            if e[1] <= 0:
+                del _children[id(tail)]
+
+
+def current_child() -> Tail | None:
+    """The newest child command whose output this process reads (`Tail.pump`), if any: a nested `dt-cloud`, which
+    starts no liveness of its own (`LIVENESS_PID_ENV`), shows through its parent's line."""
+    with _child_lock:
+        return next(reversed(_children.values()))[0] if _children else None
 
 
 def _write(dst: IO | None, chunk: bytes) -> None:
@@ -206,12 +249,8 @@ class Heartbeat:
     def note(self) -> str:
         now = self.clock()
         parts = [fmt_secs(now - self.started)]
-        line, stage, at = self.tail.latest() if self.tail else (None, None, None)
-        if stage and line != f"{stage}: start":
-            parts.append(clip(stage, STAGE_CHARS))
-        if line:
-            age = now - at if at is not None else 0
-            parts.append(clip(line, LINE_CHARS) + (f" ({fmt_secs(age)} ago)" if age >= max(2 * self.interval, 60) else ""))
+        if self.tail is not None and (tail := self.tail.note(now, self.interval)):
+            parts.append(tail)
         return self.scrub(" · ".join(parts))
 
     def tick(self) -> None:
@@ -335,6 +374,65 @@ def current_stage() -> tuple[str | None, str | None, float]:
         return _stage["label"], _stage["detail"], _stage["since"]
 
 
+#: The child jobs this process waits on (`set_wait`), each one's state line by its key, in the order each began.
+_waits: dict[str, str] = {}
+
+
+def set_wait(key: str, text: str | None) -> None:
+    """A child job this process waits on (a Batch job: `job_watch.JobWatch`) and its state line, `text` (None: no longer
+    waited on): the stage's detail is `waiting on <line>[ ∥ <line>…]`, every waited-on job's (a stage waits on several
+    at once); none left, no detail."""
+    with _stage_lock:
+        if text is None:
+            _waits.pop(key, None)
+        else:
+            _waits[key] = text
+        _stage["detail"] = "waiting on " + " ∥ ".join(_waits.values()) if _waits else None
+
+
+_duckdb_lock = threading.Lock()
+#: The DuckDB connections whose running statement's progress the liveness line shows (`watch_duckdb`), weakly held.
+_duckdb: list = []
+
+
+def watch_duckdb(con):
+    """`con` (a DuckDB connection or cursor; returned) with its progress tracking on (`enable_progress_bar`, nothing
+    printed), watched: while one of its statements runs, the liveness line shows how far along it is (`duckdb_progress`).
+    The setting is a connection's own (a cursor doesn't inherit it). Held weakly: a connection is never kept alive."""
+    import weakref
+
+    con.execute("SET enable_progress_bar = true; SET enable_progress_bar_print = false")
+    with _duckdb_lock:
+        _duckdb[:] = [r for r in _duckdb if r() is not None]
+        _duckdb.append(weakref.ref(con))
+    return con
+
+
+def duckdb_progress() -> str | None:
+    """`SQL <pct>%` (several: ` ∥ `-joined) over the watched connections running a statement (`watch_duckdb`): DuckDB's
+    `query_progress()`, read here, from the liveness thread, while another thread's `execute` runs on the connection
+    (`execute` releases the GIL; the read doesn't wait on it). -1 (idle, or an operator that reports no progress) is
+    left out; a closed or collected connection is dropped. None when none reports."""
+    with _duckdb_lock:
+        refs = list(_duckdb)
+    pcts, closed = [], []
+    for r in refs:
+        if (con := r()) is None:
+            closed.append(r)
+            continue
+        try:
+            p = con.query_progress()
+        except Exception:  # noqa: BLE001 — a closed connection (`ConnectionException`): never fails the line
+            closed.append(r)
+            continue
+        if p >= 0:
+            pcts.append(f"{p:.0f}%")
+    if closed:
+        with _duckdb_lock:
+            _duckdb[:] = [r for r in _duckdb if r not in closed]
+    return "SQL " + " ∥ ".join(pcts) if pcts else None
+
+
 def fmt_bytes(n: float) -> str:
     """`512 B`, `3.0 MiB`, `1.25 GiB`, `2.10 TiB`."""
     for unit, k in (("TiB", 1 << 40), ("GiB", GiB), ("MiB", 1 << 20), ("KiB", 1 << 10)):
@@ -434,21 +532,25 @@ def disk_used(path: str) -> int | None:
 
 
 class Liveness(Heartbeat):
-    """`Heartbeat`'s thread writing `LIVE_TAG <elapsed> · <stage>[ <detail>] (<in stage>) · RSS … · <disk> … · CPU …%`
-    (`-` for the stage, with no time, before any is set)
-    (`write`: a stderr line). The probes (`rss() -> (current | None, peak)`, `disk() -> used | None`, `cpu()`: the
-    CPU seconds of the process and its children, all threads: `tree_cpu_seconds`) and `stage()` are parameters, so a test
-    fakes them; CPU% is over the interval since the previous line (past 100% on a busy multi-core sort or a pool). RSS
-    is the process's and its live descendants' (`tree_rss_bytes`); the peak is the process's own."""
+    """`Heartbeat`'s thread writing `LIVE_TAG <elapsed> · <stage>[ <detail>][ SQL <pct>%] (<in stage>)[ · ↳ <child>] ·
+    RSS … · <disk> … · CPU …%` (`-` for the stage, with no time, before any is set) (`write`: a stderr line): the detail
+    a loop's `k/n` or the waited-on jobs' states (`set_wait`), `SQL …` a watched DuckDB statement's progress
+    (`duckdb_progress`), `<child>` a child command's `Tail.note` (`current_child`: its stage and latest line). The probes
+    (`rss() -> (current | None, peak)`, `disk() -> used | None`, `cpu()`: the CPU seconds of the process and its
+    children, all threads: `tree_cpu_seconds`), `stage()`, `progress()` and `child()` are parameters, so a test fakes
+    them; CPU% is over the interval since the previous line (past 100% on a busy multi-core sort or a pool). RSS is the
+    process's and its live descendants' (`tree_rss_bytes`); the peak is the process's own."""
 
     def __init__(self, write: Callable[[str], None], interval: float, *, disk_path: str, clock: Callable[[], float] = time.monotonic,
                  wait: Callable[[float], bool] | None = None,
                  stage: Callable[[], tuple[str | None, str | None, float]] = current_stage,
                  rss: Callable[[], tuple[int | None, int]] = lambda: (tree_rss_bytes(), rss_peak_bytes()),
                  disk: Callable[[], int | None] | None = None,
-                 cpu: Callable[[], float] = tree_cpu_seconds):
+                 cpu: Callable[[], float] = tree_cpu_seconds,
+                 progress: Callable[[], str | None] = duckdb_progress,
+                 child: Callable[[], Tail | None] = current_child):
         super().__init__(write, interval, clock=clock, wait=wait, log=err, label="liveness")
-        self.disk_path, self.stage, self.rss, self.cpu = disk_path, stage, rss, cpu
+        self.disk_path, self.stage, self.rss, self.cpu, self.progress, self.child = disk_path, stage, rss, cpu, progress, child
         self.disk = disk or (lambda: disk_used(disk_path))
         self._last = (clock(), cpu())
         self.peak = 0
@@ -465,9 +567,12 @@ class Liveness(Heartbeat):
         cpu = max(cpu, c0)
         self._last = (now, cpu)
         label, detail, since = self.stage()
+        detail = " ".join(d for d in (detail, self.progress()) if d)
         # No stage set yet: `-`, with no time in it (the elapsed already says how long the process has run).
         stage = "-" if label is None else clip(label, STAGE_CHARS) + (f" {detail}" if detail else "") + f" ({fmt_secs(now - since)})"
         parts = [LIVE_TAG, fmt_secs(now - self.started), "·", stage]
+        if (child := self.child()) is not None and (seen := child.note(now, self.interval)):
+            parts += ["·", f"↳ {seen}"]
         cur, peak = self.rss()
         # the tree's peak as sampled (the process's own `ru_maxrss` misses its children's: cw's 28 GiB import read 173.5 MiB)
         self.peak = max(self.peak, peak, cur or 0)

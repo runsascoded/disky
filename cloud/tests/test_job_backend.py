@@ -261,8 +261,8 @@ def test_batch_runner_polls_a_local_job(tmp_path):
     jobs = local(tmp_path, host)
     host.on_spawn = lambda argv: jobs.supervise(argv[-1])
     logs: list[str] = []
-    ar.BatchRunner(ar.Profile(region="r", project="p"), logs.append, delay=0, max_delay=0, backend=jobs)("j1", spec())
-    assert logs == ["submitted j1", "j1 SUCCEEDED exit 0"]
+    ar.BatchRunner(ar.Profile(region="r", project="p"), logs.append, delay=0, max_delay=0, backend=jobs, clock=lambda: 0.0)("j1", spec())
+    assert logs == ["submitted j1", "j1 SUCCEEDED after 0s (exit 0)"]
     host.rcs = [1]
     with pytest.raises(RuntimeError) as e:
         ar.BatchRunner(ar.Profile(region="r", project="p"), logs.append, delay=0, max_delay=0, backend=jobs)("j2", spec())

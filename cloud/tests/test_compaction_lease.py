@@ -212,14 +212,14 @@ def _poll(monkeypatch, outcomes: list) -> tuple[list, list]:
 
 def test_batch_runner_retries_a_transient_poll_error(monkeypatch):
     sleeps, logs = _poll(monkeypatch, ["RUNNING", ConnectionResetError(54, "Connection reset by peer"), HTTPError(503), "RUNNING", "SUCCEEDED"])
-    ar.BatchRunner(ar.Profile(region="r", project="p"), logs.append)("j", {})
+    ar.BatchRunner(ar.Profile(region="r", project="p"), logs.append, clock=lambda: 0.0)("j", {})
     assert (sleeps, logs) == ([10, 10, 20, 20], [
         "submitted j",
-        "j RUNNING ",
+        "j RUNNING for 0s",
         "j: polling failed (ConnectionResetError: [Errno 54] Connection reset by peer): retry 1/5 in 10s",
         "j: polling failed (HTTPError: 503 error): retry 2/5 in 20s",
-        "j RUNNING ",
-        "j SUCCEEDED ",
+        "j RUNNING for 0s",
+        "j SUCCEEDED after 0s",
     ])
 
 

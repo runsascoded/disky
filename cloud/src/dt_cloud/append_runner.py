@@ -59,6 +59,7 @@ from click import ParamType
 
 from . import heartbeat as hb
 from .cost_labels import label_batch_spec
+from .job_watch import LOG_EVERY_S
 from .maint_runs import Recorder
 from .owner_carry import OwnerCarry
 from .scan_id import SCAN_ID
@@ -1405,44 +1406,56 @@ def transient(e: BaseException) -> bool:
 
 class BatchRunner:
     """Submit a job and wait for it, through the deployment's job backend (`job_backend.resolve`: GCP Batch unless
-    `$DISKY_JOB_BACKEND` names another; `backend` overrides); a transient poll error is retried (`POLL_RETRIES`)."""
+    `$DISKY_JOB_BACKEND` names another; `backend` overrides); a transient poll error is retried (`POLL_RETRIES`). Each
+    poll's state line (`job_watch.JobWatch`: state, time in it, tasks done, the job's latest log line every `log_every`
+    s; `None`: no log reads) is logged and is the stage's liveness detail while it waits (`heartbeat.set_wait`)."""
 
     def __init__(self, p: Profile, log: Callable[[str], None], *, delay: float = 10, max_delay: float = 30,
-                 backend: JobBackend | None = None):
+                 backend: JobBackend | None = None, log_every: float | None = LOG_EVERY_S,
+                 clock: Callable[[], float] = monotonic):
         """Polls every `delay` s, doubling up to `max_delay`: each stage's end is noticed up to one poll late, so the cap
         stays low (at 120 s, gcs 10-10's static chain lost minutes between stages; the interval store's jobs run a minute
         or a few)."""
         self.p, self.log, self.delay, self.max_delay, self.backend = p, log, delay, max_delay, backend
+        self.log_every, self.clock = log_every, clock
 
     def __call__(self, name: str, spec: dict, wait: float | None = None) -> None:
         """Submit, then poll until the job ends; `wait`: stop polling after that many seconds (`StillRunning`; the job runs on)."""
         from .job_backend import resolve
+        from .job_watch import LOG_LINES, JobWatch
 
         jobs = self.backend or resolve(region=self.p.region, project=self.p.project)
         jobs.submit(spec, name)
         self.log(f"submitted {name}")
+        watch = JobWatch(name, logs=None if self.log_every is None else lambda: jobs.logs(name, LOG_LINES),
+                         log_every=self.log_every or 0, clock=self.clock, log=self.log)
         delay, t0, fails = self.delay, monotonic(), 0
-        while True:
-            if wait is not None and monotonic() - t0 >= wait:
-                raise StillRunning(f"{jobs.what} {name}: still running after {wait:.0f}s")
-            try:
-                st = jobs.status(name)
-            except Exception as e:
-                if not transient(e) or fails >= POLL_RETRIES:
-                    raise
-                fails += 1
-                back = min(self.delay * 2 ** (fails - 1), POLL_RETRY_MAX_S)
-                self.log(f"{name}: polling failed ({type(e).__name__}: {e}): retry {fails}/{POLL_RETRIES} in {back:.0f}s")
-                time.sleep(back)
-                continue
-            fails = 0
-            self.log(f"{name} {st.state} {st.detail}")
-            if st.state == "SUCCEEDED":
-                return
-            if st.state in ("FAILED", "DELETION_IN_PROGRESS", "CANCELLED"):
-                raise RuntimeError(f"{jobs.what} {name}: {st.state}")
-            time.sleep(delay if wait is None else max(0.0, min(delay, wait - (monotonic() - t0))))
-            delay = min(delay * 2, self.max_delay)
+        try:
+            while True:
+                if wait is not None and monotonic() - t0 >= wait:
+                    raise StillRunning(f"{jobs.what} {name}: still running after {wait:.0f}s")
+                try:
+                    st = jobs.status(name)
+                except Exception as e:
+                    if not transient(e) or fails >= POLL_RETRIES:
+                        raise
+                    fails += 1
+                    back = min(self.delay * 2 ** (fails - 1), POLL_RETRY_MAX_S)
+                    self.log(f"{name}: polling failed ({type(e).__name__}: {e}): retry {fails}/{POLL_RETRIES} in {back:.0f}s")
+                    time.sleep(back)
+                    continue
+                fails = 0
+                line = watch.observe(st.state, st.tasks, st.detail)
+                hb.set_wait(name, line)
+                self.log(line)
+                if st.state == "SUCCEEDED":
+                    return
+                if st.state in ("FAILED", "DELETION_IN_PROGRESS", "CANCELLED"):
+                    raise RuntimeError(f"{jobs.what} {name}: {st.state}")
+                time.sleep(delay if wait is None else max(0.0, min(delay, wait - (monotonic() - t0))))
+                delay = min(delay * 2, self.max_delay)
+        finally:
+            hb.set_wait(name, None)
 
 
 # ── Prune: the newest complete open-version state only ─────────────────────

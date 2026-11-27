@@ -328,20 +328,34 @@ def submit_job(spec: dict, job_id: str | None = None, region: str | None = None,
         wait = min(wait * 2, RETRY_CAP_S)
 
 
-def wait_jobs(jobs: Sequence[tuple[str, str]], interval: int = 60, log=None) -> dict[str, str]:
-    """Poll (name, region) Batch jobs to terminal states; returns name -> state."""
+def wait_jobs(jobs: Sequence[tuple[str, str]], interval: int = 60, log=None, clock: Callable[[], float] = time.monotonic) -> dict[str, str]:
+    """Poll (name, region) Batch jobs to terminal states; returns name -> state. Each poll's state line
+    (`job_watch.JobWatch`: state, time in it, tasks done) is logged and is the process's liveness detail while it
+    waits (`heartbeat.set_wait`)."""
+    from .heartbeat import set_wait
+    from .job_watch import JobWatch, task_counts
+
     states: dict[str, str] = {}
-    while len(states) < len(jobs):
-        for name, region in jobs:
-            if name in states:
-                continue
-            state = batch_job(name, region=region)["status"].get("state", "?")
-            if log:
-                log(f"{name} [{region}]: {state}")
-            if state in ("SUCCEEDED", "FAILED", "DELETION_IN_PROGRESS"):
-                states[name] = state
-        if len(states) < len(jobs):
-            time.sleep(interval)
+    watches = {name: JobWatch(name, clock=clock) for name, _ in jobs}
+    try:
+        while len(states) < len(jobs):
+            for name, region in jobs:
+                if name in states:
+                    continue
+                st = batch_job(name, region=region)["status"]
+                state = st.get("state", "?")
+                line = watches[name].observe(state, task_counts(st.get("taskGroups") or {}))
+                set_wait(name, line)
+                if log:
+                    log(f"[{region}] {line}")
+                if state in ("SUCCEEDED", "FAILED", "DELETION_IN_PROGRESS"):
+                    states[name] = state
+                    set_wait(name, None)
+            if len(states) < len(jobs):
+                time.sleep(interval)
+    finally:
+        for name, _ in jobs:
+            set_wait(name, None)
     return states
 
 

@@ -325,6 +325,8 @@ class Progress:
 
 
 def connect(threads: int, mem: str, tmp: str | Path | None):
+    """A DuckDB connection with these settings, watched (`heartbeat.watch_duckdb`): a long statement's progress shows in
+    the liveness line."""
     import duckdb
 
     con = duckdb.connect()
@@ -333,7 +335,7 @@ def connect(threads: int, mem: str, tmp: str | Path | None):
     if tmp:
         Path(tmp).mkdir(parents=True, exist_ok=True)
         con.execute(f"SET temp_directory={q(str(tmp))}")
-    return con
+    return hb.watch_duckdb(con)
 
 
 def each(con, fn, items: list, jobs: int = 1) -> list:
@@ -346,6 +348,7 @@ def each(con, fn, items: list, jobs: int = 1) -> list:
     def one(item):
         cur = con.cursor()
         cur.execute("SET parquet_metadata_cache=true")  # a connection's own setting, not the database's
+        hb.watch_duckdb(cur)  # so is its progress tracking
         try:
             return fn(cur, item)
         finally:

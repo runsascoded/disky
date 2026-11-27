@@ -239,7 +239,7 @@ class Ctx:
     work: Path
     run: object
     #: How `sh` runs a command (`subprocess.run`'s shape; tests pass a fake). The default, `run_teed`, also feeds the
-    #: open phase's heartbeat `tail` its output.
+    #: open phase's heartbeat `tail` (else one of its own) its output, and so the liveness line.
     sh_impl: Callable[..., subprocess.CompletedProcess] = run_teed
     #: The open phase's first nonfatal command failure (exit code, warning): the phase ends failed with a warn alert
     failure: tuple[int, str] | None = None
@@ -389,7 +389,9 @@ class Ctx:
         accepts only documented expected nonzero results, such as exit 1 for attribution-rule findings."""
         argv = [str(a) for a in argv]
         err("+ " + " ".join(argv))
-        teed = {"tail": self.tail} if self.tail is not None and self.sh_impl is run_teed else {}
+        # always teed (a `Tail` of its own outside a recorded phase): while it runs, the command is this process's
+        # child (`heartbeat.current_child`), whose latest line the liveness line shows (a nested `dt-cloud` has none)
+        teed = {"tail": self.tail or Tail()} if self.sh_impl is run_teed else {}
         r = self.last = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True, **teed)
         if r.returncode and r.returncode not in allowed_codes:
             if fatal:

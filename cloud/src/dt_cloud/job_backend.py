@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Protocol, Sequence
 
@@ -31,10 +31,11 @@ BACKEND_ENV = "DISKY_JOB_BACKEND"
 
 @dataclass(frozen=True)
 class JobStatus:
-    """A job's state (Batch's vocabulary) and a backend's short note on it (Batch: its task counts; local: an exit
-    code, or why a job was lost)."""
+    """A job's state (Batch's vocabulary), a backend's short note on it (Batch: its task counts; local: an exit code, or
+    why a job was lost) and, where the backend counts them, its tasks by state (`job_watch.task_counts`)."""
     state: str
     detail: str = ""
+    tasks: Mapping[str, int] | None = field(default=None, compare=False)
 
 
 class JobBackend(Protocol):
@@ -79,9 +80,11 @@ class GcpBatch:
     def status(self, job_id: str) -> JobStatus:
         from . import gcp
 
+        from .job_watch import task_counts
+
         st = gcp.batch_job(job_id, project=self.project, region=self.region).get("status", {})
         counts = " ".join(f"{k}={v}" for g in (st.get("taskGroups") or {}).values() for k, v in sorted(g.get("counts", {}).items()))
-        return JobStatus(st.get("state", "?"), counts)
+        return JobStatus(st.get("state", "?"), counts, task_counts(st.get("taskGroups") or {}))
 
     def logs(self, job_id: str, limit: int = 40) -> list[str]:
         from . import gcp
