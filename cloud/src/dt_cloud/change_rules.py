@@ -1,7 +1,7 @@
-"""What changed between two scans, per object (specs/change-metrics.md §1.2): the classification rules, as SQL over path
-versions. Pure logic: nothing here reads or writes a store, and nothing calls it yet. It's what remains of the reverted
-per-scan counters (phase 1, 2026-11-27), kept for VM mode (specs/vm-pilot.md), which answers added / deleted / modified
-over any slice at query time from the interval store's version rows.
+"""What changed between two scans, per object (specs/done/change-metrics.md §1.2): the classification rules, as SQL
+over path versions. Pure logic: nothing here reads or writes a store, and nothing calls it yet. It's what remains of
+the reverted per-scan counters (phase 1, 2026-11-27), kept for VM mode (specs/vm-pilot.md), which answers added /
+deleted / modified over any slice at query time from the interval store's version rows.
 
 An object (a `kind = 'file'` path version) is **added** at stamp t where a version of its path opens at t and none closed
 there, **deleted** where one closed at t and none opened, and **modified** where one closed and one opened whose identity

@@ -1,4 +1,4 @@
-"""`dt_cloud.change_rules` (specs/change-metrics.md §1.2): the added / deleted / modified classification over hand-made
+"""`dt_cloud.change_rules` (specs/done/change-metrics.md §1.2): the added / deleted / modified classification over hand-made
 path versions: the identity rule (token over size over mtime), the mtime rule (`write` | `coarse`), touches, a file → dir
 flip, and a run's deltas opened by `op`."""
 from __future__ import annotations

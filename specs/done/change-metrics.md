@@ -1,6 +1,6 @@
 # Change metrics: added, deleted and modified objects beside bytes and objects
 
-**Status:** draft v1, 2026-11-26; Ryan's go 2026-11-27 on phases 0 and 1 with the adjustments in §10. Written for the root `disky` session, from Ryan's ask below and the root session's analysis (§9 lists where the code corrected it).
+**Status:** draft v1, 2026-11-26; Ryan's go 2026-11-27 on phases 0 and 1 with the adjustments in §10. Written for the root `disky` session, from Ryan's ask below and the root session's analysis (§9 lists where the code corrected it). **Phase 1 was built, then reverted the same day (Ryan, 2026-11-27, §11).** What stays: phase 0 (the object count in the digest plot, §10.1), hf's content ids (§10.5) and the classifier (`dt_cloud/change_rules.py`, §1.1–1.2). Added / deleted / modified over any slice moves to VM mode ([vm-pilot.md][vmp]), answered at query time from the interval store's version rows. §3, §4 and §6's phases 1–3 describe the design as it was proposed, kept for the record.
 
 **The ask (Ryan, 2026-11-26):** "#rows as a metric analogous to #bytes and #objects that should be tracked / viz'd about fleets. Adds/Dels/Mods would be broken out, ideally… it generalizes from 2 to 5 such metrics, makes the required abstraction / monoid handling clearer?"
 
@@ -344,10 +344,27 @@ The smallest clear design: a second, short panel under the bytes chart, on the s
 
 ### 10.5 hf's content ids (built)
 
-`bulk_hf` writes each object's content id as `version` (§8 Q10): a repo file's LFS `oid` (SHA-256), else its `xetHash`, else (a plain git file) the tree entry's git blob `oid`; a bucket file's `xetHash`; an old version's (`lfs-files`) LFS oid; none for the `@unlisted` residual. A dedup duplicate carries the same id as the path that bills it, so a flip of which path carries the bytes is a size change under one token: not a mod. The listing change alone doesn't reach the counters: hf's interval-store generation must carry `version` first (`interval-store migrate-object-version`, or a rebuild over the new listings), which is hf's deployment work. Until then hf's appends drop the column and its mods fall back to size, with `-T coarse`.
+`bulk_hf` writes each object's content id as `version` (§8 Q10): a repo file's LFS `oid` (SHA-256), else its `xetHash`, else (a plain git file) the tree entry's git blob `oid`; a bucket file's `xetHash`; an old version's (`lfs-files`) LFS oid; none for the `@unlisted` residual. A dedup duplicate carries the same id as the path that bills it, so a flip of which path carries the bytes is a size change under one token: not a mod. It stays after phase 1's revert (§11): it's what lets anything over hf's version rows (VM mode) tell a rewrite from a touch. The listing change alone doesn't reach the version rows: hf's interval-store generation must carry `version` first (`interval-store migrate-object-version`, or a rebuild over the new listings), which is hf's deployment work. Until then hf's appends drop the column, and a classifier over its rows falls back to size (`coarse` mtimes).
 
-[dp]: diff-progressive.md
-[is]: interval-store.md
-[dfn]: descriptive-field-names.md
-[cs3]: deployment-cs3-harmonization.md
-[claude]: ../CLAUDE.md
+## 11. Phase 1 reverted (Ryan, 2026-11-27)
+
+Phase 1 was built on `cloud` (45215445e, 36afb3cf3, 0e82cf80d, d88330640, 3d80b9bb7: the counters in the store, `/api/series` flows, the over-time chart's `changes`, the digest reply's and run thread's `+A −D ~M` lines, the thinned generation's `rebase`) and reverted the same day, before any deployment shipped it.
+
+**Why:** the per-scan counters at the root and depth 1 lived as JSON in each run's `meta.json`, every manifest and `<gen>/changes.json`. That storage can't be filtered (no owner, class, lens, name filter or deeper path: §10's "any slice" was out of reach by construction), it's a second source of truth beside the interval store's version rows (every append, carry, compaction and history thinning had to keep it consistent: `rebase` was the first patch of that kind), and it's a dead end: nothing it holds is a step toward any-slice answers. VM mode ([vm-pilot.md][vmp], [vm-mode.md][vmm]) holds every version row in memory and answers added / deleted / modified for any slice at query time from those rows, with no stored counters.
+
+**Kept:**
+- **Phase 0** (§10.1): the object count in the quota digest's plot, from existing scan data.
+- **hf's content ids** (§10.5): `bulk_hf`'s `version`, useful on its own and to VM mode.
+- **The classifier** (§1.1–1.2): `cloud/src/dt_cloud/change_rules.py` (`events_sql`, `token_sql`, `comparable`), pure SQL over path versions with no storage or wiring, and its tests (`cloud/tests/test_change_rules.py`): the token decides where both sides have one, NULL → token is a touch, the `write` / `coarse` mtime rule, a file → dir flip is a delete, a run's deltas opened by `op`. VM mode reuses the rules.
+
+**Not planned:** per-path cumulative columns (phase 3, §3.3) unless VM mode falls short. The `/scans` store-versions number (§10 item 3) wasn't built and isn't part of this spec's remaining work.
+
+**Open (not this spec's):** hf's generation carrying `version` (§10.5) is hf's deployment work; any-slice added / deleted / modified is VM mode's.
+
+[dp]: ../diff-progressive.md
+[is]: ../interval-store.md
+[dfn]: ../descriptive-field-names.md
+[cs3]: ../deployment-cs3-harmonization.md
+[claude]: ../../CLAUDE.md
+[vmp]: ../vm-pilot.md
+[vmm]: ../vm-mode.md

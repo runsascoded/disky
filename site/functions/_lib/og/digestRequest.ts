@@ -3,7 +3,7 @@
  *   {kind?: 'usage', title, note, month: 'YYYY-MM', from?: 'YYYY-MM-DD', today_at?: [p0, p1], points: [{scan, bytes, objects?}],
  *    quota?: {bytes, name}, diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
  *     → `digestSvg`: the usage line against its quota, the object count under it when every point carries `objects`
- *       (specs/change-metrics.md §10.1), over the headline interval's diff map (the quota template)
+ *       (specs/done/change-metrics.md §10.1), over the headline interval's diff map (the quota template)
  *   {kind: 'pools', title, note, month, from?, today_at?, alert_pct?, pools: [{name, quota, points: [{scan, bytes}]}],
  *    diff?, units?}
  *     → `poolsSvg`: every quota pool's share of its quota (one line each, the quota a rule at 100%), over the diff map

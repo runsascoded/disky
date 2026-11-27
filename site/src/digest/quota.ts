@@ -267,7 +267,7 @@ export function imageRequest(m: QuotaRows, month: number, cfg: DigestCfg, p: Dig
     note: [cfg.host, ...(scope && Object.keys(last.extra).length ? [scope] : []), u.name].join(' · '),
     month: iso(month).slice(0, 7),
     from: iso(start),
-    // each scan's object count too, when every one has it: the card draws it under the bytes (specs/change-metrics.md §10.1)
+    // each scan's object count too, when every one has it: the card draws it under the bytes (specs/done/change-metrics.md §10.1)
     points: scans.map(r => ({
       scan: r.scan, bytes: pyRound((q ? scoped(r.tb, r.classes, q) : r.tb) * u.bytes),
       ...(scans.every(x => x.objs !== undefined) ? { objects: r.objs } : {}),

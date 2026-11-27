@@ -36,7 +36,7 @@ export interface DigestPoint {
   /** Epoch ms of the scan. */
   t: number
   bytes: number
-  /** The scan's object count: drawn under the bytes when every point has it (specs/change-metrics.md §10.1). */
+  /** The scan's object count: drawn under the bytes when every point has it (specs/done/change-metrics.md §10.1). */
   objects?: number
 }
 

@@ -53,7 +53,7 @@ bytes' age), and a bucket file's ``uploadedAt`` (falling back to its
 :data:`~disk_tree.listing.HF_CLASS_IDS`: public 1, private 5, unbilled git
 files 6 — so every non-6 byte is a billed byte. ``generation`` is NULL;
 ``version`` is the object's content id, so a rewrite is told by more than
-its size (specs/change-metrics.md §10): a repo file's LFS ``oid`` (SHA-256),
+its size (specs/done/change-metrics.md §10): a repo file's LFS ``oid`` (SHA-256),
 else its ``xetHash``, else (a plain git file) the tree entry's git blob
 ``oid``; a bucket file's ``xetHash``; an old version's LFS oid. The
 ``@unlisted`` residual has none.
