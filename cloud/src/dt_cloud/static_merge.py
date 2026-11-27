@@ -783,6 +783,176 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
     print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(rels)}, indent=1))
 
 
+#: A race job's env: the raced compaction job's name, and its own `compact` command (what `race-adopt` reruns with
+#: `--prebuilt`).
+RACE_JOB_ENV, RACE_COMPACT_ENV = "DT_RACE_COMPACTION", "DT_RACE_COMPACT_CMD"
+#: `compact`'s options a race's `compact-probe` takes over (the probe's name for each), and the flags it drops.
+RACE_PROBE_OPTS = {"-g": "-g", "-m": "-m", "-M": "-M", "-p": "-p", "-j": "-j", "-c": "-c", "-k": "-k", "-D": "-F", "-A": "-A"}
+RACE_DROP_OPTS = {"-S": 1, "-C": 1, "-L": 1, "-r": 0, "-b": 1}
+
+
+def race_root(scratch: str, new_gen: str, name: str) -> str:
+    """A race's scratch root: its checkpoint (`ck`), upload (`upload`) and report (`report.json`)."""
+    return f"gs://{scratch}/races/{new_gen}-{name}"
+
+
+def race_probe_cmd(compact_cmd: str, *, scratch: str, bucket: str, root: str, through: str) -> str:
+    """The race's `compact-probe` over the raced job's `compact` command (`… static_merge compact <opts>`): the
+    fold's options kept (`RACE_PROBE_OPTS`; `-D` is the probe's `-F`), the publishing ones dropped (`RACE_DROP_OPTS`),
+    seeded from that fold's checkpoint in `scratch` through `through`, its own checkpoint, upload and report under
+    `root`."""
+    import shlex
+
+    words = shlex.split(compact_cmd)
+    at = words.index("compact")
+    opts, i = [], at + 1
+    while i < len(words):
+        w = words[i]
+        if w in RACE_PROBE_OPTS:
+            opts += [RACE_PROBE_OPTS[w], words[i + 1]]
+            i += 2
+        elif w in RACE_DROP_OPTS:
+            i += 1 + RACE_DROP_OPTS[w]
+        else:
+            raise UsageError(f"race: `compact {w}` (in {compact_cmd!r}): not an option a race knows how to carry")
+    return shlex.join([*words[:at], "compact-probe", *opts, "-b", bucket, "-o", "/stage/out/gen", "-T", "/stage/tmp/compact-probe",
+                       "-K", f"{root}/ck", "-R", f"gs://{scratch}", "-t", through, "-U", f"{root}/upload", "-u", f"{root}/report.json"])
+
+
+RACE_COMPACT = "python3 -u -m dt_cloud.static_merge compact "
+
+
+def race_compact_cmd(job: dict) -> tuple[str, str]:
+    """The raced job's script split at its `static_merge compact` command: (what runs before it, the command)."""
+    script = job["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][-1]
+    head, sep, rest = script.partition(RACE_COMPACT)
+    if not sep:
+        raise UsageError(f"race: {job.get('name')}'s command runs no `static_merge compact`: {script!r}")
+    return head, sep + rest
+
+
+def race_gen(compact_cmd: str) -> str:
+    """The generation the raced `compact` folds (its `-g`)."""
+    import shlex
+
+    words = shlex.split(compact_cmd)
+    return words[words.index("-g") + 1]
+
+
+def race_spec(job: dict, image: str, *, name: str, root: str, through: str, adopt: bool, scratch: str, bucket: str) -> dict:
+    """The race's Batch spec from the raced compaction job (`job`, as Batch returns it): its task groups, allocation
+    policy and logs policy, with `image` wherever the job runs one (its container, `DT_JOB_IMAGE`, and the profile in
+    `$STATIC_NAMES_PROFILE` its fan-out helpers are built from), `compact-probe` (`race_probe_cmd`) in place of
+    `compact`, `stage`/`upkeep` `race` on its labels; with `adopt`, then `race-adopt` (first finisher wins)."""
+    import copy
+    import shlex
+
+    spec = {k: copy.deepcopy(job[k]) for k in ("taskGroups", "allocationPolicy", "logsPolicy", "labels") if k in job}
+    tg = spec["taskGroups"][0]
+    for k in ("name", "taskCount") if len(spec["taskGroups"]) == 1 else ():
+        tg.pop(k, None)
+    ts = tg["taskSpec"]
+    (run,) = ts["runnables"]
+    c = run["container"]
+    head, compact_cmd = race_compact_cmd(job)
+    probe = race_probe_cmd(compact_cmd, scratch=scratch, bucket=bucket, root=root, through=through)
+    # the probe's work and output leave the disk first: `compact --prebuilt` downloads the upload again
+    tail = (f" && rm -rf /stage/tmp/compact-probe /stage/out/gen && python3 -u -m dt_cloud.static_merge race-adopt {shlex.quote(f'{root}/upload')}") if adopt else ""
+    c["imageUri"] = image
+    c["commands"] = [*c["commands"][:-1], head + probe + tail]
+    v = ts.setdefault("environment", {}).setdefault("variables", {})
+    if "STATIC_NAMES_PROFILE" in v:
+        p = json.loads(v["STATIC_NAMES_PROFILE"])
+        v["STATIC_NAMES_PROFILE"] = json.dumps({**p, "image": image})
+    v.update({"DT_JOB_IMAGE": image.rsplit("/", 1)[-1], "DT_JOB_NAME": name, RACE_JOB_ENV: job["name"].rsplit("/", 1)[-1],
+              RACE_COMPACT_ENV: compact_cmd})
+    for labels in (spec.setdefault("labels", {}), spec["allocationPolicy"].setdefault("labels", {})):
+        labels.update({"stage": "race", "upkeep": "race"})
+        for k in ("batch-job-id", "events"):
+            labels.pop(k, None)
+    return spec
+
+
+@cli.command("race")
+@option("-a", "--adopt", is_flag=True, help="First finisher wins: once the race's fold is uploaded, if the raced compaction is still running it is cancelled and the race's fold published in its place (`race-adopt`); if it already finished, the race's is dropped")
+@option("-i", "--image", required=True, help="The image the race runs (e.g. a candidate `…/scan@sha256:…` from `job/build.sh -m candidate`)")
+@option("-j", "--job", "job_name", help="The compaction job to race (default: the one live job labelled `stage=compact` in `$DISKY_LABELS`'s deployment)")
+@option("-n", "--name", default=lambda: datetime.now(timezone.utc).strftime("r%H%M"), help="The race's name: its job `sn-race-<new gen>-<name>`, its scratch root `races/<new gen>-<name>`")
+@option("-t", "--through", default="fold/spilled", help="The raced fold's last saved step the race starts from (`static_compact.STEPS`); later steps run on IMAGE")
+@option("-x", "--dry-run", is_flag=True, help="Print the race's spec; submit nothing")
+def race_cmd(adopt, image, job_name, name, through, dry_run) -> None:
+    """Race a running compaction with IMAGE: a Batch job cloned from the compaction's own (same machine, disks, mounts,
+    env) running `compact-probe` from that fold's checkpoint through `-t`, uploading the new generation to the race's
+    scratch root, recorded on /scans as a `race`. No lease, no publish, no pointer: `compact --prebuilt <root>/upload`
+    publishes it (the raced compaction cancelled first), or with `-a` the race does that itself if it finishes first.
+    Either way only one generation is published: a fold of a generation that has already moved on is refused
+    (`prebuilt_fold`)."""
+    from .batch import submit_job
+    from .cost_labels import env_labels
+    from .gcp import batch_job, batch_jobs
+    from .static_compact import STEPS
+
+    if through not in STEPS:
+        raise UsageError(f"-t {through}: one of {', '.join(STEPS)}")
+    if job_name:
+        job = batch_job(job_name)
+    else:
+        want = {"stage": "compact", **{k: v for k, v in env_labels().items() if k == "deployment"}}
+        live = [j for j in batch_jobs() if j.get("status", {}).get("state") in ("SCHEDULED", "RUNNING")
+                and all(j.get("labels", {}).get(k) == v for k, v in want.items())]
+        if len(live) != 1:
+            raise UsageError(f"race: {len(live)} live jobs labelled {want} ({', '.join(j['name'].rsplit('/', 1)[-1] for j in live) or 'none'}): name one with -j")
+        job = live[0]
+    v = job["taskGroups"][0]["taskSpec"].get("environment", {}).get("variables", {})
+    prof = json.loads(v.get("STATIC_NAMES_PROFILE") or "{}")
+    scratch, bucket = prof.get("scratch") or v.get("STATIC_NAMES_SCRATCH"), prof.get("bucket") or v.get("STATIC_NAMES_BUCKET")
+    if not (scratch and bucket):
+        raise UsageError(f"race: {job['name']} names no scratch / data bucket (its `$STATIC_NAMES_PROFILE`)")
+    new_gen = ar.next_gen(race_gen(race_compact_cmd(job)[1]))
+    jid = f"sn-race-{new_gen.replace('.', '-').lower()}-{name}"
+    spec = race_spec(job, image, name=jid, root=race_root(scratch, new_gen, name), through=through, adopt=adopt, scratch=scratch, bucket=bucket)
+    if dry_run:
+        print(json.dumps(spec, indent=1))
+        return
+    err(f"race: {jid} races {job['name'].rsplit('/', 1)[-1]} on {image} from {through}" + (" (first finisher wins)" if adopt else ""))
+    print(submit_job(spec, jid))
+
+
+@cli.command("race-adopt")
+@argument("upload")
+def race_adopt_cmd(upload) -> None:
+    """A race's last step (`race -a`): if the compaction it raced (`$DT_RACE_COMPACTION`) is still live, cancel it,
+    wait for it to end (its lease then passes at once), and publish UPLOAD in its place with its own `compact` command
+    plus `--prebuilt` (`prebuilt_fold`: refused if the generation moved on meanwhile). If it already ended, do nothing:
+    a compaction that succeeded published first, and one that failed leaves the next scheduled one to adopt or refold."""
+    import shlex
+    import subprocess
+
+    from .batch import LIVE_STATES, cancel_job
+    from .gcp import batch_job
+
+    from requests import HTTPError
+
+    def state_of(name: str) -> str:
+        try:
+            return batch_job(name).get("status", {}).get("state", "?")
+        except HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return "DELETED"
+            raise
+
+    raced, cmd = os.environ[RACE_JOB_ENV], os.environ[RACE_COMPACT_ENV]
+    state = state_of(raced)
+    if state not in LIVE_STATES:
+        err(f"race-adopt: {raced} is {state}: not adopting {upload} (the race lost or its rival ended)")
+        return
+    err(f"race-adopt: {raced} is {state}: cancelling it, then publishing {upload}")
+    cancel_job(raced)
+    while state_of(raced) in (*LIVE_STATES, "DELETION_IN_PROGRESS"):
+        sleep(15)
+    raise SystemExit(subprocess.call([*shlex.split(cmd), "--prebuilt", upload]))
+
+
 @cli.command("measure-probe")
 @option("-c", "--checkpoint", required=True, help="A compaction's fold checkpoint (`…/compact-checkpoints/<gen>/<inputs>/fold`, or a copy of it) holding a saved `spilled` step")
 @option("-g", "--gen", required=True, help="The generation the checkpoint's compaction folds (its `drill/meta.json`: R, K, floor)")

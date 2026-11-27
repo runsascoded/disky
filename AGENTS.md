@@ -126,6 +126,12 @@ dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every sca
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests after each scan (and its carries): a failure loses only that scan.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
+python -m dt_cloud.static_merge race -i IMAGE [-a] [-t STEP]  # Race the running static-names compaction with IMAGE: its Batch
+                          # spec cloned (machine, disks, env; the profile's image too, for the fan-out helpers), `compact-probe`
+                          # seeded from its checkpoint through STEP (default `fold/spilled`), the new generation uploaded under
+                          # `gs://<scratch>/races/<new gen>-<name>/`; no lease or publish. `compact --prebuilt <that>/upload`
+                          # publishes it (cancel the rival first); `-a`: the race does that itself if it finishes first. A
+                          # generation that moved on meanwhile refuses the loser's fold (`prebuilt_fold`). `-x` prints the spec
 dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
                           # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
 dt-cloud interval-store migrate-object-version -g OLD -O NEW -o STORE  # Adopt string object versions without raw listings:
