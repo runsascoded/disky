@@ -282,17 +282,13 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
     heads = [keyed(i, f"""SELECT q, dir, b AS rows, {i} AS tier FROM read_parquet({_files(fs)})
         WHERE kind IN ({sd.KIND_FULL}, {sd.KIND_DELTA})""") for i, t in runs if (fs := t.files(kind, "rollups"))]
     dcs = [keyed(i, f"SELECT q, dir, rows FROM read_parquet({q(f)})") for i, t in runs if (f := t.dcount(kind))]
-    # Every table the `q` ranges below read is stored sorted by `q`, so a range's filter reads its own row groups (DuckDB's
-    # zone maps), not the whole table once per range: cw's 2026-11-27 compaction rescanned its ~5B run counts and 2.0B
-    # base counts for each of ~100 ranges, 5.5 min apiece.
     build("im_h", f"the {len(heads)} runs' rollup heads", f"""SELECT q, dir, arg_max(rows, tier) AS rows
-        FROM ({_union(heads, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows, NULL::INTEGER AS tier")}) GROUP BY q, dir
-        ORDER BY q""")
+        FROM ({_union(heads, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows, NULL::INTEGER AS tier")}) GROUP BY q, dir""")
     build("im_d", f"the {len(dcs)} runs' counts", f"""SELECT q, dir, sum(rows)::BIGINT AS rows
-        FROM ({_union(dcs, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows")}) GROUP BY q, dir ORDER BY q""")
+        FROM ({_union(dcs, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows")}) GROUP BY q, dir""")
     top = sorted(str(p) for p in (meas / "short" / "top").glob("*.parquet")) if not long else []
     base = sd.meas_sql(kind, sorted(str(p) for p in (meas / SUBS[kind]).glob("*.parquet")), top)
-    build("im_b", "the base measurement", f"SELECT b.q, b.dir, b.rows FROM ({base}) AS b" + (" SEMI JOIN im_mt USING (q)" if long else "") + " ORDER BY q")
+    build("im_b", "the base measurement", f"SELECT b.q, b.dir, b.rows FROM ({base}) AS b" + (" SEMI JOIN im_mt USING (q)" if long else ""))
     # touched below the base's floor, no header: the base's rows there are counted (per base canonical)
     c0, mt = ("mt.c0", "JOIN im_mt AS mt USING (q) WHERE mt.base") if long else ("d.q", "")
     build("im_c", "floor crossers", f"""SELECT DISTINCT {c0} AS c, d.dir
@@ -311,26 +307,23 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
         cands = con.execute("SELECT c, dir FROM im_c ORDER BY c, dir").fetchall()
         sd.insert_rows(con, "im_bx", [(c, d, x) for (c, d), x in base_counts(tiers[0], kind, cands).items()])
     base_s = monotonic() - t0
-    # The base counts keyed by the rows that read them, once, sorted by `q`: a short literal's count (`im_bx.c`) is its
-    # own `q`'s; a member's is its base canonical's (`im_mt.c0`), read only where its row is a run count's (a base row
-    # has its own rows; the counted `(c0, dir)`s came from the counts, `im_c`).
-    build("im_bq", "base counts by row", (
-        """SELECT d.q, d.dir, bx.rows FROM im_d AS d JOIN im_mt AS mt USING (q) JOIN im_bx AS bx ON bx.c = mt.c0 AND bx.dir = d.dir
-        ORDER BY d.q""" if long else "SELECT c AS q, dir, rows FROM im_bx ORDER BY c"))
-    con.execute("DROP TABLE im_bx")
+    bc = "mt.c0" if long else "x.q"
     # One `q` range at a time (each member's rows lie in one): the ranges' joins, sorted and written in range order, are
-    # the whole set's, sorted, without holding it.
+    # the whole set's, sorted, without holding it. A short literal's base count (`bx.c`) is its own `q`; a member's is its
+    # base canonical's (`im_mt.c0`), so a long range reads the counts of its members' canonicals.
     ranges = q_ranges(con, ["im_h", "im_b", "im_d"], MEASURE_CHUNK_ROWS)
 
     def part(lo: str | None, hi: str | None) -> str:
-        def of(t: str) -> str:
-            return f"(SELECT * FROM {t} WHERE {q_range_sql('q', lo, hi)})"
+        def of(t: str, col: str = "q") -> str:
+            return f"(SELECT * FROM {t} WHERE {q_range_sql(col, lo, hi)})"
+        bx = (f"(SELECT * FROM im_bx SEMI JOIN (SELECT c0 AS c FROM im_mt WHERE {q_range_sql('q', lo, hi)}) USING (c))" if long
+              else of("im_bx", "c"))
         return f"""SELECT q::VARCHAR AS q, len(string_split(dir, '/'))::INTEGER AS k, dir::VARCHAR AS dir, rows::BIGINT AS rows FROM (
                 SELECT q, dir, rows FROM {of("im_h")}
                 UNION ALL SELECT x.q, x.dir, coalesce(b.rows, bx.rows, 0) + coalesce(d.rows, 0) AS rows
                 FROM (SELECT q, dir FROM {of("im_b")} UNION SELECT q, dir FROM {of("im_d")}) AS x ANTI JOIN {of("im_h")} AS h USING (q, dir)
-                LEFT JOIN {of("im_b")} AS b USING (q, dir) LEFT JOIN {of("im_d")} AS d USING (q, dir)
-                LEFT JOIN {of("im_bq")} AS bx USING (q, dir))
+                LEFT JOIN {of("im_b")} AS b USING (q, dir) LEFT JOIN {of("im_d")} AS d USING (q, dir) {"JOIN im_mt AS mt USING (q)" if long else ""}
+                LEFT JOIN {bx} AS bx ON bx.c = {bc} AND bx.dir = x.dir)
             WHERE rows >= {floor} ORDER BY q, k, dir"""
 
     def batches():
@@ -348,7 +341,7 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
     doc["rows"] = written
     doc["base_counted"] = n
     doc["base_count_s"] = round(base_s, 1)
-    for t in ("im_h", "im_d", "im_b", "im_c", "im_bq", "im_out", "im_mt", *(f"im_a{i}" for i in range(len(tiers)))):
+    for t in ("im_h", "im_d", "im_b", "im_c", "im_bx", "im_out", "im_mt", *(f"im_a{i}" for i in range(len(tiers)))):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return doc
 
