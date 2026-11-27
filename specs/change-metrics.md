@@ -365,6 +365,10 @@ The smallest clear design: a second, short panel under the bytes chart, on the s
 - **Digest reply:** the job reads the primary's counters from the site's `/api/series?path=<its path>` (`site_changes`, as the job; none without a token, on a failed read, or where the store counts none) into each `Scan` (`changes`, and `rows_json`'s `changes: [added, deleted, modified]` where counted). A day's reply sums every scan since the prior reply scan (`DayRow.changes`, none if one of them wasn't counted) and ends its tail with `+812 −40 ~113 objects` (`changes_text`; after `_tail_sep`, so `reply_lines` puts it on its own line). The site's `quotaReply.ts` renders the same, byte for byte (goldens `replies/changes-{sender,body}.json`, one scan uncounted). §4.5 imagined `Scan.dobjs` becoming the breakdown; today's replies don't show Δobjects at all, so the breakdown is new text, and a reply without counters reads as before.
 - **Run thread:** `nominal.store_line` (the thread head's store lines, from root `/api/series`) gives the newest scan's counts after its objects: `289 T · 3,703,266 objects (+812 −40 ~113) · −924 G over 7d.` Store versions stay off the thread and off a series (§10, item 3): they're each range's `ranges/r####.json` counts, a per-run number for `/scans` (not built yet).
 
+### 10.5 hf's content ids (built)
+
+`bulk_hf` writes each object's content id as `version` (§8 Q10): a repo file's LFS `oid` (SHA-256), else its `xetHash`, else (a plain git file) the tree entry's git blob `oid`; a bucket file's `xetHash`; an old version's (`lfs-files`) LFS oid; none for the `@unlisted` residual. A dedup duplicate carries the same id as the path that bills it, so a flip of which path carries the bytes is a size change under one token: not a mod. The listing change alone doesn't reach the counters: hf's interval-store generation must carry `version` first (`interval-store migrate-object-version`, or a rebuild over the new listings), which is hf's deployment work. Until then hf's appends drop the column and its mods fall back to size, with `-T coarse`.
+
 [dp]: diff-progressive.md
 [is]: interval-store.md
 [dfn]: descriptive-field-names.md
