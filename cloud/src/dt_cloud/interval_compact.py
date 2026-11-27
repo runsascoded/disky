@@ -418,8 +418,6 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     doc = {**{k: v for k, v in base.items() if k not in ("scans", "slices", ist.GENERATION, ist.ATTRIBUTION)},
            "scans": [*base["scans"], *run_scans(gen_dir, gen, runs)], "slices": sliced, **({ist.ATTRIBUTION: True} if attributed else {})}
     doc = ist.record_generation(doc, generation)
-    # Every scan the fold starts from, in order (a `before_cut` may thin `doc["scans"]`: the change counters rebase onto it).
-    order = [s["id"] for s in doc["scans"]]
     # The level sort: the base's flag, or its sort added by `backfill-level` (its record mirrored, `interval_local.reads`).
     doc = record_level(doc) if leveled(base, gen_dir) else {k: v for k, v in doc.items() if k != LEVEL_FLAG}
     if out.exists():
@@ -474,9 +472,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
         progress(f"{k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s", "sorts")
     sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=None if doc.get("history") else paths, tree=tree)
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
-    # The scans' change counters: the base's own and the runs' (`interval_changes.carried`), never recounted; a thinned
-    # generation's (a history job's `before_cut` drops scans) summed onto the scans it keeps (`rebase`).
-    ichg.write_doc(out / ichg.DOC, ichg.rebase(ichg.carried(gen_dir, runs), order, {s["id"] for s in doc["scans"]}))
+    # The scans' change counters: the base's own and the runs' (`interval_changes.carried`), never recounted.
+    ichg.write_doc(out / ichg.DOC, ichg.carried(gen_dir, runs, {s["id"] for s in doc["scans"]}))
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats
 

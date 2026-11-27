@@ -170,47 +170,15 @@ def read_doc(path: Path) -> dict[str, dict]:
     return json.loads(path.read_text())["scans"] if path.is_file() else {}
 
 
-def carried(gen_dir: Path, runs: list[dict]) -> dict[str, dict]:
-    """What a fold of `gen_dir` (its base and `runs`: a compaction, a backfill into a new generation) carries into the new
-    generation's `changes.json`: the base's own (`changes.json`) and each run's (`meta.json` `"changes"`)."""
+def carried(gen_dir: Path, runs: list[dict], keep: set[str]) -> dict[str, dict]:
+    """What a compaction of `gen_dir` (its base and `runs`) carries into the new generation's `changes.json`: the base's
+    own (`changes.json`) and each run's (`meta.json` `"changes"`), for the scans in `keep`."""
     out = dict(read_doc(gen_dir / DOC))
     for r in runs:
         meta = gen_dir / r["key"] / "meta.json"
         if meta.is_file():
             out.update(json.loads(meta.read_text()).get(KEY) or {})
-    return out
-
-
-def merge(entries: list[dict], since: str) -> dict:
-    """Consecutive scans' entries as one against `since`: the gross counts sum (per path, and how mods were decided)."""
-    paths: dict[str, dict] = {}
-    for e in entries:
-        for p, c in e["paths"].items():
-            t = paths.setdefault(p, zero())
-            for k in (*COUNTS, *BYTES):
-                t[k] += c[k]
-            for b in BASES:
-                t["mods_by"][b] += c["mods_by"][b]
-    return {"since": since, "mtime": entries[-1]["mtime"], "paths": dict(sorted(paths.items()))}
-
-
-def rebase(counters: dict[str, dict], order: list[str], keep: set[str]) -> dict[str, dict]:
-    """`counters` over the scans `order` lists, for the scans in `keep` (a generation thinned to them): a kept scan's entry
-    is its own plus those of the dropped scans since the kept one before it (gross counts add over scan pairs), against
-    that kept scan; none where one of them has no counters, nor for the first kept scan. Keeping every scan changes
-    nothing."""
-    out: dict[str, dict] = {}
-    pend: list[dict | None] = []
-    prev: str | None = None
-    for sid in order:
-        e = counters.get(sid)
-        if sid not in keep:
-            pend.append(e)
-            continue
-        if e is not None and prev is not None and all(x is not None for x in pend):
-            out[sid] = merge([*pend, e], prev) if pend else e  # type: ignore[list-item]
-        pend, prev = [], sid
-    return out
+    return {k: v for k, v in out.items() if k in keep}
 
 
 def union(metas: list[dict]) -> dict[str, dict] | None:
