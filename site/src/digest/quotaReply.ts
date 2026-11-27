@@ -5,7 +5,7 @@ import { compactQuietLines } from './compact'
 import { scanTime } from '../scanSlug'
 import { type DigestCfg, deg, diffUrl, pct, tb as signed, type Quota } from './common'
 import { bucketLink, type QuotaRows, type QuotaScan, dextra, dlink, scoped } from './quota'
-import { growth, hueStep, mark, poolMark, type PoolMark, QUIET_PCT, runway, type Runway, RUNWAY_WINDOWS_D, runwayText, weeklyDeg } from './pools'
+import { growth, hueStep, mark, poolMark, type PoolMark, poolUrl, QUIET_PCT, runway, type Runway, RUNWAY_WINDOWS_D, runwayText, weeklyDeg } from './pools'
 import { dayOf, fixed, grouped, hhmm, md, pyRound } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
 
@@ -197,7 +197,8 @@ function tail(day: DayRow, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, sep:
   const lines = cs.map(({ g, c, f, rw, over }) => {
     let text = c
     if (RUNWAY_MARKS.includes(marks) && f !== null && rw) {
-      text = `${poolMark(marks as PoolMark, rw.r, f, rw.v, cfg.buckets[g[0][0]]?.shape ?? 'circle')}${c}${runwayText(rw.r, cfg)}`
+      const url = rw.r.since != null ? poolUrl(g.map(([b]) => b), day.s, rw.r.since, cfg) : undefined
+      text = `${poolMark(marks as PoolMark, rw.r, f, rw.v, cfg.buckets[g[0][0]]?.shape ?? 'circle')}${c}${runwayText(rw.r, cfg, url)}`
     } else if (marks === 'circles' && f !== null) text = `${mark(f, rc.alert_pct ?? 90)}${c}`
     else if (!RUNWAY_MARKS.includes(marks) && marks !== 'circles' && over) text = `${ALERT_MARK} ${c}`
     // low-info: the line says only a size or a brief `NN%` (no headroom, no runway), whatever the bytes behind it

@@ -47,6 +47,7 @@ from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from urllib.parse import quote
 
 from . import emoji_vocab as V
 
@@ -83,12 +84,27 @@ def _qlabel(b: int) -> str:
     return f"{b / 10**15:g}P" if b >= 10**15 else f"{b / 10**12:g}T"
 
 
-def _diff_url(scan: str, since: dt.datetime | None, site_url: str, bucket: str = "", slug: str | None = None) -> str:
-    """The dashboard's over-time view (optionally scoped to ``bucket``) pinned
-    to ``scan`` (by ``slug``, its canonical slug, else its minute), looking back
-    to ``since`` (None: the baked previous scan)."""
+#: What `encodeURIComponent` leaves unescaped beyond `quote`'s own (`_.-~`), so a `?g=` matches the site's `diffUrl`.
+URI_SAFE = "!*'()"
+
+
+def _diff_url(scan: str, since: dt.datetime | None, site_url: str, bucket: str = "", slug: str | None = None,
+              group: str | None = None) -> str:
+    """The dashboard's over-time view (optionally scoped to ``bucket``, or at the root to bucket ``group``: `?g=`)
+    pinned to ``scan`` (by ``slug``, its canonical slug, else its minute), looking back to ``since`` (None: the baked
+    previous scan). The site's `digest/common.ts` `diffUrl`."""
     span = f"-{_span(since, scan_ts(scan))}" if since is not None else ""
-    return f"{site_url}/{bucket}?d={_dlink(scan, slug)}{span}#over-time"
+    g = f"&g={quote(group, safe=URI_SAFE)}" if group else ""
+    return f"{site_url}/{bucket}?d={_dlink(scan, slug)}{span}{g}#over-time"
+
+
+def _pool_url(g: list[str], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
+    """A pool's over-time view since ``since``: a zone's (buckets sharing a ``zone``) at the root as its bucket group
+    (a zone's name is its site group's, `?g=`), a lone bucket's at its site ``path``."""
+    b = cfg.buckets.get(g[0])
+    if len(g) > 1 and b is not None and b.zone:
+        return _diff_url(scan, since, cfg.site_url, slug=slug, group=b.zone)
+    return _diff_url(scan, since, cfg.site_url, g[0] if b is None or b.path is None else b.path, slug)
 
 
 def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
@@ -179,7 +195,8 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
     lines = []
     for (c, fill, over, r, shape), group in cs:
         if cfg.quota_marks in RUNWAY_MARKS:
-            text = f"{_pool_mark(r, fill, shape, cfg)} {c}{_runway_text(r, cfg)}" if fill is not None else c
+            url = _pool_url([b for b, _ in group], day.scan, r.since, cfg, day.slug) if r is not None and r.since else None
+            text = f"{_pool_mark(r, fill, shape, cfg)} {c}{_runway_text(r, cfg, url)}" if fill is not None else c
         else:
             mark = _mark(fill, over, cfg)
             text = f"{mark} {c}" if mark else c
@@ -224,16 +241,19 @@ RUNWAY_FULL_PCT = 95
 class Runway:
     """A quota group's runway at a scan: ``days`` to full at ``growth`` (its unit per day; None: no earlier scan in
     reach), ``math.inf`` when not growing, 0 when at or over quota. ``used``: what its quota counts now, set by a
-    group's reading (`_group_runway`). ``window_d``: the look-back (`RUNWAY_WINDOWS_D`, days) ``growth`` came from."""
+    group's reading (`_group_runway`). ``window_d``: the look-back (`RUNWAY_WINDOWS_D`, days) ``growth`` came from,
+    ``since`` the scan it was measured from (the `over Nd` link's start)."""
     days: float
     growth: float | None
     used: float = 0.0
     window_d: int | None = None
+    since: dt.datetime | None = None
 
 
-def _growth(hist: list[tuple[dt.datetime, float]], t: dt.datetime, v: float) -> tuple[float, int] | None:
-    """The fastest net fill per day reaching ``v`` at ``t`` over `RUNWAY_WINDOWS_D`, and the window (days) it came
-    from: each window from the latest ``hist`` point at or before ``t`` minus it; None when no window has one. A tie
+def _growth(hist: list[tuple[dt.datetime, float]], t: dt.datetime, v: float) -> tuple[float, int, dt.datetime] | None:
+    """The fastest net fill per day reaching ``v`` at ``t`` over `RUNWAY_WINDOWS_D`, the window (days) it came from,
+    and the point it was measured from: each window from the latest ``hist`` point at or before ``t`` minus it; None
+    when no window has one. A tie
     names the longest window: a shorter one whose look-back found no scan of its own falls back to the same older
     point, so the longer names the span the rate was measured over."""
     rates = []
@@ -241,15 +261,15 @@ def _growth(hist: list[tuple[dt.datetime, float]], t: dt.datetime, v: float) -> 
         then = [(ts, x) for ts, x in hist if ts <= t - dt.timedelta(days=w)]
         if then:
             ts0, v0 = then[-1]
-            rates.append(((v - v0) / ((t - ts0).total_seconds() / 86400), w))
+            rates.append(((v - v0) / ((t - ts0).total_seconds() / 86400), w, ts0))
     return max(rates) if rates else None
 
 
-def _runway(free: float, growth: tuple[float, int] | None) -> Runway:
-    rate, w = growth if growth is not None else (None, None)
+def _runway(free: float, growth: tuple[float, int, dt.datetime] | None) -> Runway:
+    rate, w, since = growth if growth is not None else (None, None, None)
     if free <= 0:
-        return Runway(0.0, rate, window_d=w)
-    return Runway(free / rate if rate is not None and rate > 0 else math.inf, rate, window_d=w)
+        return Runway(0.0, rate, window_d=w, since=since)
+    return Runway(free / rate if rate is not None and rate > 0 else math.inf, rate, window_d=w, since=since)
 
 
 def _runway_mark(r: Runway, fill: float) -> str:
@@ -296,14 +316,15 @@ def _pool_mark(r: Runway, fill: float, shape: str, cfg: DigestConfig) -> str:
     return _runway_hue(r, fill, shape) if cfg.quota_marks == "runway-hue" else _runway_mark(r, fill)
 
 
-def _runway_text(r: Runway, cfg: DigestConfig) -> str:
+def _runway_text(r: Runway, cfg: DigestConfig, url: str | None = None) -> str:
     """`, +4.1 Ti/d over 3d, ≈8d to full` for a pool filling within `RUNWAY_TEXT_D` days: its rate, the look-back
-    window that rate came from (`Runway.window_d`), and its runway (commas: ` · ` separates the pools); `''`
-    otherwise (flat, shrinking, far off, or already over: its clause says so)."""
+    window that rate came from (`Runway.window_d`; `[over 3d](url)` with the pool's ``url`` over that look-back), and
+    its runway (commas: ` · ` separates the pools); `''` otherwise (flat, shrinking, far off, or already over: its
+    clause says so)."""
     if not 0 < r.days < RUNWAY_TEXT_D or r.growth is None:
         return ""
     days = "<1d" if r.days < 1 else f"{r.days:.0f}d"
-    over = f" over {r.window_d}d" if r.window_d is not None else ""
+    over = "" if r.window_d is None else f" [over {r.window_d}d]({url})" if url else f" over {r.window_d}d"
     return f", +{r.growth:.1f} {cfg.unit.short}/d{over}, ≈{days} to full"
 
 
@@ -378,7 +399,8 @@ def alert_body(month: Month, cfg: DigestConfig) -> str | None:
         return None
     last = month.rows[-1]
     day = _row(last.date, last, None, seen=month.pre + month.lead + month.rows)
-    over = [(c + (_runway_text(r, cfg) if r else ""), f) for c, f, o, r, _ in _clauses(day, cfg, runway=True) if o]
+    over = [(c + (_runway_text(r, cfg, _pool_url([b for b, _ in g], day.scan, r.since, cfg, day.slug) if r.since else None) if r else ""), f)
+            for (c, f, o, r, _), g in zip(_clauses(day, cfg, runway=True), _groups(day, cfg)) if o]
     if cfg.quota_marks == "circles":
         over.sort(key=lambda c: -c[1])
     over = [c for c, _ in over]

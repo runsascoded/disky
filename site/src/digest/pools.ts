@@ -2,8 +2,8 @@
  * share per scan, buckets sharing a `zone` summed against the zone's quota (as `digest_quota._groups`), sorted by
  * pressure; and the OP's quota line. Pure; DOM-free. */
 import type { QuotaScan } from './quota'
-import { deg, type DigestCfg, type Quota, type Shape } from './common'
-import { scanTime } from '../scanSlug'
+import { deg, diffUrl, type DigestCfg, type Quota, type Shape } from './common'
+import { encodeScan, scanTime } from '../scanSlug'
 import { fixed } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
 
@@ -78,28 +78,39 @@ export const RUNWAY_TEXT_D = 60
 export const RUNWAY_FULL_PCT = 95
 
 /** Days to full at `growth` (unit/day; null: no earlier scan in reach): Infinity when not growing, 0 at or over quota.
- *  `windowD`: the look-back (`RUNWAY_WINDOWS_D`, days) `growth` came from; null (or absent) with no growth. */
-export interface Runway { days: number; growth: number | null; windowD?: number | null }
+ *  `windowD`: the look-back (`RUNWAY_WINDOWS_D`, days) `growth` came from, `since` the scan (ms) it was measured from
+ *  (the `over Nd` link's start); null (or absent) with no growth. */
+export interface Runway { days: number; growth: number | null; windowD?: number | null; since?: number | null }
 
 /** The fastest net fill per day reaching `v` at `t` (ms) over `RUNWAY_WINDOWS_D`, from `hist` ([ms, value], in
- *  order), and the window (days) it came from; null when no window has a point. A tie names the longest window
- *  (`digest_quota._growth`): a shorter one that found no scan of its own falls back to the same older point. */
-export function growth(hist: [number, number][], t: number, v: number): [number, number] | null {
-  let best: [number, number] | null = null
+ *  order), the window (days) it came from and the point (ms) it was measured from; null when no window has a point.
+ *  A tie names the longest window (`digest_quota._growth`): a shorter one that found no scan of its own falls back
+ *  to the same older point. */
+export function growth(hist: [number, number][], t: number, v: number): [number, number, number] | null {
+  let best: [number, number, number] | null = null
   for (const w of RUNWAY_WINDOWS_D) {
     const then = hist.filter(([x]) => x <= t - w * 86400_000)
     if (!then.length) continue
     const [t0, v0] = then[then.length - 1]
     const rate = (v - v0) / ((t - t0) / 86400_000)
-    if (!best || rate >= best[0]) best = [rate, w]
+    if (!best || rate >= best[0]) best = [rate, w, t0]
   }
   return best
 }
 
-export function runway(free: number, g: [number, number] | null): Runway {
-  const [rate, windowD] = g ?? [null, null]
-  if (free <= 0) return { days: 0, growth: rate, windowD }
-  return { days: rate != null && rate > 0 ? free / rate : Infinity, growth: rate, windowD }
+export function runway(free: number, g: [number, number, number] | null): Runway {
+  const [rate, windowD, since] = g ?? [null, null, null]
+  if (free <= 0) return { days: 0, growth: rate, windowD, since }
+  return { days: rate != null && rate > 0 ? free / rate : Infinity, growth: rate, windowD, since }
+}
+
+/** A pool's over-time view at scan `r` since `since` (ms; `digest_quota._pool_url`): a zone's (buckets `g` sharing a
+ *  `zone`) at the root as its bucket group (`?g=`), a lone bucket's under its path. */
+export function poolUrl(g: string[], r: QuotaScan, since: number | null, cfg: DigestCfg): string {
+  const b = cfg.buckets[g[0]]
+  const slug = r.slug ?? encodeScan(r.scan)!
+  if (g.length > 1 && b?.zone) return diffUrl(r.scan, slug, since, cfg.site_url, '', b.zone)
+  return diffUrl(r.scan, slug, since, cfg.site_url, !b || b.path === null ? g[0] : b.path)
 }
 
 export function runwayMark(r: Runway, pct: number): string {
@@ -145,10 +156,12 @@ export function poolMark(mode: PoolMark, r: Runway, pct: number, v: number, shap
   return `:pool-${mode === 'arrow' ? 'bare' : 'disc'}-${n}-${d}: `
 }
 
-export function runwayText(r: Runway, cfg: DigestCfg): string {
+/** `, +4.1 Ti/d over 3d, ≈8d to full` (`digest_quota._runway_text`): `[over 3d](url)` given the pool's `url` over
+ *  that look-back. */
+export function runwayText(r: Runway, cfg: DigestCfg, url?: string): string {
   if (!(r.days > 0 && r.days < RUNWAY_TEXT_D) || r.growth == null) return ''
   const days = r.days < 1 ? '<1d' : `${fixed(r.days, 0)}d`
-  const over = r.windowD != null ? ` over ${r.windowD}d` : ''
+  const over = r.windowD == null ? '' : url ? ` [over ${r.windowD}d](${url})` : ` over ${r.windowD}d`
   return `, +${fixed(r.growth, 1)} ${cfg.unit.short}/d${over}, ≈${days} to full`
 }
 
@@ -185,7 +198,7 @@ export function poolRows(r: QuotaScan, cfg: DigestCfg, alertAt: number, mode: 'c
         .flatMap(x => { const y = used(p, x, cfg); return y == null ? [] : [[scanTime(x.scan), y] as [number, number]] })
       const rw = runway(p.quota.bytes / u.bytes - v, growth(hist, t, v))
       m = poolMark(mode, rw, pct, v, p.shape)
-      tail = runwayText(rw, cfg)
+      tail = runwayText(rw, cfg, rw.since != null ? poolUrl(p.buckets, r, rw.since, cfg) : undefined)
     }
     if (pct < QUIET_PCT) return { p, v, pct, mark: m, tail, text: `${fixed(pct, 0)}% of ${p.quota.short ?? p.quota.name}${tail}` }
     const free = p.quota.bytes / u.bytes - v
