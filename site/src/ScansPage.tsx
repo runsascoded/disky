@@ -4,7 +4,7 @@
 // writes, and the stores' maintenance jobs (compactions, merges: `dt_cloud.maint_runs`)
 // in the same table. DIY SVG: a duration strip over all runs, a phase bar per row,
 // and a phase timeline per run.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { stringParam, useUrlState } from 'use-prms'
@@ -36,8 +36,9 @@ import { agoLong, colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type JobL
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
 import { DEFAULT_SIZES, pageParam, Pager, usePaged } from './Pager'
 import { durationAxis, durationSegments } from './durationAxis'
+import { useWidth } from './useWidth'
 import { XRangeControls } from './XRangeControls'
-import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { autoScans, brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
 import { scanTime } from './scanSlug'
 import { StickyTable } from './stickyHead'
 import { costStages, type CostStage, type RunCostReport } from './runCost'
@@ -126,23 +127,6 @@ function useSvgTip() {
   })
   const el = tip && <div className="sr-svgtip tooltip-content" style={{ left: tip.x, top: tip.y }}>{tip.content}</div>
   return { on, el }
-}
-
-/** The wrapper's width in CSS px, so a chart draws at 1:1 (text stays legible
- * on a phone instead of scaling down with a fixed viewBox). Measured before
- * observing: a hidden tab never gets the first ResizeObserver callback. */
-function useWidth<T extends HTMLElement>(fallback = 720): [RefObject<T | null>, number] {
-  const ref = useRef<T>(null)
-  const [w, setW] = useState(fallback)
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    setW(el.clientWidth || fallback)
-    const ro = new ResizeObserver(() => setW(el.clientWidth || fallback))
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [fallback])
-  return [ref, w]
 }
 
 const usd = (x: number | null | undefined) => (x == null ? '—' : `$${x < 10 ? x.toFixed(2) : Math.round(x).toLocaleString('en-US')}`)
@@ -339,11 +323,13 @@ export function ScanDurationChart(props: DurationProps) {
   const setDomain = (d: XDomain) => setXr(fmtXr(d))
   const points = props.runs.filter(r => r.run.started_ts != null && r.secs != null).map(r => ({ x: runX(r.run.started_ts!) * 1000, y: r.secs! }))
   const xs = [...new Set(points.map(p => p.x))]
-  const range = resolveXDomain(domain, xs, scanTime)
   const window = props.win ? [props.win[0] * 1000, props.win[1] * 1000] as const : undefined
+  // the default range: the newest runs the plot's width holds, keeping the selected runs in view
+  const [headRef, headW] = useWidth<HTMLDivElement>()
+  const range = resolveXDomain(domain, xs, scanTime, { n: autoScans(headW - TS_PAD.left - TS_PAD.right), win: window })
   const fit = window ? { onClick: () => setDomain(spanDomain(fitToWindow(window, xs), rangeId)), label: 'zoom to selected runs', description: 'Zoom to the selected runs, with one run of context on each side' } : undefined
   return <>
-    <div className="sr-chart-head">
+    <div className="sr-chart-head" ref={headRef}>
       <h3>End-to-end duration by run</h3>
       <XRangeControls domain={domain} set={setDomain} fit={fit} />
       <span className="gran" role="group" aria-label="Y-axis scale">

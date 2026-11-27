@@ -1,12 +1,15 @@
 // "Size over time"'s displayed x-range (`?xr=`), kept apart from the diff window it highlights: the chart can show
 // months of context around a window of two scans, and zooming never moves the window. One state for every way in —
 // the `1w` / `1m` / `all` presets, a brush on the overview strip, "fit to the diff window" — resolved against the
-// series' own x's here, pure, so the chart and its tests read the same rules.
+// series' own x's here, pure, so the chart and its tests read the same rules. The default (`auto`, a bare URL) is the
+// newest scans the chart's width holds (`autoScans`), so a long history doesn't crush the recent ones.
 
 export const DAY_MS = 86_400_000
 
-/** `all` = every scan; `last` = the N days before the latest scan (follows new scans); `span` = two scan ids. */
+/** `auto` = the newest scans the width holds (the default); `all` = every scan; `last` = the N days before the latest
+ *  scan (follows new scans); `span` = two scan ids. */
 export type XDomain =
+  | { kind: 'auto' }
   | { kind: 'all' }
   | { kind: 'last'; days: number }
   | { kind: 'span'; from: string; to: string }
@@ -14,13 +17,24 @@ export type XDomain =
 export type XPreset = '1w' | '1m' | 'all'
 export const X_PRESETS: [XPreset, number | null][] = [['1w', 7], ['1m', 30], ['all', null]]
 
+const AUTO: XDomain = { kind: 'auto' }
 const ALL: XDomain = { kind: 'all' }
+
+/** Plot px per scan the default range allows: a phone's ~300 px plot shows ~40 scans, a desktop's ~1,000 ~125. */
+export const PX_PER_SCAN = 8
+
+/** How many scans `auto` shows in a plot `plotPx` wide (at least 2). */
+export const autoScans = (plotPx: number): number => Math.max(2, Math.floor(plotPx / PX_PER_SCAN))
+
+/** What `auto` resolves against: the most scans to show, and the diff window (data x), kept in view with a scan of
+ *  context. */
+export interface AutoOpts { n: number; win?: readonly [number, number] }
 // A scan id: `YYYY-MM-DD`, optionally `THHMM` (`scanSlug.isScanId`'s shapes).
 const SCAN_ID = /^\d{4}-\d{2}-\d{2}(T\d{4})?$/
 
-/** `?xr=` → the domain: `1w` / `1m`, `<from>..<to>` (scan ids, either order), else every scan. */
+/** `?xr=` → the domain: `1w` / `1m` / `all`, `<from>..<to>` (scan ids, either order), else `auto`. */
 export function parseXr(s: string | null | undefined): XDomain {
-  if (!s) return ALL
+  if (!s) return AUTO
   const preset = X_PRESETS.find(([p]) => p === s)
   if (preset) return preset[1] === null ? ALL : { kind: 'last', days: preset[1] }
   const m = s.split('..')
@@ -28,20 +42,21 @@ export function parseXr(s: string | null | undefined): XDomain {
     const [from, to] = m[0] <= m[1] ? m : [m[1], m[0]]
     return { kind: 'span', from, to }
   }
-  return ALL
+  return AUTO
 }
 
-/** The domain as `?xr=` (undefined = every scan, the default). */
+/** The domain as `?xr=` (undefined = `auto`, the default). */
 export function fmtXr(d: XDomain): string | undefined {
-  if (d.kind === 'all') return undefined
+  if (d.kind === 'auto') return undefined
+  if (d.kind === 'all') return 'all'
   if (d.kind === 'span') return `${d.from}..${d.to}`
   return X_PRESETS.find(([, days]) => days === d.days)?.[0] ?? undefined
 }
 
-/** The preset button the domain is, if any (a brushed span is none of them). */
+/** The preset button the domain is, if any (`auto` and a brushed span are none of them). */
 export function presetOf(d: XDomain): XPreset | null {
   if (d.kind === 'all') return 'all'
-  if (d.kind === 'span') return null
+  if (d.kind === 'span' || d.kind === 'auto') return null
   return X_PRESETS.find(([, days]) => days === d.days)?.[0] ?? null
 }
 
@@ -49,12 +64,22 @@ export function presetOf(d: XDomain): XPreset | null {
  * The x-range `d` shows over the series' x's (`xs`, any order), or null = all of them. Clamped to the data, and
  * never narrower than two scans: a range holding fewer widens to the scan before / after it (a chart of one point
  * has no line and no x-axis). A range holding every scan is null — the chart is unzoomed whatever the state says.
+ * `auto` is the newest ``auto.n`` scans, reaching back to keep ``auto.win`` (and a scan before it) in view; without
+ * ``auto``, every scan.
  */
-export function resolveXDomain(d: XDomain, xs: readonly number[], xOf: (id: string) => number): [number, number] | null {
+export function resolveXDomain(d: XDomain, xs: readonly number[], xOf: (id: string) => number, auto?: AutoOpts): [number, number] | null {
   if (d.kind === 'all' || xs.length < 2) return null
   const s = [...xs].sort((a, b) => a - b)
   const first = s[0]
   const last = s[s.length - 1]
+  if (d.kind === 'auto') {
+    if (!auto) return null
+    let i0 = Math.max(0, s.length - Math.max(2, auto.n))
+    const fit = auto.win ? fitToWindow(auto.win, s) : null
+    if (fit) i0 = Math.min(i0, s.indexOf(fit[0]))
+    else if (auto.win) i0 = 0
+    return i0 === 0 ? null : [s[i0], last]
+  }
   let lo: number, hi: number
   if (d.kind === 'last') {
     lo = last - d.days * DAY_MS

@@ -1,7 +1,7 @@
 import { Tooltip } from './Tooltip'
 import { SectionAnchor } from './SectionAnchor'
 import { Explain } from './Help'
-import { TimeSeries, XOverview } from '@disk-tree/react'
+import { TimeSeries, TS_PAD, XOverview } from '@disk-tree/react'
 import type { Annotation, Series as TsSeries } from '@disk-tree/react'
 import { slotColor } from './colors'
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -28,7 +28,8 @@ import { manualScans } from './scanRunsModel'
 import { fmtCount } from './usageModel'
 import { useScanRuns } from './scanRunsUi'
 import { useActions } from 'use-kbd'
-import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { autoScans, brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { useWidth } from './useWidth'
 import { XRangeControls } from './XRangeControls'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
@@ -54,7 +55,8 @@ type Layout = 'stacked' | 'lines'
 type Values = 'abs' | 'delta' | 'pct'
 
 // The displayed x-range (`?xr=`, `xDomain.ts`): `1w` / `1m` (the last N days before the latest scan), a brushed
-// span of two scans (`<from>..<to>`), or every scan (the default). Separate from the diff window, which it only
+// span of two scans (`<from>..<to>`), every scan (`all`), or by default the newest scans the chart's width holds
+// (reaching back to keep the diff window in view). Separate from the diff window, which it only
 // frames: zooming never moves the window, and the chart keeps the context around it.
 // Scans a hand submit started (`manualScans`), drawn apart from the schedule's (`?mm`): a tick under the x-axis
 // (default), hollow dots (`h`), or not at all (`0`). The tooltip names them in every style, and the legend the mark.
@@ -321,9 +323,14 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   // null = all). The cut applies to every trace, so the stack, the total, the y-fit, the callouts and the notes
   // all follow the visible window.
   const fullTotal = useMemo(() => (seriesQ.data?.points ?? []).map(p => ({ x: xOfScan(p.date, times), y: val(p) })).sort((a, b) => a.x - b.x), [seriesQ.data, times, metric])
-  const xRange = useMemo(() => resolveXDomain(xDomain, fullTotal.map(p => p.x), id => xOfScan(id, times)), [xDomain, fullTotal, times])
   // The diff window in x (shaded on the chart and the strip; callouts mark its ends).
   const winX = useMemo(() => (win ? [xOfScan(win[0], times), xOfScan(win[1], times)] as [number, number] : undefined), [win, times])
+  const [sectionRef, sectionW] = useWidth<HTMLElement>()
+  const autoN = autoScans(sectionW - TS_PAD.left - TS_PAD.right)
+  const xRange = useMemo(
+    () => resolveXDomain(xDomain, fullTotal.map(p => p.x), id => xOfScan(id, times), { n: autoN, win: winX }),
+    [xDomain, fullTotal, times, autoN, winX],
+  )
   const toPts = (points: { date: string; bytes: number; objects: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: val(p) })).filter(p => inXDomain(xRange, p.x)).sort((a, b) => a.x - b.x)
   const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xRange, times, metric])
   // Scans the answer doesn't cover (a filter's static index): gaps in the line, with a muted note — never zeros.
@@ -480,7 +487,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const firstX = total[0]?.x
   if (scans.length < 2) return null
   return (
-    <section id="over-time">
+    <section id="over-time" ref={sectionRef}>
       <h2>
         <SectionAnchor id="over-time">Size over time</SectionAnchor>
         <Tooltip content={<>
@@ -498,7 +505,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
                     ? <>{metric === 'objects' ? 'Objects' : 'Stored bytes'} per scan, one {stacked ? 'band' : 'line'} per bucket{genesis != null && <> — the total is dashed before every bucket was in the scan</>}.</>
                     : <>Total {metric === 'objects' ? 'objects' : 'stored bytes'} per scan ({scopeLabel}).</>}
           {relative && <> Shown as {values === 'pct' ? 'growth' : `${noun} gained`} since each trace’s first shown scan.</>}
-          {' '}Each point is that scan’s own index row — exact, at any depth. Click a point to view that scan; drag to set the diff window. Drag across the strip under the chart to zoom (double-click it for every scan).
+          {' '}Each point is that scan’s own index row — exact, at any depth. Click a point to view that scan; drag to set the diff window. It opens on the newest scans that fit its width (with the diff window in view); drag across the strip under the chart to zoom, or double-click it (or press “all”) for every scan.
         </>}>
           <span className="info" aria-label="about this chart" tabIndex={0}>ⓘ</span>
         </Tooltip>

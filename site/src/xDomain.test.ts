@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { brushDomain, DAY_MS, fitToWindow, fmtXr, parseXr, presetOf, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { autoScans, brushDomain, DAY_MS, fitToWindow, fmtXr, parseXr, presetOf, resolveXDomain, spanDomain, type XDomain } from './xDomain'
 
 // Ten daily scans, 2026-10-01 … 2026-10-10, each at UTC midnight.
 const ids = Array.from({ length: 10 }, (_, i) => `2026-10-${String(i + 1).padStart(2, '0')}`)
@@ -11,20 +11,20 @@ const day = (d: number) => xOf(`2026-10-${String(d).padStart(2, '0')}`)
 const asIds = (r: [number, number] | null) => (r ? r.map(idOf) : null)
 
 describe('parseXr / fmtXr / presetOf', () => {
-  it('round-trips presets and spans; a reversed span is put in order; junk is every scan', () => {
+  it('round-trips presets and spans; a reversed span is put in order; bare or junk is auto', () => {
     const inputs = [undefined, '', '1w', '1m', 'all', '2026-10-02..2026-10-05', '2026-10-05..2026-10-02', '2026-09-17T1201..2026-10-01', 'bogus', '2026-10-02..', '3d']
     expect(inputs.map(s => { const d = parseXr(s); return [d, fmtXr(d), presetOf(d)] })).toEqual([
-      [{ kind: 'all' }, undefined, 'all'],
-      [{ kind: 'all' }, undefined, 'all'],
+      [{ kind: 'auto' }, undefined, null],
+      [{ kind: 'auto' }, undefined, null],
       [{ kind: 'last', days: 7 }, '1w', '1w'],
       [{ kind: 'last', days: 30 }, '1m', '1m'],
-      [{ kind: 'all' }, undefined, 'all'],
+      [{ kind: 'all' }, 'all', 'all'],
       [{ kind: 'span', from: '2026-10-02', to: '2026-10-05' }, '2026-10-02..2026-10-05', null],
       [{ kind: 'span', from: '2026-10-02', to: '2026-10-05' }, '2026-10-02..2026-10-05', null],
       [{ kind: 'span', from: '2026-09-17T1201', to: '2026-10-01' }, '2026-09-17T1201..2026-10-01', null],
-      [{ kind: 'all' }, undefined, 'all'],
-      [{ kind: 'all' }, undefined, 'all'],
-      [{ kind: 'all' }, undefined, 'all'],
+      [{ kind: 'auto' }, undefined, null],
+      [{ kind: 'auto' }, undefined, null],
+      [{ kind: 'auto' }, undefined, null],
     ])
   })
 })
@@ -72,6 +72,33 @@ describe('resolveXDomain', () => {
       ['2026-10-04', '2026-10-08'],
       ['2026-10-01', '2026-10-04'],
     ])
+  })
+
+  it('auto: the newest n scans (at least 2), reaching back to keep the diff window and a scan before it; every scan without opts', () => {
+    const a = (n: number, win?: [number, number]) => asIds(resolveXDomain({ kind: 'auto' }, xs, xOf, { n, win }))
+    expect([
+      asIds(resolveXDomain({ kind: 'auto' }, xs, xOf)),
+      a(4),
+      a(1),
+      a(10),
+      a(40),
+      a(4, [day(9), day(10)]),
+      a(4, [day(4), day(5)]),
+      a(4, [day(2), day(3)]),
+    ]).toEqual([
+      null,
+      ['2026-10-07', '2026-10-10'],
+      ['2026-10-09', '2026-10-10'],
+      null,
+      null,
+      ['2026-10-07', '2026-10-10'],
+      ['2026-10-03', '2026-10-10'],
+      null,
+    ])
+  })
+
+  it('autoScans: the plot width over `PX_PER_SCAN`, at least 2', () => {
+    expect([0, 10, 300, 1000].map(autoScans)).toEqual([2, 2, 37, 125])
   })
 
   it('fewer than two scans, or a span naming an unparseable scan: unzoomed', () => {
