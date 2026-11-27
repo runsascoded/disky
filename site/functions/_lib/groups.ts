@@ -13,7 +13,7 @@
  */
 import { type Env, json } from './auth.js'
 import { type Restriction, scopeReachesHidden } from './restrict.js'
-import { type Flows, pointFlows, type SeriesPoint, type SeriesTrace, sumFlows } from './series.js'
+import type { SeriesPoint, SeriesTrace } from './series.js'
 import { type BucketGroup, StoreConfigError, storeConfigResponse, storeGroups } from './stores.js'
 import type { DiffRow, DiffSides, ViewNode } from './view.js'
 
@@ -116,17 +116,15 @@ export function groupDiffRows(members: readonly { bucket: string; total: DiffSid
 /** A group's points from its members' series: per scan, the members' sums, over the scans any member has a point at
  *  (a member without one there adds nothing, as a root absent from a scan does). */
 export function sumPoints(series: readonly (readonly SeriesPoint[])[]): SeriesPoint[] {
-  const by = new Map<string, { date: string; bytes: number; objects: number; flows: (Flows | null)[] }>()
+  const by = new Map<string, SeriesPoint>()
   for (const points of series) {
     for (const p of points) {
-      const t = by.get(p.date) ?? { date: p.date, bytes: 0, objects: 0, flows: [] }
+      const t = by.get(p.date) ?? { date: p.date, bytes: 0, objects: 0 }
       t.bytes += p.bytes; t.objects += p.objects
-      t.flows.push(pointFlows(p))
       by.set(p.date, t)
     }
   }
-  // A scan's change flows: the members' sum, where each member with a point there has them (`sumFlows`).
-  return [...by.values()].sort((a, b) => a.date.localeCompare(b.date)).map(({ flows, ...t }) => ({ ...t, ...(sumFlows(flows) ?? {}) }))
+  return [...by.values()].sort((a, b) => a.date.localeCompare(b.date))
 }
 
 /** The members' traces of a `split=roots` answer, in the group's order (a member no scan has is absent). */

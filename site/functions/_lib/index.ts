@@ -41,7 +41,6 @@ import type { Env } from './auth.js'
 import { assertHistoryScan, historyVersion, withHistoryVersion } from './historyVersion.js'
 import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
-import type { ChangeEntry } from './series.js'
 import { colo, endedRequest, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
 import { compressors } from './zstd.js'
@@ -774,15 +773,13 @@ export function r2Bytes(r2: ReaderObjects): ByteStore {
 /** A run a manifest lists (`interval_append.manifest`). */
 interface IvRun { key: string; first: string; last: string; level: number; scans: string[] }
 /** `attribution`: in an attributed lineage, the run scans the attribution table covers (specs/attr-interval-table.md). */
-/** `changes`: the run scans' change counters (`interval_changes`, specs/change-metrics.md §10.2). */
-interface IvManifest { gen: string; date: string; scans: string[]; stamps: Record<string, number>; runs: IvRun[]; attribution?: string[]; changes?: Record<string, ChangeEntry> }
+interface IvManifest { gen: string; date: string; scans: string[]; stamps: Record<string, number>; runs: IvRun[]; attribution?: string[] }
 /** The store's scans (id → epoch), the base's alone, and the usable runs (oldest first). `cut`: a broken run cut the
  *  stack; `refused`: the scans it cut out (its and every later run's) → that run's key. `slices`: the generation has
  *  the owner axis (its slice sorts). `atBase`: its base has the attribution table (`served/attribution.parquet`);
  *  `attribution`: the scans the table covers (the base's covered scans, and the usable runs' the manifest names); a run
  *  holds the table's sort when one of its scans is covered. */
-/** `runChanges`: the usable runs' change counters, from the manifest (the generation's own: `ivChanges`, read apart). */
-interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; refused: Map<string, string>; slices: boolean; atBase: boolean; attribution: Set<string>; churn: number | null; runChanges: Map<string, ChangeEntry> }
+interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; refused: Map<string, string>; slices: boolean; atBase: boolean; attribution: Set<string>; churn: number | null }
 /** How long a state stands before the manifests are listed again (a new scan's run shows up within it). */
 export const IV_STATE_TTL = 60_000
 /** How long a broken run stays cut out (then it is tried again: a publish caught mid-copy heals). */
@@ -953,37 +950,6 @@ export function churnFrom(scans: { ts: number; version?: number }[]): number | n
   return at
 }
 
-/** A generation's own change counters (`<gen>/changes.json`: its build's, a compaction's, a backfill's), read only by
- *  what serves them (`ivChanges`), never on a state load: a view or diff pays nothing for them. A generation's file is
- *  written once and never rewritten: held for the isolate's life once read, its absence `IV_STATE_TTL` (a backfill adds
- *  it later). */
-const ivGenChanges = new IsoMap<string, { at: number; p: Promise<Record<string, ChangeEntry> | null> }>('ivGenChanges')
-function genChanges(env: Env): Promise<Record<string, ChangeEntry> | null> {
-  const k = ivGenKey(env)
-  const cur = ivGenChanges.get(k)
-  if (cur && (Date.now() - cur.at < IV_STATE_TTL)) return cur.p
-  const p = readerObjects(env)!.get(`${ivPrefix(env)}/${env.INTERVAL_STORE_GEN}/changes.json`)
-    .then(async o => (o ? (await o.json<{ scans: Record<string, ChangeEntry> }>()).scans : null))
-  const entry = { at: Date.now(), p }
-  ivGenChanges.set(k, entry)
-  // held for good once present; a failed read is forgotten (the next request reads again)
-  p.then(got => { if (got) entry.at = Infinity }, () => { if (ivGenChanges.get(k) === entry) ivGenChanges.delete(k) })
-  return p
-}
-
-/** The store's change counters per scan (specs/change-metrics.md §10.3): the generation's own (`changes.json`) and its
- *  usable runs' (the manifest's), for the scans the store holds; null when the interval store is off. A scan without
- *  counters (before the churn base, or appended before them and never backfilled) is absent. */
-export async function ivChanges(env: Env): Promise<ReadonlyMap<string, ChangeEntry> | null> {
-  if (!intervalsOn(env)) return null
-  // The flows decorate a series: an unreadable file leaves its scans without them (and keys the answer so), never fails it.
-  const own0 = genChanges(env).catch(e => { console.log(`interval store: no changes.json: ${(e as Error).message}`); return null })
-  const [st, own] = await Promise.all([ivState(env), own0])
-  const out = new Map(Object.entries(own ?? {}).filter(([s]) => st.scans.has(s)))
-  for (const [s, e] of st.runChanges) out.set(s, e)
-  return out
-}
-
 /** The interval store's churn base (`IvStateDoc.churn`): null when it is off or its generation carries no churn. */
 export async function ivChurnFrom(env: Env): Promise<number | null> {
   return intervalsOn(env) ? (await ivState(env)).churn : null
@@ -1012,9 +978,7 @@ async function loadIvState(env: Env, fresh = false): Promise<IvState> {
     }
     for (const x of r.scans) if (!scans.has(x)) refused.set(x, cutAt)
   }
-  // The usable runs' change counters (a scan a broken run cut out has none).
-  const runChanges = new Map(Object.entries(m?.changes ?? {}).filter(([s]) => scans.has(s) && !base.has(s)))
-  return { scans, base, runs, cut: cutAt != null, refused, slices: doc.slices !== false, atBase: !!doc.attribution?.base, attribution, churn: doc.churn ?? null, runChanges }
+  return { scans, base, runs, cut: cutAt != null, refused, slices: doc.slices !== false, atBase: !!doc.attribution?.base, attribution, churn: doc.churn ?? null }
 }
 
 /** How old a held state must be before a miss may re-read it past both caches (`ivState`'s `fresh`): at most one

@@ -9,12 +9,6 @@
  * With `OWNER_HISTORY_BATCH=1`, a lens / owner / class scoped series is read `SERIES_CHUNK` scans a request (its cost
  * model is there): no `chunk` answers the newest window and `chunks: n`; `chunk=i` (0 ≤ i < n, oldest first) the rest.
  *
- * Change flows (specs/change-metrics.md §4.1): on the unscoped series of the root or a depth-1 path (no `lens`, `o`,
- * `cl`, `q`, `paths`), each scan the interval store counted carries its objects `added`, `deleted` and `modified` since
- * the scan before it, and their bytes (`added_bytes`, …; `since` where that scan isn't the point before), and the body
- * `changes: {from, mods_by}`; `split=roots` traces carry their root's. A group sums its members' per scan, a union each
- * member's at the instants it scanned (never carried forward). No new parameter: a store's `series_scope` reader gets them.
- *
  * One point per scan the index knows: P's own row in that scan's coarsest
  * tier that holds it (or the floor-free tier), scoped per row like a view's
  * root. Nothing is precomputed per prefix and nothing is floored: a path
@@ -28,7 +22,7 @@
 import { hiddenNotFound, isHidden, restrictedGroupRefused, restrictedScopeRefused, restrictedSearchRefused, restrictionAnyStore, restrictionFor, scopeReachesHidden } from '../_lib/restrict.js'
 import { baseReadScope, baseScope, type Ctx, type Identity, identify, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
-import { ivChanges, ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
+import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, ownerKey, ownerOk, type OwnerScope, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticCompound, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
@@ -40,7 +34,7 @@ import { type Hit, scanAt } from '../_lib/staticNames.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
 import { SERIES_CHUNK, SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
-import { changesNote, metaRoots, rootPoints, type RootRow, type SeriesPoint, type SeriesTrace, stepFlows, withFlows, wirePoint, wireTraces } from '../_lib/series.js'
+import { metaRoots, rootPoints, type RootRow, type SeriesPoint, type SeriesTrace, wirePoint, wireTraces } from '../_lib/series.js'
 import { cutoffOf, latestCutoff, memberOf, memberRequest, membersAt, namesCutoff, openUnion, unionFor } from '../_lib/union.js'
 import type { UnionView } from '../_lib/stores.js'
 import { scanTimes } from '../_lib/scanTimes.js'
@@ -224,9 +218,7 @@ async function unionSeries(ctx0: SeriesCtx, view: UnionView): Promise<Response> 
     const date = values.find((v, i) => v && traces[i].points.some(p => p.at === at && p.value === v))!.date
     const missing = view.members.filter((_, i) => !values[i])
     if (split) byDate.set(date, values.flatMap(v => v?.rows ?? []))
-    // Flows are each scan's own: the members that scanned here, never carried forward (`stepFlows`).
-    const ch = stepFlows(at, values, traces)
-    return wirePoint({ date, b: values.reduce((n, v) => n + (v?.bytes ?? 0), 0), o: values.reduce((n, v) => n + (v?.objects ?? 0), 0), ...(ch ? { ch } : {}), ...(missing.length ? { missing } : {}) })
+    return wirePoint({ date, b: values.reduce((n, v) => n + (v?.bytes ?? 0), 0), o: values.reduce((n, v) => n + (v?.objects ?? 0), 0), ...(missing.length ? { missing } : {}) })
   })
   const failed = bodies.flatMap(b => b.failed ?? []).sort()
   const body = JSON.stringify({
@@ -247,10 +239,6 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   if (ctx1 instanceof Response) return ctx1
   return seriesRead(await withPathStore(ctx1), summaryGate)
 }
-
-/** The change flows' shape version in the series' cache key (specs/change-metrics.md §4.1): bodies cached before it
- *  have none, and the key's other inputs (the scans, their generations) don't move when a store starts counting. */
-export const SERIES_FLOWS_V = 1
 
 /** The only params a store's `series_scope` reads with: the store's root, unscoped (`STORES_JSON` `series_scope`). */
 const SUMMARY_PARAMS = new Set(['store'])
@@ -368,11 +356,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   // chart load re-read one point per scan (≈8 rounds of D1 + range reads for
   // a 94-scan history, 5–20 s) while the diff beside it was a cache hit.
   const g = await st.time('gens', pathGens(env, dates))
-  // Change flows: the unscoped series of the root or a depth-1 path (`ivChanges`: the store's counted scans). Keyed by
-  // how many are counted: a backfill counts a generation's scans without a new scan.
-  const flowable = !lens && !owner && !classes && !keyed && !paths.length && !path.includes('/')
-  const changes = flowable ? await st.time('changes', ivChanges(env)) : null
-  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${keyed ? qp.syntax : ''}&q=${encodeURIComponent(keyed ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, keyed)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&ch=${!chunked ? '' : chunkRaw ?? `n${nChunks}`}&fl=${changes ? `${SERIES_FLOWS_V}.${changes.size}` : ''}`, storeKey(env))
+  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${keyed ? qp.syntax : ''}&q=${encodeURIComponent(keyed ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, keyed)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&ch=${!chunked ? '' : chunkRaw ?? `n${nChunks}`}`, storeKey(env))
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 
@@ -507,10 +491,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
     for (const g of got) if (g) points.push(g)
   }
   points.sort((a, b) => a.date.localeCompare(b.date))
-  const flowed = changes ? withFlows(points, path, changes) : points
-  const note = changes ? changesNote(points, path, changes) : null
-  const roots = split ? rootPoints(rootsByDate).map(t => (changes ? { ...t, points: withFlows(t.points, t.path, changes) } : t)) : null
-  const body = JSON.stringify({ path, ...(chunked && chunkRaw == null ? { chunks: nChunks } : {}), ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points: flowed.map(wirePoint), ...(note ? { changes: note } : {}), ...(roots ? { roots: wireTraces(roots) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
+  const body = JSON.stringify({ path, ...(chunked && chunkRaw == null ? { chunks: nChunks } : {}), ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points: points.map(wirePoint), ...(split ? { roots: wireTraces(rootPoints(rootsByDate)) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
   // A series missing points to errors is served (gaps beat no chart) but never cached: the next request retries them.
   if (failed.length) return new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'server-timing': st.header() } })
   return cacheStore(env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
