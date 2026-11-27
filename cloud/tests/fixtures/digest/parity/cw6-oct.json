@@ -55,7 +55,8 @@
     "extra": {
      "hot-data": 40.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-29T1801",
@@ -64,7 +65,8 @@
     "extra": {
      "hot-data": 40.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    }
   ],
   "lead": [
@@ -75,7 +77,8 @@
     "extra": {
      "hot-data": 40.5
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-09-30T0601",
@@ -84,7 +87,8 @@
     "extra": {
      "hot-data": 41.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    }
   ],
   "rows": [
@@ -95,7 +99,8 @@
     "extra": {
      "hot-data": 41.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-10-01T0601",
@@ -104,7 +109,8 @@
     "extra": {
      "hot-data": 42.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-10-01T1201",
@@ -113,7 +119,8 @@
     "extra": {
      "hot-data": 42.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-10-01T1801",
@@ -122,7 +129,8 @@
     "extra": {
      "hot-data": 42.5
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-10-02T0001",
@@ -131,7 +139,8 @@
     "extra": {
      "hot-data": 43.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-10-02T0601",
@@ -140,7 +149,8 @@
     "extra": {
      "hot-data": 43.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    },
    {
     "scan": "2026-10-02T1201",
@@ -149,7 +159,8 @@
     "extra": {
      "hot-data": 43.0
     },
-    "classes": null
+    "classes": null,
+    "objs": 1000000
    }
   ]
  },
@@ -162,47 +173,58 @@
   "points": [
    {
     "scan": "2026-09-29T1201",
-    "bytes": 879609302220800
+    "bytes": 879609302220800,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-29T1801",
-    "bytes": 880708813848576
+    "bytes": 880708813848576,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-30T0001",
-    "bytes": 883457592918016
+    "bytes": 883457592918016,
+    "objects": 1000000
    },
    {
     "scan": "2026-09-30T0601",
-    "bytes": 885106860359680
+    "bytes": 885106860359680,
+    "objects": 1000000
    },
    {
     "scan": "2026-10-01T0001",
-    "bytes": 868614185943040
+    "bytes": 868614185943040,
+    "objects": 1000000
    },
    {
     "scan": "2026-10-01T0601",
-    "bytes": 866635065013043
+    "bytes": 866635065013043,
+    "objects": 1000000
    },
    {
     "scan": "2026-10-01T1201",
-    "bytes": 874111744081920
+    "bytes": 874111744081920,
+    "objects": 1000000
    },
    {
     "scan": "2026-10-01T1801",
-    "bytes": 878509790593024
+    "bytes": 878509790593024,
+    "objects": 1000000
    },
    {
     "scan": "2026-10-02T0001",
-    "bytes": 901599534776320
+    "bytes": 901599534776320,
+    "objects": 1000000
    },
    {
     "scan": "2026-10-02T0601",
-    "bytes": 912594651054080
+    "bytes": 912594651054080,
+    "objects": 1000000
    },
    {
     "scan": "2026-10-02T1201",
-    "bytes": 947779023142912
+    "bytes": 947779023142912,
+    "objects": 1000000
    }
   ],
   "units": "TiB",

@@ -36,6 +36,8 @@ export interface DigestPoint {
   /** Epoch ms of the scan. */
   t: number
   bytes: number
+  /** The scan's object count: drawn under the bytes when every point has it (specs/change-metrics.md §10.1). */
+  objects?: number
 }
 
 export interface DigestCardInput {
@@ -178,14 +180,77 @@ function leaves(n: DiffNode, out: DiffNode[] = []): DiffNode[] {
   return out
 }
 
-/** The digest image's SVG, `DIGEST_W` wide (its height in the `height` attribute). */
+/** The objects panel's height, under the bytes chart. */
+const COUNT_H = 110
+const COUNT = '#e3b341'
+
+/** A count in a few characters: whole below 10,000 (`9,120`), else three significant figures and a suffix (`812K`,
+ *  `1.24M`, `3.1B`). */
+export function fmtCount(n: number): string {
+  const a = Math.abs(n)
+  if (a < 10_000) return Math.round(n).toLocaleString('en-US')
+  const units = [[1e3, 'K'], [1e6, 'M'], [1e9, 'B'], [1e12, 'T']] as const
+  for (let i = units.length - 1; i >= 0; i--) {
+    const [div, s] = units[i]
+    if (a < div) continue
+    const v = Number((n / div).toPrecision(3))
+    // 999,999 rounds to 1,000K: the next unit up says it
+    return Math.abs(v) >= 1000 && i + 1 < units.length ? `${Number((n / units[i + 1][0]).toPrecision(3))}${units[i + 1][1]}` : `${v}${s}`
+  }
+  return String(n)
+}
+
+/** The object count over `d.points` (each has `objects`), on its own autofit axis under the bytes chart: whole-number
+ *  ticks, Monday ticks, the month shading (unlabelled: the chart above names the months) and the latest call-out. */
+function countSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: number): string {
+  const out: string[] = []
+  const pts = d.points
+  const vals = pts.map(p => p.objects!)
+  let [lo, hi] = yRange(vals, null)
+  const ticks = niceTicks(lo, hi, 4).filter(v => Number.isInteger(v))
+  if (ticks.length) lo = Math.min(lo, ticks[0])
+  const f = frame(d, x0, w)
+  const { left, pw, X } = f
+  const Y = (v: number) => y0 + h - ((v - lo) / (hi - lo)) * h
+  out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
+  out.push(...monthShade(d, f, y0, h, false))
+  for (const v of ticks) {
+    if (v < lo || v > hi) continue
+    out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
+    out.push(text(left - 6, Y(v) + 4, fmtCount(v), 11, { fill: INK3, anchor: 'end' }))
+  }
+  out.push(...mondays(d, X, y0 + h))
+  out.push(text(left + 6, y0 + 14, 'objects', 11, { fill: INK3 }))
+  if (!pts.length) return out.join('')
+  const line = pts.map(p => `${r1(X(p.t))},${r1(Y(p.objects!))}`).join(' ')
+  const first = pts[0]
+  const last = pts[pts.length - 1]
+  out.push(`<polygon points="${r1(X(first.t))},${r1(y0 + h)} ${line} ${r1(X(last.t))},${r1(y0 + h)}" fill="${COUNT}" fill-opacity="0.12"/>`)
+  out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(first.objects!))}" y2="${r1(Y(first.objects!))}" stroke="${INK3}" stroke-opacity="0.6" stroke-dasharray="4 4"/>`)
+  out.push(`<polyline points="${line}" fill="none" stroke="${COUNT}" stroke-width="2" stroke-linejoin="round"/>`)
+  const lx = X(last.t)
+  const ly = Y(last.objects!)
+  out.push(`<circle cx="${r1(lx)}" cy="${r1(ly)}" r="3.5" fill="${COUNT}"/>`)
+  const call = `${fmtCount(last.objects!)} objects`
+  const right = lx + 10 + interWidth(call, 13, 600) <= left + pw
+  out.push(text(right ? lx + 10 : lx - 10, ly + 5, call, 13, { weight: 600, anchor: right ? 'start' : 'end' }))
+  return out.join('')
+}
+
+/** The digest image's SVG, `DIGEST_W` wide (its height in the `height` attribute): the usage chart, the object count
+ *  under it when every point has one (the chart's dates then under the count), and the diff map. */
 export function digestSvg(d: DigestCardInput): string {
   const w = DIGEST_W - 2 * PAD
   const { fmt } = UNITS[d.units ?? 'TiB']
   const out = [header(d.title, d.note)]
   let y = PAD + 36
-  out.push(chartSvg(d, PAD, y, w, CHART_H))
-  y += CHART_H + 30
+  const counts = d.points.length > 0 && d.points.every(p => p.objects !== undefined)
+  out.push(chartSvg(d, PAD, y, w, CHART_H, { xLabels: !counts }))
+  y += CHART_H + (counts ? 12 : 30)
+  if (counts) {
+    out.push(countSvg(d, PAD, y, w, COUNT_H))
+    y += COUNT_H + 30
+  }
   if (d.diff) y = diffSection(d.diff, fmt, y, out)
   return page(y, out)
 }

@@ -72,6 +72,18 @@ describe('parseDigestRequest: usage', () => {
     })
     expect(parseDigestRequest({ ...usage, kind: 'usage' })).toEqual(parseDigestRequest(usage))
   })
+  it('takes each point\'s object count, on every point or none', () => {
+    const counted = { ...usage, points: [{ scan: '2026-10-01T0800', bytes: 15e12, objects: 1_250_000 }, { scan: '2026-09-30T0800', bytes: 14e12, objects: 1_200_000 }] }
+    const ok = parseDigestRequest(counted)
+    expect(typeof ok === 'string' ? ok : ok.kind === 'usage' && ok.points).toEqual([
+      { t: Date.UTC(2026, 8, 30, 8), bytes: 14e12, objects: 1_200_000 }, { t: Date.UTC(2026, 9, 1, 8), bytes: 15e12, objects: 1_250_000 },
+    ])
+    expect([
+      { ...counted, points: [counted.points[0], usage.points[1]] },
+      { ...counted, points: [{ ...counted.points[0], objects: -1 }, counted.points[1]] },
+      { ...counted, points: [{ ...counted.points[0], objects: 1.5 }, counted.points[1]] },
+    ].map(parseDigestRequest)).toEqual(['points: objects on every point or none', 'points: objects, a count', 'points: objects, a count'])
+  })
   it('drops a malformed quota, and takes no diff', () => {
     expect(parseDigestRequest({ ...usage, quota: { bytes: '1' }, diff: null, units: undefined })).toEqual({
       kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TiB', part: 'whole',
