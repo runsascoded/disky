@@ -215,13 +215,19 @@ def test_cli_saves_the_run_and_rereads_unsettled_reports(tmp_path, monkeypatch):
 def test_billed_sql_names_the_deployments_labelled_jobs():
     from dt_cloud.scan_cost import billed_sql
 
-    sql = billed_sql("p.billing_export.t", 9, "cw")
-    assert [ln.strip() for ln in sql.splitlines() if "EXISTS" in ln or "FROM" in ln.lstrip()[:4]] == [
+    # the export's `batch-job-id` is a job's name, `batch-job-uid` its uid; a run's head carries no `scan_run`: by its uid
+    sql = billed_sql("p.billing_export.t", 9, "cw", ["root-b", "root-a"])
+    assert [ln.strip() for ln in sql.splitlines() if "UNNEST(labels)" in ln or "FROM" in ln.lstrip()[:4]] == [
+        "(SELECT value FROM UNNEST(labels) WHERE key = 'batch-job-uid') AS job_uid,",
         "FROM `p.billing_export.t`",
-        "AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'batch-job-id')",
-        "AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'scan_run')",
+        "AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'batch-job-uid')",
+        "AND (EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'scan_run')",
+        "OR (SELECT value FROM UNNEST(labels) WHERE key = 'batch-job-uid') IN ('root-a', 'root-b'))",
         "AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'deployment' AND value = 'cw')",
     ]
+    with pytest.raises(ValueError) as e:
+        billed_sql("p.d.t", 9, "cw", ["x') OR TRUE --"])
+    assert str(e.value) == "not a Batch job uid: \"x') OR TRUE --\""
     with pytest.raises(ValueError) as e:
         billed_sql("p.d.t; DROP", 9, "cw")
     assert str(e.value) == "billing table 'p.d.t; DROP': expected project.dataset.table"

@@ -280,9 +280,14 @@ def build_report(profile: Profile, jobs: Sequence[Mapping], run_id: str, scan: s
     return report(profile, root, scan, selected, tasks, _now() if now is None else now)
 
 
-def billed_sql(table: str, days: int, deployment: str) -> str:
+#: A Batch job uid as the billing export's `batch-job-uid` label carries it (its `batch-job-id` is the job's name).
+JOB_UID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+
+
+def billed_sql(table: str, days: int, deployment: str, roots: Sequence[str] = ()) -> str:
     """The billing export's (`table`) net cost (cost + credits) per Batch job of `deployment` over the last `days` days,
-    of the jobs a scan run labelled (`scan_run`): `job_uid`, `net`, `last_day` (its latest usage day). The export is
+    of the jobs a scan run labelled (`scan_run`) and the runs' own head jobs (`roots`, their uids: a head carries no
+    `scan_run`): `job_uid` (the `batch-job-uid` label), `net`, `last_day` (its latest usage day). The export is
     ingestion-time partitioned (`_PARTITIONTIME` prunes it) and lags about a day."""
     from .cost_labels import TABLE_RE, check_label
 
@@ -291,16 +296,19 @@ def billed_sql(table: str, days: int, deployment: str) -> str:
     if days < 1:
         raise ValueError(f"days: {days} < 1")
     check_label("deployment", deployment)
+    if bad := [r for r in roots if not JOB_UID.fullmatch(r)]:
+        raise ValueError(f"not a Batch job uid: {bad[0]!r}")
+    heads = f"\n    OR (SELECT value FROM UNNEST(labels) WHERE key = 'batch-job-uid') IN ({', '.join(repr(r) for r in sorted(roots))})" if roots else ""
     since = f"TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {int(days)} DAY)"
     return f"""SELECT
-  (SELECT value FROM UNNEST(labels) WHERE key = 'batch-job-id') AS job_uid,
+  (SELECT value FROM UNNEST(labels) WHERE key = 'batch-job-uid') AS job_uid,
   SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) AS c), 0)) AS net,
   MAX(DATE(usage_start_time)) AS last_day
 FROM `{table.replace(":", ".")}`
 WHERE _PARTITIONTIME >= TIMESTAMP_TRUNC({since}, DAY)
   AND usage_start_time >= {since}
-  AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'batch-job-id')
-  AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'scan_run')
+  AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'batch-job-uid')
+  AND (EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'scan_run'){heads})
   AND EXISTS (SELECT 1 FROM UNNEST(labels) WHERE key = 'deployment' AND value = '{deployment}')
 GROUP BY job_uid"""
 
@@ -397,11 +405,12 @@ def cost_cmd(
             from .cost_labels import deployment_labels, query_rows
 
             dep = deployment or deployment_labels(dict(os.environ))["deployment"]
-            billed = {uid: net for uid, net, _ in query_rows(billed_sql(billing_table, refresh_days + 2, dep), profile.project,
-                                                              parse=billed_rows)}
             # every saved report of the window, settled or not: the export's lines for a job arrive a day after it ran
             for s_, uid in saved(stores[0], refresh_days, now):
                 docs.setdefault((s_, uid), stores[0].read_json(report_key(s_, uid)))
+            roots = sorted({uid for _, uid in docs})
+            billed = {uid: net for uid, net, _ in query_rows(billed_sql(billing_table, refresh_days + 2, dep, roots), profile.project,
+                                                              parse=billed_rows)}
             docs = {k: with_billed(d, billed) for k, d in docs.items()}
         for (s_, uid), d in sorted(docs.items()):
             data = (json.dumps(d, indent=2, sort_keys=True) + "\n").encode()

@@ -67,6 +67,12 @@ DELETE_BATCH = 250
 #: `DeleteObjects` calls in flight (`execute_plan`'s default; `plan-sweep execute -w`): the throughput lever, since a
 #: call's items are checked serially. The S3 client's connection pool is sized to match (`s3_client`).
 DELETE_WORKERS = 32
+#: An item a `DeleteObjects` reply refuses with one of these (the store throttling or failing, inside a 200 reply: not
+#: an exception botocore's retries see) is sent again, alone with its kind, up to `ITEM_RETRIES` more times with backoff
+#: (its ETag precondition still on it), before it counts as `delete_failed`.
+TRANSIENT_ITEM_ERRORS = frozenset({"SlowDown", "InternalError", "ServiceUnavailable", "RequestTimeout", "500", "503"})
+ITEM_RETRIES = 3
+ITEM_BACKOFF_S = 2.0
 
 #: Endpoint host suffixes of stores whose `DeleteObjects` ignores the per-item `ETag` and deletes anyway, with no error:
 #: R2 (the owned canary, 2026-11-26; specs/delete-preconditions.md §1). `execute_plan` deletes only in that form, so a
@@ -390,7 +396,8 @@ def execute_plan(
     Deletes go `DELETE_BATCH` keys per `DeleteObjects` call, `delete_workers` calls in flight, each item carrying its reviewed
     ETag as a precondition (CAIOS enforces it per item: specs/delete-preconditions.md). An item refused on it
     (`PreconditionFailed`: rewritten since the listing) is `skipped_overwritten`; any other item error, an item the reply
-    doesn't answer, or a call that fails outright (after botocore's retries) is `delete_failed`. Nothing is ever retried
+    doesn't answer, or a call that fails outright (after botocore's retries) is `delete_failed`; an item refused as the store
+    throttling (`TRANSIENT_ITEM_ERRORS`) is first sent again, up to `ITEM_RETRIES` times. Nothing is ever retried
     without its ETag.
 
     `min_soft_delete_days` (`/admin`'s minimum): above 0, a real run refuses a bucket retaining less, or one it can't read.
@@ -525,17 +532,28 @@ def execute_plan(
             log_rows.append((key, size, mtime, "skipped_gone", _dir_of(key), band))
 
     def _apply(chunk: list[tuple[str, int, str]]) -> list[tuple[tuple[str, int, str], str]]:
-        try:
-            resp = client.delete_objects(Bucket=bucket, Delete={
-                "Objects": [{"Key": key, "ETag": manifest[key][2]} for key, _, _ in chunk], "Quiet": False,
-            })
-        except ClientError as e:
-            print(f"WARN: delete batch of {len(chunk)} failed: {e.response['Error'].get('Code')}", file=sys.stderr)
-            return [(item, "delete_failed") for item in chunk]
-        deleted = {d["Key"] for d in resp.get("Deleted", [])}
-        errors = {e["Key"]: str(e.get("Code", "")) for e in resp.get("Errors", [])}
-        return [(item, "skipped_overwritten" if errors.get(item[0]) in ("PreconditionFailed", "412")
-                 else "delete_failed" if item[0] in errors or item[0] not in deleted else "delete") for item in chunk]
+        out: list[tuple[tuple[str, int, str], str]] = []
+        for attempt in range(ITEM_RETRIES + 1):
+            try:
+                resp = client.delete_objects(Bucket=bucket, Delete={
+                    "Objects": [{"Key": key, "ETag": manifest[key][2]} for key, _, _ in chunk], "Quiet": False,
+                })
+            except ClientError as e:
+                print(f"WARN: delete batch of {len(chunk)} failed: {e.response['Error'].get('Code')}", file=sys.stderr)
+                return out + [(item, "delete_failed") for item in chunk]
+            deleted = {d["Key"] for d in resp.get("Deleted", [])}
+            errors = {e["Key"]: str(e.get("Code", "")) for e in resp.get("Errors", [])}
+            again = [item for item in chunk if errors.get(item[0]) in TRANSIENT_ITEM_ERRORS] if attempt < ITEM_RETRIES else []
+            out += [(item, "skipped_overwritten" if errors.get(item[0]) in ("PreconditionFailed", "412")
+                     else "delete_failed" if item[0] in errors or item[0] not in deleted else "delete")
+                    for item in chunk if item not in again]
+            if not again:
+                return out
+            print(f"WARN: {len(again)} of {len(chunk)} refused ({errors[again[0][0]]}): retrying them in {ITEM_BACKOFF_S * 2 ** attempt:g}s",
+                  file=sys.stderr)
+            time.sleep(ITEM_BACKOFF_S * 2 ** attempt)
+            chunk = again
+        return out
 
     with prog_lock:
         prog["decisions"].update(skipped_gone=counters["skipped_gone"], skipped_overwritten=counters["skipped_overwritten"])
