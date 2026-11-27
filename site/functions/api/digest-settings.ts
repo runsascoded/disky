@@ -10,11 +10,13 @@
  * and new row to `admin_edits`. A D1 without the table reads as no row (the job keeps its file's values). A template's
  * old name (`cw`, `gcs`: `TEMPLATE_ALIASES`) reads and writes its name's row. `variant` is the deployment default for
  * a new month's thread (null: the config file's); it never changes a thread that exists (specs/digest-thread-variant.md:
- * that's a switch, `/api/digest-threads`). */
+ * that's a switch, `/api/digest-threads`). Before the `digest-thread-variant` recipe it reads as null, and a PUT setting
+ * one is a 503. */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
 import { parseParams } from '../../src/digest/codec.js'
 import { canonicalTemplate, TEMPLATE_ALIASES, TEMPLATES, VARIANTS } from '../../src/digest/templates.js'
+import { hasThreadVariant, recipeMissing } from '../_lib/digestRecipe.js'
 
 export const TABLE = 'digest_settings'
 /** `digest.QUOTA_MARKS`: keep identical. */
@@ -33,7 +35,8 @@ const aliasOf = (template: string): string => Object.keys(TEMPLATE_ALIASES).find
  *  half once every deployment's D1 has the recipe. */
 export async function getSettings(db: D1Database, template: string): Promise<DigestSettings | null> {
   try {
-    const row = await db.prepare(`SELECT template, params, quota_marks, variant, updated_by, updated_at FROM ${TABLE} WHERE template IN (?, ?)
+    const variant = await hasThreadVariant(db) ? 'variant' : 'NULL AS variant'
+    const row = await db.prepare(`SELECT template, params, quota_marks, ${variant}, updated_by, updated_at FROM ${TABLE} WHERE template IN (?, ?)
                                   ORDER BY updated_at DESC, template = ? DESC LIMIT 1`)
       .bind(template, aliasOf(template), template).first<DigestSettings>()
     return row && { ...row, template }
@@ -65,13 +68,19 @@ export function parseSettings(b: unknown): SettingsReq | string {
 export async function putSettings(db: D1Database, s: SettingsReq, who: string, ts: number): Promise<DigestSettings> {
   const old = await getSettings(db, s.template)
   const row: DigestSettings = { ...s, updated_by: who, updated_at: ts }
+  // before the recipe (only a null variant gets here: `onRequestPut`), the row as it was
+  const v = await hasThreadVariant(db)
   await db.batch([
     // the transition write: the row lands under the name, and its old name's row (read in its place until now) goes
     db.prepare(`DELETE FROM ${TABLE} WHERE template = ? AND template != ?`).bind(aliasOf(row.template), row.template),
-    db.prepare(`INSERT INTO ${TABLE} (template, params, quota_marks, variant, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+    v ? db.prepare(`INSERT INTO ${TABLE} (template, params, quota_marks, variant, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (template) DO UPDATE SET params = excluded.params, quota_marks = excluded.quota_marks,
                   variant = excluded.variant, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
-      .bind(row.template, row.params, row.quota_marks, row.variant, row.updated_by, row.updated_at),
+      .bind(row.template, row.params, row.quota_marks, row.variant, row.updated_by, row.updated_at)
+      : db.prepare(`INSERT INTO ${TABLE} (template, params, quota_marks, updated_by, updated_at) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (template) DO UPDATE SET params = excluded.params, quota_marks = excluded.quota_marks,
+                  updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+      .bind(row.template, row.params, row.quota_marks, row.updated_by, row.updated_at),
     db.prepare('INSERT INTO admin_edits (tbl, pk, action, who, ts, old_json, new_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .bind(TABLE, row.template, old ? 'update' : 'insert', who, ts, old ? JSON.stringify(old) : null, JSON.stringify(row)),
   ])
@@ -93,6 +102,7 @@ export const onRequestPut = async (ctx: Ctx): Promise<Response> => {
   const s = parseSettings(await ctx.request.json().catch(() => null))
   if (typeof s === 'string') return json({ error: s }, 400)
   if (!ctx.env.DB) return json({ error: 'not configured (no D1 binding)' }, 503)
+  if (s.variant !== null && !(await hasThreadVariant(ctx.env.DB))) return recipeMissing()
   const who = id.email ?? id.name ?? 'admin'
   return json({ settings: await putSettings(ctx.env.DB, s, who, Math.floor(Date.now() / 1000)) }, 200, { 'cache-control': 'no-store' })
 }

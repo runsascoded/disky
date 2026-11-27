@@ -15,7 +15,8 @@
  * `variant`: a candidate reply style (`-V`). A whole-thread dry run naming another style than the thread's live one is a
  * switch's preview: it writes the switch plan (`<job>.switch.json`, `-j`), which `PUT /api/digest-threads` stores
  * with the admin's switch (specs/digest-thread-variant.md). The job runs as `DT_JOB_NAME` / `DT_JOB_REGION`, so the
- * thread lease it holds names a job the next taker can see has ended.
+ * thread lease it holds names a job the next taker can see has ended. Before the `digest-thread-variant` recipe, runs
+ * read `variant` as null and a POST naming one is a 503.
  *
  * `DIGEST_REAPPLY` (JSON, `ReapplyConfig`) names what's the deployment's: unset, a POST answers 503. The job is its own
  * (`reapplySpec`): its image, the batch config's `REAPPLY_NEEDS` and exactly its secrets, so a deployment can run it
@@ -31,6 +32,7 @@ import { parseParams } from '../../src/digest/codec.js'
 import { canonicalTemplate, TEMPLATES, VARIANTS } from '../../src/digest/templates.js'
 import { QUOTA_MARKS } from './digest-settings.js'
 import { parseSwitchPlan } from './digest-threads.js'
+import { hasThreadVariant, recipeMissing } from '../_lib/digestRecipe.js'
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const DAY_RE = /^(\d{4}-\d{2})-(\d{2})$/
@@ -162,7 +164,8 @@ export function reapplySpec(cfg: BatchConfig, jobSa: string, image: string, scri
 
 type Env = BatchEnv & { DB?: D1Database; JOB_SA?: string; DIGEST_CHANNEL?: string; DIGEST_REAPPLY?: string }
 
-const COLS = 'job_id, month, channel, target, dry_run, params, quota_marks, variant, actor, ts, out'
+/** The run columns, `variant` NULL before the recipe (`hasVariant`). */
+const cols = (hasVariant: boolean): string => `job_id, month, channel, target, dry_run, params, quota_marks, ${hasVariant ? 'variant' : 'NULL AS variant'}, actor, ts, out`
 const row = (r: Record<string, unknown>): ReapplyRun => ({ ...(r as unknown as ReapplyRun), dry_run: !!r.dry_run })
 
 export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
@@ -180,6 +183,8 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   if (!image) return json({ error: notConfigured('digest re-apply', 'DIGEST_REAPPLY.image') }, 503)
   const req = parseReapply(await ctx.request.json().catch(() => null), env.DIGEST_CHANNEL)
   if (typeof req === 'string') return json({ error: req }, 400)
+  const v = await hasThreadVariant(env.DB)
+  if (req.variant !== null && !v) return recipeMissing()
 
   const jobId = `${c.template}-digest-${jobStamp()}z`
   const out = `gs://${cfg.dataBucket}/${runKey(jobId, 'txt')}`
@@ -190,8 +195,8 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const sub = await submitBatch(cfg, token, jobId, spec)
   if (!sub.ok) return json({ error: `batch submit failed (${sub.status})`, detail: sub.text.slice(0, 1000) }, 500)
   const run: ReapplyRun = { ...req, job_id: jobId, actor: id.email ?? id.name ?? 'admin', ts: Math.floor(Date.now() / 1000), out }
-  await env.DB.prepare(`INSERT INTO digest_reapply (${COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(run.job_id, run.month, run.channel, run.target, run.dry_run ? 1 : 0, run.params, run.quota_marks, run.variant, run.actor, run.ts, run.out).run()
+  const vals = [run.job_id, run.month, run.channel, run.target, run.dry_run ? 1 : 0, run.params, run.quota_marks, ...(v ? [run.variant] : []), run.actor, run.ts, run.out]
+  await env.DB.prepare(`INSERT INTO digest_reapply (${cols(v).replace(', NULL AS variant', '')}) VALUES (${vals.map(() => '?').join(', ')})`).bind(...vals).run()
   return json({ run }, 200, { 'cache-control': 'no-store' })
 }
 
@@ -201,6 +206,7 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   const env = ctx.env as unknown as Env
   if (!env.DB) return json({ runs: [] }, 200, { 'cache-control': 'no-store' })
   const job = new URL(ctx.request.url).searchParams.get('job')
+  const COLS = cols(await hasThreadVariant(env.DB))
   if (job === null) {
     const rs = await env.DB.prepare(`SELECT ${COLS} FROM digest_reapply ORDER BY ts DESC LIMIT 20`).all()
     return json({ runs: (rs.results ?? []).map(row) }, 200, { 'cache-control': 'no-store' })

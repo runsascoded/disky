@@ -10,13 +10,15 @@
  * run's switch plan (`gs://<data>/digest/reapply/<plan_job>.switch.json`), never from the request: a switch deletes
  * only replies an admin saw listed. Refused (409) when the plan is another thread's or style's, or older than the row
  * it would replace. Each PUT logs its old and new row to `admin_edits`. Where `SWEEP_DISPATCH` is `"0"` a PUT answers
- * 403: the next converge acts on it. A D1 without the table reads as no row (each thread keeps its live style). */
+ * 403: the next converge acts on it. A D1 without the recipe (`digest-thread-variant`) reads as no row (each thread keeps
+ * its live style), and a PUT there is a 503 naming the recipe. */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
 import { batchConfig, type BatchEnv, notConfigured } from '../_lib/batchConfig.js'
 import { sweepsOff, SWEEPS_OFF } from '../_lib/dispatch.js'
 import { gcpToken } from '../_lib/gcp.js'
 import { TEMPLATES, VARIANTS } from '../../src/digest/templates.js'
+import { hasThreadVariant, recipeMissing } from '../_lib/digestRecipe.js'
 
 export const TABLE = 'digest_threads'
 /** `digest_switch.PLAN_VERSION`: keep identical. */
@@ -119,6 +121,7 @@ export const onRequestPut = async (ctx: Ctx): Promise<Response> => {
   if (typeof req === 'string') return json({ error: req }, 400)
   const env = ctx.env as unknown as Env
   if (!env.DB) return json({ error: 'not configured (no D1 binding)' }, 503)
+  if (!(await hasThreadVariant(env.DB))) return recipeMissing()
   const cfg = batchConfig(env, ['DATA_BUCKET'])
   if ('missing' in cfg) return json({ error: notConfigured('digest thread switch', cfg.missing) }, 503)
   if (!env.GCP_SA_KEY) return json({ error: notConfigured('digest thread switch', 'GCP_SA_KEY') }, 503)
