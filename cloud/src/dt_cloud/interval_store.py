@@ -1717,11 +1717,16 @@ def fold_cmd(bucket, gen, index, mount, mem, per_task, out, threads, profile, sl
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
+# `interval_changes.MTIMES` (which imports this module): what the scans' mtimes say about a rewrite
+@option("-t", "--mtime", type=Choice(("write", "coarse")), default="write", envvar="INTERVAL_STORE_MTIME", show_envvar=True,
+        help="What the scans' mtimes say about a rewrite (the change counters, `interval_changes.MTIME_HELP`): `write` (every write moves it) or `coarse` (shared by many objects: never decides a mod)")
 @option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
-def churn_cmd(bucket, gen, jobs, mem, out, threads, profile, tmp, no_upload) -> None:
+def churn_cmd(bucket, gen, jobs, mem, out, threads, profile, tmp, mtime, no_upload) -> None:
     """Set `churn_cum` on every range's folded path versions (`interval_churn.churn_gen`: a rollup across the ranges, one
-    task, after `fold` and before `cut`), and flag it in `scans.json` (`"churn": true`)."""
+    task, after `fold` and before `cut`), and flag it in `scans.json` (`"churn": true`); then the scans' change counters
+    from the same versions (`interval_changes.gen_counters`, `changes.json`)."""
     from .blobstore import mirror
+    from .interval_changes import DOC, dumps, doc as changes_doc, gen_counters
     from .interval_churn import churn_from, churn_gen, record_churn
 
     store = Store(_bucket(bucket, profile))
@@ -1730,12 +1735,18 @@ def churn_cmd(bucket, gen, jobs, mem, out, threads, profile, tmp, no_upload) -> 
     local = Path(out) / "churn-gen"
     mirror(store, prefix, local, keep=lambda rel: rel.startswith("pvl/") or rel == "ranges.json")
     base = churn_from(scans["scans"])
-    doc = churn_gen(connect(threads, mem, tmp), local, json.loads((local / "ranges.json").read_text())["k"], base["ts"], Path(tmp), jobs=jobs)
+    con = connect(threads, mem, tmp)
+    doc = churn_gen(con, local, json.loads((local / "ranges.json").read_text())["k"], base["ts"], Path(tmp), jobs=jobs)
+    changes = gen_counters(con, local, scans["scans"], identity=has_generation(scans), mtime=mtime)
+    if changes:
+        (local / DOC).write_text(dumps(changes_doc(changes)))
     if not no_upload:
+        if changes:
+            store.put(local / DOC, f"{prefix}/{DOC}")
         store.put_tree(local / "pvl", f"{prefix}/pvl")
         store.write_text(f"{prefix}/scans.json", json.dumps(record_churn(scans), indent=1) + "\n")
         shutil.rmtree(local)
-    print(json.dumps({**doc, "base": base["id"]}), flush=True)
+    print(json.dumps({**doc, "base": base["id"], "changes": len(changes)}), flush=True)
 
 
 def _refuse_overwrite(store: Store, keys: list[str]) -> None:
@@ -1974,7 +1985,7 @@ def verify_cmd(bucket, changes, profile, gen, index, mount, tasks, out, scan_ids
 
 
 #: What the Worker reads: the scans and the served sorts with their group indexes.
-R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "served/slices.", "served/slices-bysize-user.", "served/slices-bytotal.",
+R2_SERVED = ("scans.json", "changes.json", "served/path.", "served/bysize.", "served/reads.", "served/slices.", "served/slices-bysize-user.", "served/slices-bytotal.",
              f"served/{ATTRIBUTION}.", f"served/{LEVEL}.")
 
 

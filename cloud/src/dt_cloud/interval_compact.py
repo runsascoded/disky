@@ -42,6 +42,7 @@ import pyarrow.parquet as pq
 
 from . import append_runner as ar
 from . import interval_append as ia
+from . import interval_changes as ichg
 from .interval_churn import has_churn, with_churn
 from .interval_level import LEVEL_FLAG, leveled, record_level
 from . import interval_store as ist
@@ -471,6 +472,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
         progress(f"{k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s", "sorts")
     sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=None if doc.get("history") else paths, tree=tree)
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
+    # The scans' change counters: the base's own and the runs' (`interval_changes.carried`), never recounted.
+    ichg.write_doc(out / ichg.DOC, ichg.carried(gen_dir, runs, {s["id"] for s in doc["scans"]}))
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats
 
