@@ -3606,7 +3606,13 @@ def _digest(
         return
     if dry_run and not selected:
         if switch:
-            plan = ds.switch_plan(tpl, root, m, channel, states, live, variant)
+            # the thread read once (the people's replies it would move, what deleted replies lose) with the bot token, and
+            # each deleted reply's links searched with a user token (`SLACK_SEARCH_TOKEN`, `search:read`), when there are
+            from thrds.slack import SlackClient
+
+            bot = secret(token, "SLACK_BOT_TOKEN")
+            plan = ds.switch_plan(tpl, root, m, channel, states, live, variant, client=SlackClient(bot, channel) if bot else None,
+                                  search=ds.link_search(secret(None, "SLACK_SEARCH_TOKEN")))
             print(ds.format_switch_plan(plan))
             if plan_path:
                 ds.write_switch_plan(plan_path, plan)

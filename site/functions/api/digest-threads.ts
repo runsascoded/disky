@@ -1,15 +1,17 @@
 /** A digest thread's reply style per month (specs/digest-thread-variant.md; D1 `digest_threads`, migration
  * `digest-thread-variant`): an admin's switch on `/admin/slack`, which the job converges to over the thread's live style.
  *
- *   GET /api/digest-threads?channel=<id>&month=YYYY-MM → {thread: {channel, month, variant, deletes, plan_job, updated_by, updated_at} | null}   viewer
- *   PUT /api/digest-threads {channel, month, variant, plan_job} → {thread}                                                                    admin
+ *   GET /api/digest-threads?channel=<id>&month=YYYY-MM → {thread: {channel, month, variant, deletes, edits, reorder, plan_job, updated_by, updated_at} | null}   viewer
+ *   PUT /api/digest-threads {channel, month, variant, plan_job, allow_reorder?} → {thread}                                                                    admin
  *
  * GET is viewer-gated: the job reads it with its grant. A path-restricted link is refused (`RESTRICTED_BLOCKED`): the row
  * names a channel and the digest's message ids. A PUT names the dry run it was reviewed from (`plan_job`, a
- * `digest_reapply` run: a whole-thread preview under the candidate `variant`), and the row's `deletes` come from that
- * run's switch plan (`gs://<data>/digest/reapply/<plan_job>.switch.json`), never from the request: a switch deletes
- * only replies an admin saw listed. Refused (409) when the plan is another thread's or style's, or older than the row
- * it would replace. Each PUT logs its old and new row to `admin_edits`. Where `SWEEP_DISPATCH` is `"0"` a PUT answers
+ * `digest_reapply` run: a whole-thread preview under the candidate `variant`), and the row's `deletes` and `edits` (the
+ * old replies it deletes, and edits in place) come from that run's switch plan
+ * (`gs://<data>/digest/reapply/<plan_job>.switch.json`), never from the request: a switch touches only replies an admin
+ * saw listed. Refused (409) when the plan is another thread's or style's, older than the row it would replace, or would
+ * move people's replies above its new ones (`reorder`) without `allow_reorder`; with it, the row's `reorder` lists
+ * those replies, the only ones the switch may move. Edits and reorders need `digest-thread-switch` (else a 503). Each PUT logs its old and new row to `admin_edits`. Where `SWEEP_DISPATCH` is `"0"` a PUT answers
  * 403: the next converge acts on it. A D1 without the recipe (`digest-thread-variant`) reads as no row (each thread keeps
  * its live style), and a PUT there is a 503 naming the recipe. */
 import type { D1Database } from '@cloudflare/workers-types'
@@ -18,7 +20,7 @@ import { batchConfig, type BatchEnv, notConfigured } from '../_lib/batchConfig.j
 import { sweepsOff, SWEEPS_OFF } from '../_lib/dispatch.js'
 import { gcpToken } from '../_lib/gcp.js'
 import { TEMPLATES, VARIANTS } from '../../src/digest/templates.js'
-import { hasThreadVariant, recipeMissing } from '../_lib/digestRecipe.js'
+import { hasThreadSwitch, hasThreadVariant, recipeMissing, SWITCH_RECIPE } from '../_lib/digestRecipe.js'
 
 export const TABLE = 'digest_threads'
 /** `digest_switch.PLAN_VERSION`: keep identical. */
@@ -30,12 +32,17 @@ const JOB_RE = /^[a-z0-9-]+-digest-\d{8}-\d{6}z$/
 const STYLES = [...new Set(TEMPLATES.flatMap(t => VARIANTS[t]))]
 const NO_STORE = { 'cache-control': 'no-store' }
 
-export interface DigestThread { channel: string; month: string; variant: string; deletes: string[]; plan_job: string; updated_by: string; updated_at: number }
+export interface DigestThread {
+  channel: string; month: string; variant: string; deletes: string[]; edits: string[]; reorder: string[]; plan_job: string; updated_by: string; updated_at: number
+}
 /** A switch plan (`digest_switch.switch_plan`), as the dry run wrote it. */
 export interface SwitchPlan {
   digest_switch: number; month: string; channel: string; from: string; to: string; at: string
+  edit: { key: string; ts: string; to: string; scan: string; was: string; headline: string }[]
   post: { key: string; scan: string; headline: string }[]
-  delete: { key: string; ts: string }[]
+  delete: { key: string; ts: string; reactions?: { name: string; count: number }[]; replies?: number; files?: number; links?: { channel: string; author: string; permalink: string }[] | null }[]
+  reorder: { ts: string; user: string }[]
+  thread_read: boolean; links_checked: boolean; notes: string[]
 }
 
 const missingTable = (e: unknown): boolean => /no such table/.test(String((e as Error)?.message))
@@ -48,14 +55,19 @@ export function parseSwitchPlan(raw: unknown): SwitchPlan | string {
   for (const k of ['month', 'channel', 'from', 'to', 'at']) if (typeof p[k] !== 'string') return `switch plan: ${k}`
   if (!Array.isArray(p.delete) || !p.delete.every(d => typeof d === 'object' && d !== null && typeof (d as { ts?: unknown }).ts === 'string')) return 'switch plan: delete'
   if (!Array.isArray(p.post)) return 'switch plan: post'
-  return p as unknown as SwitchPlan
+  for (const k of ['edit', 'reorder'] as const) {
+    if (!Array.isArray(p[k] ?? []) || !(p[k] as unknown[] ?? []).every(d => typeof d === 'object' && d !== null && typeof (d as { ts?: unknown }).ts === 'string')) return `switch plan: ${k}`
+  }
+  return { edit: [], reorder: [], thread_read: false, links_checked: false, notes: [], ...p } as unknown as SwitchPlan
 }
 
 export async function getThread(db: D1Database, channel: string, month: string): Promise<DigestThread | null> {
   try {
-    const r = await db.prepare(`SELECT channel, month, variant, deletes, plan_job, updated_by, updated_at FROM ${TABLE} WHERE channel = ? AND month = ?`)
-      .bind(channel, month).first<Omit<DigestThread, 'deletes'> & { deletes: string }>()
-    return r && { ...r, deletes: JSON.parse(r.deletes) as string[] }
+    const extra = await hasThreadSwitch(db) ? 'edits, reorder' : 'NULL AS edits, NULL AS reorder'
+    const r = await db.prepare(`SELECT channel, month, variant, deletes, ${extra}, plan_job, updated_by, updated_at FROM ${TABLE} WHERE channel = ? AND month = ?`)
+      .bind(channel, month).first<Omit<DigestThread, 'deletes' | 'edits' | 'reorder'> & { deletes: string; edits: string | null; reorder: string | null }>()
+    const list = (v: string | null): string[] => (v ? JSON.parse(v) as string[] : [])
+    return r && { ...r, deletes: list(r.deletes), edits: list(r.edits), reorder: list(r.reorder) }
   } catch (e) {
     if (missingTable(e)) return null
     throw e
@@ -63,19 +75,20 @@ export async function getThread(db: D1Database, channel: string, month: string):
 }
 
 /** The PUT body, or why it's refused. */
-export function parsePut(b: unknown): { channel: string; month: string; variant: string; plan_job: string } | string {
+export function parsePut(b: unknown): { channel: string; month: string; variant: string; plan_job: string; allow_reorder: boolean } | string {
   if (typeof b !== 'object' || b === null || Array.isArray(b)) return 'body: a JSON object'
-  const { channel, month, variant, plan_job } = b as Record<string, unknown>
+  const { channel, month, variant, plan_job, allow_reorder } = b as Record<string, unknown>
   if (typeof channel !== 'string' || !CHANNEL_RE.test(channel)) return 'channel: a Slack channel id'
   if (typeof month !== 'string' || !MONTH_RE.test(month)) return 'month: YYYY-MM'
   if (typeof variant !== 'string' || !STYLES.includes(variant)) return `variant: ${STYLES.join(' | ')}`
   if (typeof plan_job !== 'string' || !JOB_RE.test(plan_job)) return 'plan_job: the reviewed dry run (<template>-digest-<stamp>z)'
-  return { channel, month, variant, plan_job }
+  if (allow_reorder !== undefined && typeof allow_reorder !== 'boolean') return 'allow_reorder: a boolean'
+  return { channel, month, variant, plan_job, allow_reorder: allow_reorder === true }
 }
 
 /** Why `plan` (the dry run `run`'s) can't back a switch of (`channel`, `month`) to `variant`, or null. `prev`: the row it
  *  would replace. */
-export function planRefusal(req: { channel: string; month: string; variant: string }, run: { month: string; channel: string; target: string; dry_run: number; variant: string | null; ts: number } | null,
+export function planRefusal(req: { channel: string; month: string; variant: string; allow_reorder?: boolean }, run: { month: string; channel: string; target: string; dry_run: number; variant: string | null; ts: number } | null,
   plan: SwitchPlan | string | null, prev: DigestThread | null): string | null {
   if (!run) return 'no such dry run'
   if (!run.dry_run || run.target !== 'thread' || run.variant !== req.variant) return `that run isn't a whole-thread preview under ${req.variant}`
@@ -84,16 +97,21 @@ export function planRefusal(req: { channel: string; month: string; variant: stri
   if (typeof plan === 'string') return plan
   if (plan.channel !== req.channel || plan.month !== req.month || plan.to !== req.variant) return `its plan switches ${plan.month} in ${plan.channel} to ${plan.to}`
   if (prev && prev.updated_at > run.ts) return `the thread's style was set after that preview (by ${prev.updated_by}); preview again`
+  if (plan.reorder.length && !req.allow_reorder) {
+    return `the switch would move ${plan.reorder.length} people's replies above its new ones (${plan.reorder.map(r => `${r.ts} by ${r.user}`).join(', ')}): allow reorder to go ahead`
+  }
   return null
 }
 
-export async function putThread(db: D1Database, row: DigestThread): Promise<DigestThread> {
+/** Write `row` (`switch`: the D1 has `digest-thread-switch`; without it, a row with no edits or reorders). */
+export async function putThread(db: D1Database, row: DigestThread, hasSwitch = true): Promise<DigestThread> {
   const old = await getThread(db, row.channel, row.month)
+  const [cols, vals] = hasSwitch ? [', edits, reorder', [JSON.stringify(row.edits), JSON.stringify(row.reorder)]] : ['', []]
   await db.batch([
-    db.prepare(`INSERT INTO ${TABLE} (channel, month, variant, deletes, plan_job, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (channel, month) DO UPDATE SET variant = excluded.variant, deletes = excluded.deletes, plan_job = excluded.plan_job,
-                  updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
-      .bind(row.channel, row.month, row.variant, JSON.stringify(row.deletes), row.plan_job, row.updated_by, row.updated_at),
+    db.prepare(`INSERT INTO ${TABLE} (channel, month, variant, deletes${cols}, plan_job, updated_by, updated_at) VALUES (?, ?, ?, ?${hasSwitch ? ', ?, ?' : ''}, ?, ?, ?)
+                ON CONFLICT (channel, month) DO UPDATE SET variant = excluded.variant, deletes = excluded.deletes${hasSwitch ? ', edits = excluded.edits, reorder = excluded.reorder' : ''},
+                  plan_job = excluded.plan_job, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+      .bind(row.channel, row.month, row.variant, JSON.stringify(row.deletes), ...vals, row.plan_job, row.updated_by, row.updated_at),
     db.prepare('INSERT INTO admin_edits (tbl, pk, action, who, ts, old_json, new_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .bind(TABLE, `${row.channel}/${row.month}`, old ? 'update' : 'insert', row.updated_by, row.updated_at, old ? JSON.stringify(old) : null, JSON.stringify(row)),
   ])
@@ -138,6 +156,13 @@ export const onRequestPut = async (ctx: Ctx): Promise<Response> => {
   const prev = await getThread(env.DB, req.channel, req.month)
   const why = planRefusal(req, run, plan, prev)
   if (why) return json({ error: why }, run ? 409 : 404, NO_STORE)
-  const row: DigestThread = { ...req, deletes: (plan as SwitchPlan).delete.map(d => d.ts), updated_by: id.email ?? id.name ?? 'admin', updated_at: Math.floor(Date.now() / 1000) }
-  return json({ thread: await putThread(env.DB, row) }, 200, NO_STORE)
+  const p = plan as SwitchPlan
+  const row: DigestThread = {
+    channel: req.channel, month: req.month, variant: req.variant, plan_job: req.plan_job,
+    deletes: p.delete.map(d => d.ts), edits: p.edit.map(e => e.ts), reorder: p.reorder.map(r => r.ts),
+    updated_by: id.email ?? id.name ?? 'admin', updated_at: Math.floor(Date.now() / 1000),
+  }
+  const hasSwitch = await hasThreadSwitch(env.DB)
+  if (!hasSwitch && (row.edits.length || row.reorder.length)) return recipeMissing(SWITCH_RECIPE)
+  return json({ thread: await putThread(env.DB, row, hasSwitch) }, 200, NO_STORE)
 }

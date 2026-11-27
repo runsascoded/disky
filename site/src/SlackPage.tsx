@@ -215,7 +215,13 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
 
 interface Settings { template: string; params: string; quota_marks: string; variant: string | null; updated_by: string; updated_at: number }
 interface Run { job_id: string; month: string; channel: string; target: string; dry_run: boolean; params: string | null; quota_marks: string | null; variant: string | null; actor: string; ts: number }
-interface SwitchPlan { from: string; to: string; post: { key: string; scan: string; headline: string }[]; delete: { key: string; ts: string }[] }
+interface SwitchPlan {
+  from: string; to: string; notes?: string[]; thread_read?: boolean; links_checked?: boolean
+  edit?: { key: string; ts: string; to: string; was: string; headline: string }[]
+  post: { key: string; scan: string; headline: string }[]
+  delete: { key: string; ts: string; reactions?: { name: string; count: number }[]; replies?: number; files?: number; links?: { channel: string; author: string; permalink: string }[] | null }[]
+  reorder?: { ts: string; user: string }[]
+}
 interface RunDetail { run: Run; status: string | null; output: string | null; switch: SwitchPlan | null }
 interface Thread { variant: string; deletes: string[]; plan_job: string; updated_by: string; updated_at: number }
 type Form = { params: string; quota_marks: string; variant: string | null }
@@ -285,6 +291,16 @@ function useRun(job: string | null) {
   })
 }
 
+/** What deleting a reply loses: its reactions, its own replies and files, and the links to it found elsewhere. */
+function lost(d: SwitchPlan['delete'][number]): string {
+  return [
+    ...(d.reactions?.length ? [d.reactions.map(r => `:${r.name}: ${r.count}`).join(' ')] : []),
+    ...(d.replies ? [`${d.replies} replies of its own`] : []),
+    ...(d.files ? [`${d.files} file(s)`] : []),
+    ...(d.links?.length ? [`linked from ${d.links.map(l => `#${l.channel} by ${l.author}`).join(', ')}`] : []),
+  ].join('; ')
+}
+
 /** The thread's reply style (specs/digest-thread-variant.md): what it was posted as, an admin's switch if one is set,
  *  and switching it: a whole-thread preview under the new style lists the replies it posts and the ones it deletes;
  *  "switch" records the switch with exactly those deletes (`PUT /api/digest-threads`), then runs the converge that does
@@ -295,6 +311,7 @@ function ThreadStyle({ b }: { b: PreviewBundle }) {
   const [to, setTo] = useState(styles.find(v => v !== b.variant) ?? b.variant)
   const [preview, setPreview] = useState<string | null>(null)
   const [real, setReal] = useState<string | null>(null)
+  const [reorder, setReorder] = useState(false)
   const key = ['digest-threads', b.channel, b.month]
   const row = useQuery({ queryKey: key, queryFn: () => getJson<{ thread: Thread | null }>(`/api/digest-threads?channel=${b.channel}&month=${b.month}`) })
   const pre = useRun(preview)
@@ -304,9 +321,12 @@ function ThreadStyle({ b }: { b: PreviewBundle }) {
     onSuccess: ({ run }) => { setPreview(run.job_id); setReal(null) },
   })
   const plan = pre.data?.status === 'SUCCEEDED' ? pre.data.switch : null
+  const edits = plan?.edit ?? []
+  const moved = plan?.reorder ?? []
+  const lossy = (plan?.delete ?? []).filter(d => lost(d))
   const go = useMutation({
     mutationFn: async () => {
-      await send('/api/digest-threads', 'PUT', { channel: b.channel, month: b.month, variant: to, plan_job: preview })
+      await send('/api/digest-threads', 'PUT', { channel: b.channel, month: b.month, variant: to, plan_job: preview, allow_reorder: reorder })
       return send<{ run: Run }>('/api/digest-reapply', 'POST', { month: b.month, channel: b.channel, target: 'thread', dry_run: false })
     },
     onSuccess: ({ run }) => { setReal(run.job_id); qc.invalidateQueries({ queryKey: key }); qc.invalidateQueries({ queryKey: ['digest-reapply'] }) },
@@ -332,13 +352,24 @@ function ThreadStyle({ b }: { b: PreviewBundle }) {
         <pre>{pre.data.output ?? '(no output yet)'}</pre>
       </div>}
       {plan && <div className="slack-switch">
-        <p>Switching {b.month} from <code>{plan.from}</code> to <code>{plan.to}</code> posts <b>{plan.post.length}</b> and deletes <b>{plan.delete.length}</b> replies.</p>
+        <p>Switching {b.month} from <code>{plan.from}</code> to <code>{plan.to}</code> edits <b>{edits.length}</b> replies in place, posts <b>{plan.post.length}</b> and deletes <b>{plan.delete.length}</b>.</p>
+        {(plan.notes ?? []).map(n => <p key={n} className="dim">{n}</p>)}
+        {edits.length > 0 && <details open={edits.length <= 8}><summary>To edit in place ({edits.length}, sender unchanged, kept where they are)</summary>
+          <ul>{edits.map(e => <li key={e.ts}><code>{e.key}</code> <span className="dim">{e.was}</span> → <Toks toks={tokenize(e.headline)} plot={null} /></li>)}</ul></details>}
         <details open={plan.post.length <= 8}><summary>To post ({plan.post.length})</summary>
           <ul>{plan.post.map(p => <li key={p.key}><code>{p.key}</code> <Toks toks={tokenize(p.headline)} plot={null} /></li>)}</ul></details>
         <details open><summary>To delete ({plan.delete.length})</summary>
-          <ul className="cols">{plan.delete.map(d => <li key={d.ts}><code>{d.key}</code> <span className="dim">{d.ts}</span></li>)}</ul></details>
-        <ArmedButton label={`switch to ${plan.to}`} disabled={go.isPending || !!real}
-          confirm={`post ${plan.post.length} ${plan.to} replies, then delete these ${plan.delete.length} ${plan.from} replies? Deletes can't be undone.`}
+          <ul className={lossy.length ? '' : 'cols'}>{plan.delete.map(d => <li key={d.ts}><code>{d.key}</code> <span className="dim">{d.ts}</span>{lost(d) && <> · <span className="err">{lost(d)}</span></>}</li>)}</ul></details>
+        {plan.thread_read === false && <p className="err">The thread wasn't read (no Slack token): people's replies it would move, and what deleted replies lose, weren't checked.</p>}
+        {plan.delete.length > 0 && !plan.links_checked && <p className="err">Links to the deleted replies weren't checked (no <code>SLACK_SEARCH_TOKEN</code>): a link elsewhere would break.</p>}
+        {moved.length > 0 && <div className="err">
+          <p>{moved.length} of people's replies would end up above the new replies (Slack only appends to a thread):</p>
+          <ul>{moved.map(m => <li key={m.ts}><code>{m.ts}</code> by <code>{m.user}</code></li>)}</ul>
+          <label><input type="checkbox" checked={reorder} onChange={e => setReorder(e.target.checked)} /> allow reorder</label>
+        </div>}
+        <ArmedButton label={`switch to ${plan.to}`} disabled={go.isPending || !!real || (moved.length > 0 && !reorder)}
+          confirm={[edits.length ? `edit ${edits.length} replies in place, ` : '', `post ${plan.post.length} ${plan.to} replies, then delete ${plan.delete.length} ${plan.from} replies`,
+            moved.length ? `, moving ${moved.length} of people's replies above the new ones` : '', `? Deletes can't be undone.`].join('')}
           onClick={() => go.mutate()} />
         {go.error && <p className="err">{go.error.message}</p>}
       </div>}

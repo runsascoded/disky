@@ -156,7 +156,7 @@ CREATE TABLE digest_threads (
   deletes    TEXT NOT NULL,
   plan_job   TEXT NOT NULL,
   updated_by TEXT NOT NULL,
-  updated_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL, edits TEXT, reorder TEXT,
   PRIMARY KEY (channel, month)
 );
 
