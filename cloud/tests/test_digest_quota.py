@@ -1726,3 +1726,16 @@ def test_a_delta_that_rounds_to_zero_reads_plus_zero():
     rounds to zero reads `+0.0`, and the rest keep their sign."""
     assert [E._tb(v) for v in (round(-0.04, 1), -0.04, 0.0, 0.04, 0.05, -0.06, 12.34, -12.34)] == [
         "+0.0", "+0.0", "+0.0", "+0.0", "+0.1", f"{E.MINUS}0.1", "+12.3", f"{E.MINUS}12.3"]
+
+
+def test_change_counters_from_the_site_series():
+    """The primary's change counters (specs/change-metrics.md §4.5): each counted point's `(added, deleted, modified)`
+    from `/api/series` (an uncounted point has none), and a reply's breakdown text."""
+    body = {"path": "main-data", "points": [
+        {"date": "2026-11-01T0601", "bytes": 1, "objects": 1},
+        {"date": "2026-11-01T1201", "bytes": 1, "objects": 2, "added": 3, "deleted": 2, "modified": 1, "added_bytes": 9, "deleted_bytes": 4, "modified_bytes": 1},
+        {"date": "2026-11-02T0601", "bytes": 1, "objects": 2, "added": 0, "deleted": 0, "modified": 0, "added_bytes": 0, "deleted_bytes": 0, "modified_bytes": 0,
+         "since": "2026-11-01T0601"},
+    ]}
+    assert D.changes_from_series(body) == {"2026-11-01T1201": (3, 2, 1), "2026-11-02T0601": (0, 0, 0)}
+    assert [D.changes_text(c) for c in ((12_410, 88_201, 3_120), (0, 0, 0))] == ["+12,410 −88,201 ~3,120 objects", "+0 −0 ~0 objects"]

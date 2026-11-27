@@ -19,6 +19,9 @@ export interface QuotaScan {
   classes: Record<string, number> | null
   /** The primary's object count (every class); absent in bundles before 2026-11-27. */
   objs?: number
+  /** The primary's objects added, deleted and modified since the store's scan before it (its change counters,
+   *  `digest_quota.site_changes`); absent where the store didn't count the scan. */
+  changes?: [number, number, number]
 }
 
 /** A pool's label on the plot: a zone's bare name (`08a`, not the text line's `08a zone`: the card has no per-bucket lines

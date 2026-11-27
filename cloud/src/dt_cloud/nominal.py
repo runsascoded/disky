@@ -444,8 +444,9 @@ def series_ts(date: str) -> float:
 
 
 def store_line(cfg: Config, label: str, store: str, series: dict | int) -> str:
-    """One store's line: its size and objects at its newest scan and the change since the newest scan at least a week
-    before (`over Nd`, N the span); `series` is its `/api/series` body, or the HTTP status that failed to read it."""
+    """One store's line: its size and objects at its newest scan (with that scan's objects added, deleted and modified,
+    `(+812 −40 ~113)`, where the store counted it) and the change since the newest scan at least a week before (`over
+    Nd`, N the span); `series` is its `/api/series` body, or the HTTP status that failed to read it."""
     head = f"[{label}]({cfg.page(store)})"
     if isinstance(series, int):
         return f"{head}: size unavailable (HTTP {series})."
@@ -454,6 +455,9 @@ def store_line(cfg: Config, label: str, store: str, series: dict | int) -> str:
         return f"{head}: no scans yet."
     last = points[-1]
     text = f"{head}: {si(last['bytes'])} · {last['objects']:,} objects"
+    # the newest scan's objects added, deleted and modified, where the store counted them (specs/change-metrics.md §4.5)
+    if 'added' in last:
+        text += f" (+{last['added']:,} −{last['deleted']:,} ~{last['modified']:,})"
     end = series_ts(last['date'])
     before = [p for p in points if series_ts(p['date']) <= end - WEEK]
     if before:

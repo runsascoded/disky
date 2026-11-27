@@ -360,6 +360,11 @@ The smallest clear design: a second, short panel under the bytes chart, on the s
 - **Tests:** `_lib/series.test.ts` (`withFlows`, `changesNote`, a group's `sumPoints`, a union's `stepFlows` over `carryForward`), `_lib/seriesFlows.test.ts` (the route over fixture `g2` with a served `changes.json`: root, depth 1, deeper and scoped paths, `split=roots`; without counters, as before), `src/changeBars.test.ts` (day and week bars, the extent, the tooltip line).
 - **Not yet:** the fleet's `fleetChanges`, panel and `7d Δ` cell (§4.3); `diff-bench`'s `series` request kind (§8 Q11), so the before/after `Server-Timing` sample is a hand run on dev.
 
+### 10.4 Phase 1 (built): the quota digest's daily reply and the run thread
+
+- **Digest reply:** the job reads the primary's counters from the site's `/api/series?path=<its path>` (`site_changes`, as the job; none without a token, on a failed read, or where the store counts none) into each `Scan` (`changes`, and `rows_json`'s `changes: [added, deleted, modified]` where counted). A day's reply sums every scan since the prior reply scan (`DayRow.changes`, none if one of them wasn't counted) and ends its tail with `+812 −40 ~113 objects` (`changes_text`; after `_tail_sep`, so `reply_lines` puts it on its own line). The site's `quotaReply.ts` renders the same, byte for byte (goldens `replies/changes-{sender,body}.json`, one scan uncounted). §4.5 imagined `Scan.dobjs` becoming the breakdown; today's replies don't show Δobjects at all, so the breakdown is new text, and a reply without counters reads as before.
+- **Run thread:** `nominal.store_line` (the thread head's store lines, from root `/api/series`) gives the newest scan's counts after its objects: `289 T · 3,703,266 objects (+812 −40 ~113) · −924 G over 7d.` Store versions stay off the thread and off a series (§10, item 3): they're each range's `ranges/r####.json` counts, a per-run number for `/scans` (not built yet).
+
 [dp]: diff-progressive.md
 [is]: interval-store.md
 [dfn]: descriptive-field-names.md

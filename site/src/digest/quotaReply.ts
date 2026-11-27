@@ -61,6 +61,9 @@ interface DayRow {
   dextra: Record<string, number | null>
   provisional: boolean
   hist: QuotaScan[]
+  /** The primary's objects (added, deleted, modified) since the prior reply scan, every scan between summed; null
+   *  where one wasn't counted (or there's no prior). */
+  changes: [number, number, number] | null
 }
 
 const dateOf = (r: QuotaScan): string => r.scan.slice(0, 10)
@@ -68,7 +71,9 @@ const dateOf = (r: QuotaScan): string => r.scan.slice(0, 10)
 function row(date: string, s: QuotaScan, prev: QuotaScan | null, seen: QuotaScan[], provisional = false): DayRow {
   const t = scanTime(s.scan)
   const reach = t - (Math.max(...RUNWAY_WINDOWS_D) + 1) * DAY_MS
+  const span = prev ? seen.filter(x => prev.scan < x.scan && x.scan <= s.scan) : []
   return {
+    changes: span.length && span.every(x => x.changes) ? [0, 1, 2].map(i => span.reduce((a, x) => a + x.changes![i], 0)) as [number, number, number] : null,
     date, s, provisional,
     dtb: prev ? pyRound(s.tb - prev.tb, 1) : null,
     hours: prev ? (t - scanTime(prev.scan)) / 3600_000 : null,
@@ -215,6 +220,9 @@ function cells(day: DayRow, cfg: DigestCfg): ReplyCell[] {
   })
 }
 
+/** A reply's change breakdown: `+812 −40 ~113 objects` (`digest_quota.changes_text`). */
+export const changesText = ([a, d, m]: [number, number, number]): string => `+${grouped(a, 0)} −${grouped(d, 0)} ~${grouped(m, 0)} objects`
+
 function headline(day: DayRow, total: boolean): [number, number] {
   if (!total) return [day.s.tb, day.dtb ?? 0]
   const sum = (xs: (number | null)[]) => xs.reduce<number>((a, x) => (x === null ? a : a + x), 0)
@@ -227,7 +235,8 @@ function reply(day: DayRow, variant: string, cfg: DigestCfg, rc: ReplyCfg, marks
   const d = deg(prev ? (dv / prev) * 100 : 0, day.hours ? HOURS_PER_WEEK / day.hours : 7)
   const size = `${grouped(v, 0)} ${cfg.unit.name} (${signed(dv)}, ${pct(dv, v)}%)`
   const sep = lines ? '\n' : ' · '
-  const t = tail(day, cfg, rc, marks, sep)
+  // the primary's objects added, deleted and modified since the prior reply, where the store counted them
+  const t = tail(day, cfg, rc, marks, sep) + (day.changes ? `${sep}${changesText(day.changes)}` : '')
   const when = md(dayOf(day.date))
   const url = diffUrl(day.s.scan, dlink(day.s), day.since, cfg.site_url)
   const base = { key: day.date, scan: day.s.scan }
