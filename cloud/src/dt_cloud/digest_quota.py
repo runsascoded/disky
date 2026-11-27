@@ -232,8 +232,9 @@ def _mark(fill: float | None, over: bool, cfg: DigestConfig) -> str | None:
 #: growth is the fastest net fill over these look-backs (days), each from the latest scan at or before it.
 RUNWAY_WINDOWS_D = (1, 3, 7)
 #: 🔴 under `RUNWAY_RED_D` days to full (or over quota), 🟠 under `RUNWAY_ORANGE_D` (or at least `RUNWAY_FULL_PCT` full),
-#: 🟡 under `RUNWAY_YELLOW_D`, 🟢 otherwise; a clause under `RUNWAY_TEXT_D` days also shows its rate and runway.
-RUNWAY_RED_D, RUNWAY_ORANGE_D, RUNWAY_YELLOW_D, RUNWAY_TEXT_D = 3, 14, 30, 60
+#: 🟡 under `RUNWAY_YELLOW_D`, 🟢 otherwise; a clause under `DigestConfig.runway_text_days` (default 60) also shows its
+#: rate and runway.
+RUNWAY_RED_D, RUNWAY_ORANGE_D, RUNWAY_YELLOW_D = 3, 14, 30
 RUNWAY_FULL_PCT = 95
 
 
@@ -317,11 +318,11 @@ def _pool_mark(r: Runway, fill: float, shape: str, cfg: DigestConfig) -> str:
 
 
 def _runway_text(r: Runway, cfg: DigestConfig, url: str | None = None) -> str:
-    """`, +4.1 Ti/d over 3d, ≈8d to full` for a pool filling within `RUNWAY_TEXT_D` days: its rate, the look-back
+    """`, +4.1 Ti/d over 3d, ≈8d to full` for a pool filling within ``cfg.runway_text_days`` days: its rate, the look-back
     window that rate came from (`Runway.window_d`; `[over 3d](url)` with the pool's ``url`` over that look-back), and
     its runway (commas: ` · ` separates the pools); `''` otherwise (flat, shrinking, far off, or already over: its
     clause says so)."""
-    if not 0 < r.days < RUNWAY_TEXT_D or r.growth is None:
+    if not 0 < r.days < cfg.runway_text_days or r.growth is None:
         return ""
     days = "<1d" if r.days < 1 else f"{r.days:.0f}d"
     over = "" if r.window_d is None else f" [over {r.window_d}d]({url})" if url else f" over {r.window_d}d"

@@ -71,6 +71,10 @@ describe('quota pressure', () => {
       { days: 8.2, growth: 4.1 }, { days: 60, growth: 1, windowD: 7 }, { days: Infinity, growth: 0, windowD: 1 }, { days: 0, growth: 4, windowD: 1 }]
       .map(r => runwayText(r, f.cfg))).toEqual([', +4.1 Ti/d over 3d, ≈8d to full', ', +30.0 Ti/d over 1d, ≈<1d to full',
       ', +1.0 Ti/d over 7d, ≈60d to full', ', +4.1 Ti/d, ≈8d to full', '', '', ''])
+    // `runway_text_days` moves the cutoff: under 30 days, the 59.9-day pool's text goes; at 90, the 60-day one's comes
+    const [near, far] = [{ ...f.cfg, runway_text_days: 30 }, { ...f.cfg, runway_text_days: 90 }]
+    expect(([[29.9, near], [59.9, near], [60, far], [90, far]] as [number, typeof f.cfg][]).map(([days, c]) => runwayText({ days, growth: 1, windowD: 7 }, c)))
+      .toEqual([', +1.0 Ti/d over 7d, ≈30d to full', '', ', +1.0 Ti/d over 7d, ≈60d to full', ''])
     // given the pool's url over the look-back, `over Nd` links it
     expect(runwayText({ days: 8.2, growth: 4.1, windowD: 3 }, f.cfg, 'https://x.test/?d=0914-3d&g=z#over-time'))
       .toEqual(', +4.1 Ti/d [over 3d](https://x.test/?d=0914-3d&g=z#over-time), ≈8d to full')

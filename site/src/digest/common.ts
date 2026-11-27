@@ -25,6 +25,8 @@ export interface DigestCfg {
   buckets: Record<string, BucketCfg>
   prices: Record<string, number>
   icons_base: string
+  /** A pool filling within this many days gets its rate and `≈Nd to full` (`digest.DigestConfig.runway_text_days`); absent: `RUNWAY_TEXT_D`. */
+  runway_text_days?: number
 }
 
 /** What the page can vary (specs/slack-preview-page.md); `DEFAULT_PARAMS` is what the job posts. */

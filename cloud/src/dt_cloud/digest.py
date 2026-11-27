@@ -181,6 +181,8 @@ class DigestConfig:
     prices: dict[str, float] = field(default_factory=dict)
     units: str = "TiB"
     alert_pct: float | None = None
+    # quota: a pool filling within this many days gets its rate and `≈Nd to full` in the replies and the alert
+    runway_text_days: float = 60
     quota_marks: str = "warning"
     params: str = ""
     preview: str | None = None
@@ -299,7 +301,7 @@ _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
-    "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "params": (str,),
+    "units": (str,), "alert_pct": (int, float, type(None)), "runway_text_days": (int, float), "quota_marks": (str,), "params": (str,),
     "preview": (str, type(None)), "pin": (bool,), "split_reply": (bool,),
 }
 
@@ -382,6 +384,8 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         raise ValueError(f"digest config units: {d['units']!r} is not one of {tuple(UNITS)}")
     if d.get("alert_pct") is not None and not 0 < d["alert_pct"] <= 100:
         raise ValueError(f"digest config alert_pct: {d['alert_pct']} is not a percent (0–100]")
+    if "runway_text_days" in d and not d["runway_text_days"] > 0:
+        raise ValueError(f"digest config runway_text_days: {d['runway_text_days']} is not a positive number of days")
     if "quota_marks" in d and d["quota_marks"] not in QUOTA_MARKS:
         raise ValueError(f"digest config quota_marks: {d['quota_marks']!r} is not one of {QUOTA_MARKS}")
     if not 0 <= d.get("reply_hour", 0) <= 23:
@@ -736,7 +740,7 @@ PREVIEW_VERSION = 1
 
 def cfg_json(cfg: DigestConfig) -> dict:
     """The config fields the OP renders from (the site's `DigestCfg`): title, site, units, the primary and each
-    bucket's label, path, quotas and shape (absent: a circle), prices."""
+    bucket's label, path, quotas and shape (absent: a circle), prices, and ``runway_text_days`` (absent: the default)."""
     u = cfg.unit
     return {
         "template": cfg.template, "title": cfg.title, "site_url": cfg.site_url, "host": cfg.host,
@@ -748,6 +752,7 @@ def cfg_json(cfg: DigestConfig) -> dict:
             for name, b in cfg.buckets.items()
         },
         "prices": dict(cfg.prices), "icons_base": cfg.icons_base,
+        **({} if cfg.runway_text_days == DigestConfig.runway_text_days else {"runway_text_days": cfg.runway_text_days}),
     }
 
 

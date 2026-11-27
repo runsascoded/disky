@@ -268,6 +268,10 @@ def test_runway_rules():
         D.Runway(8.2, 4.1), D.Runway(60.0, 1.0, window_d=7), D.Runway(D.math.inf, 0.0, window_d=1), D.Runway(0.0, 4.0, window_d=1)]]
     assert texts == [", +4.1 Ti/d over 3d, ≈8d to full", ", +30.0 Ti/d over 1d, ≈<1d to full", ", +1.0 Ti/d over 7d, ≈60d to full",
                      ", +4.1 Ti/d, ≈8d to full", "", "", ""]
+    # `runway_text_days` moves the cutoff: under 30 days, the 59.9-day pool's text goes; at 90, the 60-day one's comes
+    near, far = replace(CFG, runway_text_days=30), replace(CFG, runway_text_days=90)
+    assert [D._runway_text(D.Runway(d, 1.0, window_d=7), c) for d, c in [(29.9, near), (59.9, near), (60.0, far), (90.0, far)]] == [
+        ", +1.0 Ti/d over 7d, ≈30d to full", "", ", +1.0 Ti/d over 7d, ≈60d to full", ""]
     # given the pool's url over the look-back, `over Nd` links it
     url = "https://x.test/?d=0914-3d&g=z#over-time"
     assert D._runway_text(D.Runway(8.2, 4.1, window_d=3), CFG, url) == f", +4.1 Ti/d [over 3d]({url}), ≈8d to full"
@@ -1280,7 +1284,7 @@ def test_quota_alert_is_broadcast_while_over_and_struck_through_once_under(tmp_p
 
     state, calls = step(SEPT[1:2])
     # the alert carries each pool's runway as the replies show it (here under `warning` marks, whose replies don't);
-    # one filling too slowly to reach full within `RUNWAY_TEXT_D` days (9/2's) has none
+    # one filling too slowly to reach full within `runway_text_days` (9/2's) has none
     over = alert("26090112", f"78.4% of 1P (197.0 Ti free), +8.0 Ti/d [over 1d]({u('26090112-1d')}), ≈25d to full", "9/1 12:00")
     assert calls[1:] == [("post", f":warning: [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)", "m1", "9/1 — 713 TiB (+8.0, 1.1%)",
                           f"{AV}50.png?v=4", None),
