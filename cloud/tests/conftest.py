@@ -103,6 +103,10 @@ def _deployment_env(monkeypatch):
     from dt_cloud import digest
 
     monkeypatch.setattr(digest, "live_settings", lambda cfg: None)
+    # …and its thread rows (`/api/digest-threads`, an admin's switch): none, so each thread keeps its live variant
+    from dt_cloud import digest_switch
+
+    monkeypatch.setattr(digest_switch, "thread_row", lambda cfg, channel, month: None)
 
 
 def fake_site_render(cfg, rows: dict, month, plot_url=None, prev_url=None, next_url=None) -> dict:

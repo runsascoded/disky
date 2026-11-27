@@ -3555,22 +3555,38 @@ def _digest(
     from dataclasses import replace
 
     from . import digest as dg
+    from . import digest_switch as ds
+    from .append_runner import Busy
 
     cfg = dg.load_config(template, config_path)
     cfg = replace(cfg, site_url=site_url or cfg.site_url, reply_hour=cfg.reply_hour if reply_hour is None else reply_hour)
-    if not file_settings:
-        cfg = dg.with_settings(cfg, dg.live_settings(cfg))
+    settings = None if file_settings else dg.live_settings(cfg)
+    cfg = dg.with_settings(cfg, settings)
     cfg = dg.with_settings(cfg, {"params": cfg.params if params_override is None else params_override,
                                  "quota_marks": marks_override or cfg.quota_marks})
     err(f"digest: quota_marks {cfg.quota_marks}, params {cfg.params!r}")
     as_of_d = dt.date.fromisoformat(as_of) if as_of else None
     tpl = dg.template(cfg, as_of_d)
-    variant = variant or cfg.variant
-    if variant not in tpl.variants:
-        raise SystemExit(f"digest: the {cfg.template} template has no {variant!r} variant ({' | '.join(tpl.variants)})")
     this_month = dt.datetime.now(dt.timezone.utc).date().replace(day=1)
     m = dt.datetime.strptime(month, "%Y-%m").date() if month else as_of_d.replace(day=1) if as_of_d else this_month
     root = root or cfg.resolve_root()
+    channel = channel or os.environ.get("SLACK_CHANNEL")
+    # the thread's variant (specs/digest-thread-variant.md): -V, else an admin's switch (the site's `digest_threads` row),
+    # else the live thread's, else the deployment default (the live settings' `variant`), else the config file's
+    states, live, row = {}, None, None
+    threaded = platform == "slack" and bool(channel) and dg.per_variant(cfg) and not (as_of_d or preview_key)
+    if threaded:
+        states = dg.thread_states(cfg, root, m, channel, tpl.variants)
+        try:
+            live = dg.live_of(states)
+        except dg.ThreadConflict as e:
+            raise SystemExit(str(e)) from None
+        row = ds.thread_row(cfg, channel, m)
+    override = variant
+    variant = ds.desired_variant(override=override, row=row, live=live, default=(settings or {}).get("variant"), file=cfg.variant)
+    if variant not in tpl.variants:
+        raise SystemExit(f"digest: the {cfg.template} template has no {variant!r} variant ({' | '.join(tpl.variants)})")
+    switch = live is not None and variant != live
 
     since_d = dt.date.fromisoformat(since) if since else None
     if since_d and not redo_replies:
@@ -3581,7 +3597,7 @@ def _digest(
         raise UsageError("-A/--as-of previews (with -n or -W), never posts or edits (not with -o, -d or -y)")
     if selected and (edit_replies or redo_replies or platform != "slack"):
         raise UsageError("-o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
-    if plan_path and not (selected and dry_run):
+    if plan_path and not (dry_run and (selected or switch)):
         raise UsageError("-j/--plan writes a dry run's edits (-n with -o, -d or -y)")
     if preview_key:
         if selected or dry_run or edit_replies or redo_replies or platform != "slack":
@@ -3589,6 +3605,13 @@ def _digest(
         dg.preview_only(tpl, root, m, preview_key, variant)
         return
     if dry_run and not selected:
+        if switch:
+            plan = ds.switch_plan(tpl, root, m, channel, states, live, variant)
+            print(ds.format_switch_plan(plan))
+            if plan_path:
+                ds.write_switch_plan(plan_path, plan)
+                print(f"switch plan: {len(plan['post'])} to post, {len(plan['delete'])} to delete -> {plan_path}")
+            return
         print(dg.dry_run(tpl, root, m, variant))
         return
 
@@ -3603,7 +3626,6 @@ def _digest(
             return
         err(f"digest: {'re-threaded' if redo_replies else 'converged'} {m:%Y-%m} (discord)" + (f", {len(plan['stale'])} old left undeleted" if plan.get("stale") else ""))
         return
-    channel = channel or os.environ.get("SLACK_CHANNEL")
     token = secret(token, "SLACK_BOT_TOKEN")
     if not (channel and token):
         raise SystemExit("digest: need SLACK_BOT_TOKEN + SLACK_CHANNEL (or -t/-c)")
@@ -3622,6 +3644,8 @@ def _digest(
         return dg.pages_deploy(icons, cfg.plot_project, cfg.plot_branch)
 
     if selected:
+        # re-applying edits the thread's messages as they are: the live variant's, unless -V names another
+        variant = override or live or variant
         changes = dg.apply_slack(tpl, root, m, client, channel, variant, op=op_only, days=days, icons_dir=icons, deploy_plot=deploy,
                                  dry_run=dry_run, host=bool(plan_path))
         if dry_run:
@@ -3640,20 +3664,39 @@ def _digest(
         return
     if redo_replies:
         # rule change: re-post every reply under the current day rule, then retire the old ones
-        plan = dg.redo_replies(tpl, root, m, client, channel, variant, since=since_d, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, for_real=for_real)
+        if for_real:
+            try:
+                with ds.thread_lease(cfg, root, m, channel):
+                    plan = dg.redo_replies(tpl, root, m, client, channel, variant, since=since_d, icons_dir=icons, deploy_plot=deploy,
+                                           reply_delay=reply_delay, for_real=True)
+            except Busy as e:
+                err(f"digest: busy, nothing re-threaded: {e}")
+                raise SystemExit(1) from None
+        else:
+            plan = dg.redo_replies(tpl, root, m, client, channel, variant, since=since_d, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay)
         if for_real:
             err(f"digest: re-threaded {m:%Y-%m} ({variant}): {len(plan.get('posted', {}))} replies" + (f", {len(plan['stale'])} old left undeleted" if plan.get("stale") else ""))
             return
         _print_redo_plan(plan, f"{m:%Y-%m} in {channel} ({variant})", since_d)
         return
     # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up,
-    # and pins this month's OP; an explicit -m pins only when it names the current month
-    if month:
-        dg.converge_slack(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay,
-                          edit_replies=edit_replies, current=m == this_month)
-    else:
-        dg.converge_slack_now(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay,
-                              edit_replies=edit_replies)
+    # and pins this month's OP; an explicit -m pins only when it names the current month. Under the month's thread lease:
+    # a switch from /admin/slack and the scheduled run never converge one thread at once
+    kw = dict(icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, edit_replies=edit_replies)
+    try:
+        with ds.thread_lease(cfg, root, m, channel):
+            if not month:
+                dg.close_previous(tpl, root, m, client, channel, variant, **kw)
+            if threaded:
+                ds.converge_thread(tpl, root, m, client, channel, variant, row=row, current=not month or m == this_month, **kw)
+            else:
+                dg.converge_slack(tpl, root, m, client, channel, variant, current=not month or m == this_month, **kw)
+    except Busy as e:
+        err(f"digest: busy, {m:%Y-%m} not converged (the next run does): {e}")
+        return
+    except ds.SwitchRefused as e:
+        err(str(e))
+        raise SystemExit(1) from None
     err(f"digest: converged {m:%Y-%m} ({cfg.template}, {variant})")
 
 
@@ -3716,7 +3759,7 @@ def _month_range(spec: str) -> list[dt.date]:
 @option("-r", "--root", help="Snapshots root (default the config's `root`); the threads' states live beside it")
 @option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)")
 @option("-T", "--template", type=Choice(["cost", "quota", "gcs", "cw"]), default="cost", help="The digest's template + preset config, as `digest -T` (default cost; quota for a `cw-digest` deployment)")
-@option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="The threads' variant (default the config's)")
+@option("-V", "--variant", type=Choice(["sender", "body", "weekly"]), default=None, help="The threads' variant where a month has no live state of another (default the config's)")
 def digest_relink(
     channel: str | None,
     config_path: Path | None,
@@ -3746,8 +3789,11 @@ def digest_relink(
     token = secret(token, "SLACK_BOT_TOKEN")
     if not (channel and token):
         raise SystemExit("digest-relink: need SLACK_BOT_TOKEN + SLACK_CHANNEL (or -t/-c)")
-    months = _month_range(month_spec) if month_spec else dg.state_months(root, cfg.state.format(channel=channel, variant=variant))
-    todo, plan, report = dg.relink(cfg, root, months, SlackClient(token, channel), channel, variant, dry_run=dry_run)
+    # a thread switched between variants (specs/digest-thread-variant.md) is linked through its live state, whichever
+    variants = dg.template(cfg).variants if dg.per_variant(cfg) else ()
+    months = _month_range(month_spec) if month_spec else sorted({m for v in (variant, *variants)
+                                                                 for m in dg.state_months(root, cfg.state.format(channel=channel, variant=v))})
+    todo, plan, report = dg.relink(cfg, root, months, SlackClient(token, channel), channel, variant, dry_run=dry_run, variants=variants)
     print(f"digest-relink {channel} ({variant}): {len(months)} month(s), {len(todo)} to relink"
           + (f"; plan: {plan.summary()}" if todo else ""))
     if dry_run:

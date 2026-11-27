@@ -845,6 +845,51 @@ def save_state(path: str, state: dict) -> None:
     blobfs.write_text(path, json.dumps(state, indent=2))
 
 
+# ---- a thread's per-variant states (specs/digest-thread-variant.md) ----------------
+
+
+class ThreadConflict(RuntimeError):
+    """A month with two live variant states: refused, never resolved by guessing."""
+
+
+def per_variant(cfg: DigestConfig) -> bool:
+    """Whether ``cfg``'s thread state is kept per variant (`state` names ``{variant}``), so a thread can switch."""
+    return "{variant}" in cfg.state
+
+
+def thread_states(cfg: DigestConfig, root: str, month: dt.date, channel: str, variants: Iterable[str]) -> dict[str, tuple[str, dict]]:
+    """``month``'s converge states in ``channel``, by variant (``path``, ``state``): only those that exist. A config
+    whose state isn't per variant has one, under the variant it records (else the first of ``variants``)."""
+    variants = list(dict.fromkeys(variants))
+    if not per_variant(cfg):
+        path = state_path(root, month, cfg.state.format(channel=channel, variant=variants[0]))
+        return {s.get("variant", variants[0]): (path, s)} if (s := load_state(path)) else {}
+    out = {}
+    for v in variants:
+        path = state_path(root, month, cfg.state.format(channel=channel, variant=v))
+        if s := load_state(path):
+            out[v] = (path, s)
+    return out
+
+
+def live_of(states: dict[str, tuple[str, dict]]) -> str | None:
+    """The live variant of a month's ``states``: the one with an OP that isn't retiring or retired (``retired_for``).
+    A state mid-switch (``switching_from`` names another live one) isn't live yet. None: no thread. Two: `ThreadConflict`."""
+    live = {v for v, (_, s) in states.items() if s.get("op_ts") and not s.get("retired_for")}
+    live -= {v for v in live if states[v][1].get("switching_from") in live}
+    if len(live) > 1:
+        raise ThreadConflict(f"digest: {' and '.join(f'{v} ({states[v][0]})' for v in sorted(live))} are both live; "
+                             "retire one by hand (`retired_for`) before converging")
+    return next(iter(live), None)
+
+
+def live_state(cfg: DigestConfig, root: str, month: dt.date, channel: str, variants: Iterable[str]) -> tuple[str, str, dict] | None:
+    """``month``'s live thread in ``channel``: (variant, state path, state), or None."""
+    states = thread_states(cfg, root, month, channel, variants)
+    v = live_of(states)
+    return (v, *states[v]) if v else None
+
+
 def _wait_reachable(url: str, timeout: float = 90, interval: float = 3) -> None:
     """Block until ``url`` serves 200 (Pages CDN propagation after a deploy)."""
     import time
@@ -1024,9 +1069,11 @@ def _drop_split_reply(client, state: dict) -> bool:
     return True
 
 
-def _prev_op(cfg: DigestConfig, root: str, month: dt.date, channel: str, variant: str) -> str | None:
-    """The previous month's OP ts in ``channel`` (its converge state, same variant), or None: never posted."""
-    return load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
+def _prev_op(cfg: DigestConfig, root: str, month: dt.date, channel: str, variant: str, variants: Iterable[str] = ()) -> str | None:
+    """The previous month's OP ts in ``channel`` (its live state, of ``variant`` or any of ``variants``), or None:
+    never posted."""
+    live = live_state(cfg, root, prior_month(month), channel, [variant, *variants])
+    return live[2].get("op_ts") if live else None
 
 
 def pin_op(client, channel: str, state: dict, op_ts: str, prev_op: str | None) -> bool:
@@ -1139,22 +1186,24 @@ def state_months(root: str, state_dir: str) -> list[dt.date]:
     return sorted(dt.date.fromisoformat(f"{m.group(1)}-01") for n in names if (m := re.fullmatch(r"(\d{4}-\d{2})\.json", n)))
 
 
-def relinks(cfg: DigestConfig, root: str, months: Iterable[dt.date], client, channel: str, variant: str) -> list[Relink]:
-    """Of ``months``, those with an OP in ``channel`` (their converge state's ``op_ts``) whose state doesn't yet record
-    the month links it should carry: ``prev_url`` / ``next_url``, the permalinks of the previous and next months' OPs
-    (None: that month has none). A month whose state records both is done: no Slack read."""
-    fmt = cfg.state.format(channel=channel, variant=variant)
+def relinks(cfg: DigestConfig, root: str, months: Iterable[dt.date], client, channel: str, variant: str, variants: Iterable[str] = ()) -> list[Relink]:
+    """Of ``months``, those with an OP in ``channel`` (their live state's ``op_ts``, of ``variant`` or any of
+    ``variants``: a thread switched between variants links as one) whose state doesn't yet record the month links it
+    should carry: ``prev_url`` / ``next_url``, the permalinks of the previous and next months' OPs (None: that month has
+    none). A month whose state records both is done: no Slack read."""
+    variants = [variant, *variants]
 
     def url(m: dt.date) -> str | None:
-        ts = load_state(state_path(root, m, fmt)).get("op_ts")
+        live = live_state(cfg, root, m, channel, variants)
+        ts = live[2].get("op_ts") if live else None
         return client.permalink(ts) if ts else None
 
     out = []
     for m in sorted(set(months)):
-        path = state_path(root, m, fmt)
-        state = load_state(path)
-        if not state.get("op_ts"):
+        live = live_state(cfg, root, m, channel, variants)
+        if not live or not live[2].get("op_ts"):
             continue
+        _, path, state = live
         prev_url, next_url = url(prior_month(m)), url(next_month(m))
         if "prev_url" in state and "next_url" in state and (state["prev_url"], state["next_url"]) == (prev_url, next_url):
             continue
@@ -1163,7 +1212,7 @@ def relinks(cfg: DigestConfig, root: str, months: Iterable[dt.date], client, cha
 
 
 def relink(cfg: DigestConfig, root: str, months: Iterable[dt.date], client, channel: str, variant: str, *,
-           dry_run: bool = False) -> tuple[list[Relink], Any, Any]:
+           dry_run: bool = False, variants: Iterable[str] = ()) -> tuple[list[Relink], Any, Any]:
     """Rewrite the month-link line (`month_links`: ``← October · December →``) of each of ``months``' OPs in
     ``channel`` that doesn't carry its links yet (`relinks`), and only that line: each OP is read from Slack and its
     stored text edited in place (`relink_desired`), never re-rendered, so a past month's figures stay as posted. A
@@ -1172,7 +1221,7 @@ def relink(cfg: DigestConfig, root: str, months: Iterable[dt.date], client, chan
     nothing. Returns the months planned, the plan, and the apply report (None on a dry run or with nothing to do)."""
     from thrds.rewrite import Kind, Plan, Status, apply, find_ids, plan
 
-    todo = relinks(cfg, root, months, client, channel, variant)
+    todo = relinks(cfg, root, months, client, channel, variant, variants)
     if not todo:
         return [], Plan([]), None
     by_ts = {r.state["op_ts"]: r for r in todo}
@@ -1193,13 +1242,13 @@ def relink(cfg: DigestConfig, root: str, months: Iterable[dt.date], client, chan
     return todo, p, report
 
 
-def link_prev(cfg: DigestConfig, root: str, month: dt.date, client, channel: str, variant: str) -> None:
+def link_prev(cfg: DigestConfig, root: str, month: dt.date, client, channel: str, variant: str, variants: Iterable[str] = ()) -> None:
     """The previous month's OP links forward to ``month``'s, once ``month``'s is posted (`relink`: its link line edited
     in place). A convenience: any failure (a token that can't read history, Slack down) is one warning, and the next run
     retries."""
     prev = prior_month(month)
     try:
-        relink(cfg, root, [prev], client, channel, variant)
+        relink(cfg, root, [prev], client, channel, variant, variants=variants)
     except Exception as e:  # noqa: BLE001 — the thread is converged either way; `digest-relink` repairs it too
         _err(f"digest: WARN could not link {prev:%Y-%m}'s OP to {month:%Y-%m}'s: {type(e).__name__}: {e} (retried next run)")
 
@@ -1255,11 +1304,11 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
-    if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant)):
+    if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant, tpl.variants)):
         save_state(path, state)
     if current:
         save_state(path, state)  # the OP's ts, which `link_prev` reads back
-        link_prev(cfg, root, month, client, channel, variant)
+        link_prev(cfg, root, month, client, channel, variant, tpl.variants)
     if split and _split_reply(cfg, month, client, state, op_ts, split):
         save_state(path, state)
     if not cfg.split_reply and _drop_split_reply(client, state):
@@ -1482,12 +1531,21 @@ def converge_slack_now(tpl: Template, root: str, month: dt.date, client, channel
     and only then can the provisional go. Idempotent like `converge_slack`;
     ``kw`` passes through."""
     variant = variant or tpl.variants[0]
+    close_previous(tpl, root, month, client, channel, variant, **kw)
+    return converge_slack(tpl, root, month, client, channel, variant, current=True, **kw)
+
+
+def close_previous(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, **kw) -> None:
+    """Re-converge the month before ``month`` under its live variant (``variant`` or another of the template's: a
+    switched thread) when its state still holds a provisional reply or a quota alert (`converge_slack_now`)."""
     prev = (month - dt.timedelta(days=1)).replace(day=1)
-    prev_state = load_state(state_path(root, prev, tpl.cfg.state.format(channel=channel, variant=variant)))
+    live = live_state(tpl.cfg, root, prev, channel, [variant or tpl.variants[0], *tpl.variants])
+    if live is None:
+        return
+    prev_variant, _, prev_state = live
     if prev_state.get("provisional") or prev_state.get("alert"):
         _err(f"digest: {prev:%Y-%m} still has a {'provisional reply' if prev_state.get('provisional') else 'quota alert'} — closing it first")
-        converge_slack(tpl, root, prev, client, channel, variant, **kw)
-    return converge_slack(tpl, root, month, client, channel, variant, current=True, **kw)
+        converge_slack(tpl, root, prev, client, channel, prev_variant, **kw)
 
 
 def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, since: dt.date | None = None, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:
