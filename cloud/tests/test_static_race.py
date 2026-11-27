@@ -58,7 +58,8 @@ def test_race_spec_clones_the_compaction_onto_the_new_image(adopt: bool):
     ts = tg["taskSpec"]
     ts["runnables"][0]["container"].update(imageUri=NEW, commands=["-c", f"set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && {PROBE}{tail}"])
     ts["environment"]["variables"].update(STATIC_NAMES_PROFILE=json.dumps({**PROFILE, "image": NEW}), DT_JOB_IMAGE=NEW.rsplit("/", 1)[1],
-                                          DT_JOB_NAME="sn-race-2026-10-15cw-c004-r1717", DT_RACE_COMPACTION="sn-compact-x", DT_RACE_COMPACT_CMD=COMPACT)
+                                          DT_JOB_NAME="sn-race-2026-10-15cw-c004-r1717", DT_RACE_COMPACTION="sn-compact-x", DT_RACE_COMPACT_CMD=COMPACT,
+                                          DT_RACE_GEN_URL="gs://data-b/static-names/2026-10-15cw.c004")
     want["labels"] = dict(RACE_LABELS)
     want["allocationPolicy"]["labels"] = dict(RACE_LABELS)
     for k in ("name", "uid", "status"):
@@ -79,26 +80,48 @@ def test_race_gen_is_the_compactions_g():
     assert M.race_gen(M.race_compact_cmd(job())[1]) == "2026-10-15cw.c003"
 
 
-@pytest.mark.parametrize(("state", "cancelled", "published"), [
-    ("RUNNING", True, True),
-    ("SUCCEEDED", False, False),
-    ("FAILED", False, False),
+GEN_URL = "gs://data-b/static-names/2026-10-15cw.c004"
+UPLOAD = "gs://scratch-b/races/u/upload"
+CANCEL_AND_PUBLISH = [("cancel", "sn-compact-x"), ("call", [*COMPACT.split(), "--prebuilt", UPLOAD])]
+
+
+@pytest.mark.parametrize(("state", "before", "after", "code", "calls"), [
+    # live and still folding: cancelled, then the race's fold published in its place
+    ("RUNNING", 0, 0, 0, CANCEL_AND_PUBLISH),
+    # ended: it published first (or failed, leaving the next compaction to fold): nothing adopted
+    ("SUCCEEDED", 0, 0, 0, []),
+    ("FAILED", 0, 0, 0, []),
+    # already uploading the new generation: about to win, left to finish
+    ("RUNNING", 3, 3, 0, []),
+    # began uploading between the check and its end: cancelled, but nothing published over the partial generation
+    ("RUNNING", 0, 2, 3, [("cancel", "sn-compact-x")]),
 ])
-def test_race_adopt_publishes_only_over_a_live_rival(monkeypatch, state: str, cancelled: bool, published: bool):
+def test_race_adopt_takes_over_only_a_rival_still_folding(monkeypatch, state: str, before: int, after: int, code: int, calls: list):
     from click.testing import CliRunner
 
-    from dt_cloud import batch, gcp
-
-    states = iter([state, "DELETION_IN_PROGRESS", "DELETED"])
-    calls: list = []
-    monkeypatch.setattr(gcp, "batch_job", lambda name: {"status": {"state": next(states)}})
-    monkeypatch.setattr(batch, "cancel_job", lambda name: calls.append(("cancel", name)))
-    monkeypatch.setattr(M, "sleep", lambda s: None)
     import subprocess
 
-    monkeypatch.setattr(subprocess, "call", lambda argv: calls.append(("call", argv)) or 0)
+    from dt_cloud import batch, blobstore, gcp
+
+    states = iter([state, "DELETION_IN_PROGRESS", "DELETED"])
+    seen: list = []
+    listings = iter([before, after])
+    monkeypatch.setattr(gcp, "batch_job", lambda name: {"status": {"state": next(states)}})
+    monkeypatch.setattr(batch, "cancel_job", lambda name: seen.append(("cancel", name)))
+    monkeypatch.setattr(M, "sleep", lambda s: None)
+    monkeypatch.setattr(subprocess, "call", lambda argv: seen.append(("call", argv)) or 0)
+
+    class FakeStore:
+        def __init__(self, url: str):
+            assert url == "gs://data-b"
+
+        def listing(self, prefix: str) -> dict[str, int]:
+            assert prefix == "static-names/2026-10-15cw.c004"
+            return {f"{prefix}/f{i}": 1 for i in range(next(listings))}
+
+    monkeypatch.setattr(blobstore, "Store", FakeStore)
     monkeypatch.setenv(M.RACE_JOB_ENV, "sn-compact-x")
     monkeypatch.setenv(M.RACE_COMPACT_ENV, COMPACT)
-    r = CliRunner().invoke(M.cli, ["race-adopt", "gs://scratch-b/races/u/upload"])
-    assert r.exit_code == 0, r.output
-    assert calls == ([("cancel", "sn-compact-x"), ("call", [*COMPACT.split(), "--prebuilt", "gs://scratch-b/races/u/upload"])] if published else [])
+    monkeypatch.setenv(M.RACE_GEN_ENV, GEN_URL)
+    r = CliRunner().invoke(M.cli, ["race-adopt", UPLOAD])
+    assert (r.exit_code, seen) == (code, calls), r.output

@@ -786,6 +786,9 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
 #: A race job's env: the raced compaction job's name, and its own `compact` command (what `race-adopt` reruns with
 #: `--prebuilt`).
 RACE_JOB_ENV, RACE_COMPACT_ENV = "DT_RACE_COMPACTION", "DT_RACE_COMPACT_CMD"
+#: …and where the raced fold would upload the new generation (`gs://<bucket>/<prefix>/<new gen>`): `race-adopt` cancels
+#: the rival only while nothing is there.
+RACE_GEN_ENV = "DT_RACE_GEN_URL"
 #: `compact`'s options a race's `compact-probe` takes over (the probe's name for each), and the flags it drops.
 RACE_PROBE_OPTS = {"-g": "-g", "-m": "-m", "-M": "-M", "-p": "-p", "-j": "-j", "-c": "-c", "-k": "-k", "-D": "-F", "-A": "-A"}
 RACE_DROP_OPTS = {"-S": 1, "-C": 1, "-L": 1, "-r": 0, "-b": 1}
@@ -865,7 +868,7 @@ def race_spec(job: dict, image: str, *, name: str, root: str, through: str, adop
         p = json.loads(v["STATIC_NAMES_PROFILE"])
         v["STATIC_NAMES_PROFILE"] = json.dumps({**p, "image": image})
     v.update({"DT_JOB_IMAGE": image.rsplit("/", 1)[-1], "DT_JOB_NAME": name, RACE_JOB_ENV: job["name"].rsplit("/", 1)[-1],
-              RACE_COMPACT_ENV: compact_cmd})
+              RACE_COMPACT_ENV: compact_cmd, RACE_GEN_ENV: f"gs://{bucket}/{PREFIX}/{ar.next_gen(race_gen(compact_cmd))}"})
     for labels in (spec.setdefault("labels", {}), spec["allocationPolicy"].setdefault("labels", {})):
         labels.update({"stage": "race", "upkeep": "race"})
         for k in ("batch-job-id", "events"):
@@ -921,10 +924,16 @@ def race_cmd(adopt, image, job_name, name, through, dry_run) -> None:
 @cli.command("race-adopt")
 @argument("upload")
 def race_adopt_cmd(upload) -> None:
-    """A race's last step (`race -a`): if the compaction it raced (`$DT_RACE_COMPACTION`) is still live, cancel it,
-    wait for it to end (its lease then passes at once), and publish UPLOAD in its place with its own `compact` command
-    plus `--prebuilt` (`prebuilt_fold`: refused if the generation moved on meanwhile). If it already ended, do nothing:
-    a compaction that succeeded published first, and one that failed leaves the next scheduled one to adopt or refold."""
+    """A race's last step (`race -a`): if the compaction it raced (`$DT_RACE_COMPACTION`) is still live and still
+    folding, cancel it, wait for it to end (its lease then passes at once), and publish UPLOAD in its place with its own
+    `compact` command plus `--prebuilt` (`prebuilt_fold`: refused if the generation moved on meanwhile). If it already
+    ended, do nothing: a compaction that succeeded published first, and one that failed leaves the next scheduled one
+    to adopt or refold.
+
+    "Still folding" means nothing under the new generation (`$DT_RACE_GEN_URL`) yet: a rival already uploading is about
+    to win, so it is left to finish and nothing is adopted. Checked again once the cancelled rival has ended (it may
+    have started uploading in between): `upload_new` never rewrites a file already there, so publishing over a partial
+    upload would mix two folds' files. Then nothing is published, exit 3: the partial generation needs a look."""
     import shlex
     import subprocess
 
@@ -941,15 +950,25 @@ def race_adopt_cmd(upload) -> None:
                 return "DELETED"
             raise
 
-    raced, cmd = os.environ[RACE_JOB_ENV], os.environ[RACE_COMPACT_ENV]
+    from .blobstore import Store
+
+    raced, cmd, gen_url = os.environ[RACE_JOB_ENV], os.environ[RACE_COMPACT_ENV], os.environ[RACE_GEN_ENV]
+    root, _, prefix = gen_url.removeprefix("gs://").partition("/")
+    store = Store(f"gs://{root}")
     state = state_of(raced)
     if state not in LIVE_STATES:
         err(f"race-adopt: {raced} is {state}: not adopting {upload} (the race lost or its rival ended)")
         return
-    err(f"race-adopt: {raced} is {state}: cancelling it, then publishing {upload}")
+    if n := len(store.listing(prefix)):
+        err(f"race-adopt: {raced} is {state} and already uploading ({n} files under {gen_url}): left to finish, not adopting {upload}")
+        return
+    err(f"race-adopt: {raced} is {state}, nothing under {gen_url} yet: cancelling it, then publishing {upload}")
     cancel_job(raced)
     while state_of(raced) in (*LIVE_STATES, "DELETION_IN_PROGRESS"):
         sleep(15)
+    if n := len(store.listing(prefix)):
+        err(f"race-adopt: {raced} began uploading before it ended ({n} files under {gen_url}): not publishing {upload} over a partial generation")
+        raise SystemExit(3)
     raise SystemExit(subprocess.call([*shlex.split(cmd), "--prebuilt", upload]))
 
 
