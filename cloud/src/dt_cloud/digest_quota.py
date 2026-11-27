@@ -453,9 +453,6 @@ class Scan:
     classes: dict[int, float] | None = field(default=None, compare=False)
     # what started it (its first run's `scan_runs.trigger`, `scan_triggers`); None: unrecorded
     trigger: str | None = field(default=None, compare=False)
-    # the primary's objects (added, deleted, modified) since the store's scan before it (the store's change counters,
-    # `site_changes`); None: not counted
-    changes: tuple[int, int, int] | None = field(default=None, compare=False)
 
     @property
     def date(self) -> str:
@@ -487,10 +484,9 @@ def primary_classes(m: dict, primary: str, unit: int = TIB) -> dict[int, float] 
 
 
 def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.datetime | None = None, unit: int = TIB,
-                   triggers: Mapping[str, str] | None = None, changes: Mapping[str, tuple[int, int, int]] | None = None) -> list[Scan]:
+                   triggers: Mapping[str, str] | None = None) -> list[Scan]:
     """Build ``Scan`` rows from ``(scan_id, meta.json)`` pairs in scan order, each with its canonical slug
-    (`scan_slugs`, as of ``now``), its trigger (``triggers``, `scan_triggers`) and its change counters (``changes``,
-    `site_changes`); sizes in ``unit`` bytes (TiB)."""
+    (`scan_slugs`, as of ``now``) and its trigger (``triggers``, `scan_triggers`); sizes in ``unit`` bytes (TiB)."""
     out: list[Scan] = []
     slugs = scan_slugs(dated_meta, now)
     ptb = pobjs = pts = None
@@ -510,7 +506,6 @@ def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.dat
                 slug=slugs[scan],
                 classes=primary_classes(m, primary, unit),
                 trigger=(triggers or {}).get(scan),
-                changes=(changes or {}).get(scan),
             )
         )
         ptb, pobjs, pts = tb, objs, ts
@@ -573,9 +568,6 @@ class DayRow:
     classes: dict[int, float] | None = field(default=None, compare=False)  # `scan`'s primary per class (`Scan.classes`)
     # the scans up to and including `scan` within the runway look-back (`RUNWAY_WINDOWS_D`; `quota_marks: runway`)
     hist: tuple[Scan, ...] = field(default=(), compare=False)
-    # the primary's objects (added, deleted, modified) since the prior reply scan: every scan between them summed; None
-    # where one of them wasn't counted (or there's no prior)
-    changes: tuple[int, int, int] | None = field(default=None, compare=False)
 
 
 def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = False) -> list[DayRow]:
@@ -618,9 +610,7 @@ def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False, seen:
     """``date``'s reply over scan ``s``, Δ vs ``prev`` (the prior day's reply scan); ``seen`` (chronological) gives
     its runway history."""
     reach = scan_ts(s.scan) - dt.timedelta(days=max(RUNWAY_WINDOWS_D) + 1)
-    span = [x for x in seen if prev is not None and prev.scan < x.scan <= s.scan]
     return DayRow(
-        changes=tuple(sum(x.changes[i] for x in span) for i in range(3)) if span and all(x.changes for x in span) else None,  # type: ignore[index,misc]
         hist=tuple(x for x in seen if x.scan <= s.scan and scan_ts(x.scan) >= reach),
         date=date,
         scan=s.scan,
@@ -660,9 +650,8 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     d = deg(_pct_val(dtb, tb), mult)
     size = f"{tb:,.0f} {cfg.unit.name} ({_tb(dtb)}, {_pct(dtb, tb)}%)"
     # Each bucket as a linked `% of quota (free)` clause (the bucket names are
-    # the over-time links; one bucket alone gets a trailing ↗ instead); then the primary's objects added, deleted and
-    # modified since the prior reply, where the store counted them (specs/change-metrics.md §4.5).
-    tail = _tail(day, cfg) + (f"{_tail_sep(cfg)}{changes_text(day.changes)}" if day.changes else "")
+    # the over-time links; one bucket alone gets a trailing ↗ instead).
+    tail = _tail(day, cfg)
     if day.provisional:
         url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
         return Reply(f"{_md(day.date)} · so far", f"{V.trend(d)} **{size}** · [as of {scan_ts(day.scan):%H:%M}Z]({url}){_tail_sep(cfg)}{tail}", icon_emoji=PROVISIONAL_ICON)
@@ -672,37 +661,6 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
         url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
         return Reply(cfg.title, f"{V.trend(d)} [{_md(day.date)}]({url}) — **{size}**{_tail_sep(cfg)}{tail}", **cfg.op_sender())
     raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
-
-
-def changes_text(c: tuple[int, int, int]) -> str:
-    """A reply's change breakdown: `+812 −40 ~113 objects` (added, deleted, modified)."""
-    added, deleted, modified = c
-    return f"+{added:,} −{deleted:,} ~{modified:,} objects"
-
-
-def changes_from_series(body: dict) -> dict[str, tuple[int, int, int]]:
-    """Each counted scan's `(added, deleted, modified)` from an `/api/series` body (its points' flows)."""
-    return {p["date"]: (p["added"], p["deleted"], p["modified"]) for p in body.get("points", []) if "added" in p}
-
-
-def site_changes(cfg: DigestConfig) -> dict[str, tuple[int, int, int]]:
-    """The primary's change counters per scan from the site's `/api/series` (its path; specs/change-metrics.md §4.1), as
-    the job (`$SITE_TOKEN`); {} without a token, on a failed read (a note on stderr: replies go without the breakdown),
-    or where the store counts none (a path below depth 1, a store before the counters)."""
-    from .deploy import site_token
-    from .site import SiteError, get_json
-
-    token = site_token()
-    if not token:
-        return {}
-    b = cfg.buckets.get(cfg.primary)
-    path = cfg.primary if b is None or b.path is None else b.path
-    try:
-        res = get_json(cfg.site_url, token, "/api/series", {"path": path})
-    except (SiteError, TimeoutError) as e:  # the breakdown is optional: a reply never waits on it
-        _err(f"digest: no change counters ({e}): replies go without the breakdown")
-        return {}
-    return changes_from_series(res) if isinstance(res, dict) else {}
 
 
 def day_line(day: DayRow, cfg: DigestConfig) -> DayLine:
@@ -744,7 +702,7 @@ def site_triggers(cfg: DigestConfig) -> dict[str, str]:
 
 
 def load_month(root: str, month: dt.date, primary: str, unit: int = TIB, triggers: Mapping[str, str] | None = None,
-               as_of: dt.date | None = None, changes: Mapping[str, tuple[int, int, int]] | None = None) -> Month | None:
+               as_of: dt.date | None = None) -> Month | None:
     """The month's scans from ``root`` (``gs://<bucket>/snapshots/cw``), sizes in ``unit`` bytes, each with its trigger
     (``triggers``), with ``lead`` = every scan of the last calendar day before it, ``pre`` = the OP window's scans
     before that (`window_scans`), ``closed`` once a later month's scan exists; ``as_of``: only the scans through that
@@ -755,7 +713,7 @@ def load_month(root: str, month: dt.date, primary: str, unit: int = TIB, trigger
         return None
     lead, in_month = w
     pre = read_metas(root, window_scans(scans, month, (lead or in_month)[0][0]))
-    rows = rows_from_meta(pre + lead + in_month, primary, unit=unit, triggers=triggers, changes=changes)
+    rows = rows_from_meta(pre + lead + in_month, primary, unit=unit, triggers=triggers)
     n, k = len(pre), len(pre) + len(lead)
     return Month(lead=rows[n:k], rows=rows[k:], closed=scans[-1] > in_month[-1][0], pre=rows[:n])
 
@@ -787,7 +745,7 @@ class QuotaTemplate:
         self.as_of = as_of
 
     def load(self, root: str, month: dt.date) -> Month | None:
-        return load_month(root, month, self.cfg.primary, self.cfg.unit.bytes, site_triggers(self.cfg), self.as_of, site_changes(self.cfg))
+        return load_month(root, month, self.cfg.primary, self.cfg.unit.bytes, site_triggers(self.cfg), self.as_of)
 
     def n_scans(self, month: Month) -> int:
         return len(month.rows)
@@ -802,7 +760,7 @@ class QuotaTemplate:
         """The month's scans as the site's renderer reads them (`src/digest/quota.ts` `QuotaRows`)."""
         def scan(r: Scan) -> dict:
             return {"scan": r.scan, "slug": r.slug, "tb": r.tb, "extra": r.extra, "classes": None if r.classes is None else {str(c): v for c, v in r.classes.items()},
-                    "objs": r.objs, **({"changes": list(r.changes)} if r.changes else {})}
+                    "objs": r.objs}
 
         return {"template": "quota", "closed": month.closed, "pre": [scan(r) for r in month.pre],
                 "lead": [scan(r) for r in month.lead], "rows": [scan(r) for r in month.rows]}
