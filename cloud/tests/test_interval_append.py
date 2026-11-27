@@ -875,7 +875,8 @@ class Fake:
             read_json=lambda k: self.keys[k], list_keys=lambda prefix: [k for k in self.keys if k.startswith(prefix)],
             published=lambda layouts, start: [s for s in self.published if s >= start], run_job=self.run_job,
             prepare=lambda d: self.keys.__setitem__(f"{G1}/deltas/{d}/scans.json", {}),
-            prune=lambda d: self.log.append(f"prune {d}"), log=self.log.append, dry_run=dry_run, now=lambda: NOW, **kw,
+            prune=lambda d: self.log.append(f"prune {d}"), log=self.log.append, dry_run=dry_run, now=lambda: NOW,
+            **{"job_ended": lambda job, region: None, **kw},
         )
 
     def calls(self) -> list[tuple[str, str]]:

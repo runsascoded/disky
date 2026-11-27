@@ -89,10 +89,26 @@ def test_compact_stage_writes_the_lease_for_its_job_before_submitting_it(tmp_pat
     r.compact_now = True
     r.carries()
     name = f.jobs[0][0]
-    want = {"owner": "<owner>", "holder": name, "at": NOW.isoformat(), "since": NOW.isoformat(), "ttl_s": ar.COMPACT_START_S, "gen": "g1"}
+    want = {"owner": "<owner>", "holder": name, "at": NOW.isoformat(), "since": NOW.isoformat(), "ttl_s": ar.COMPACT_START_S, "region": "us-east1",
+            "gen": "g1"}
     assert ([s for s, _ in f.calls()], seen, _record(lease)) == (["compact"], [want], want)
     with pytest.raises(ar.Busy):
         IvFake(["2026-08-05"]).runner(compacting=lambda: ar.LocalLeaseFile(lease)).run("2026-08-05")
+
+
+def test_compact_stage_takes_a_lease_whose_holder_ended(tmp_path):
+    """A lease left by a compaction job that ended (cancelled by hand, its renewals stopped) is taken at once, not after
+    its TTL: the next compaction is submitted. Its record names no region: the stage's own (where it submits its
+    compaction jobs) is asked."""
+    lease = tmp_path / "compacting.lease.json"
+    f = IvFake(["2026-08-03"], compact_level=1)
+    _one_scan(f)
+    _write(lease, "iv-compact-other", "g0", NOW)
+    r = f.runner(compacting=lambda: ar.LocalLeaseFile(lease), merge_wait=None, job_ended=lambda job, region: f"{job} CANCELLED in {region}")
+    r.compact_now = True
+    r.carries()
+    assert ([s for s, _ in f.calls()], [m for m in f.log if m.startswith("compaction lease:")], _record(lease)["holder"]) == (
+        ["compact"], ["compaction lease: its holder ended (iv-compact-other CANCELLED in us-east1): taking it"], f.jobs[0][0])
 
 
 def test_compact_stage_submits_nothing_while_another_compaction_holds_the_lease(tmp_path):

@@ -70,6 +70,7 @@ from urllib.parse import urlparse
 
 from disk_tree.env import name as env_name
 
+from .append_runner import JOB_NAME as BATCH_JOB_NAME
 from .heartbeat import Tail, run_teed, set_stage
 from .index_parts import PART_JSON, Part, part_ids, split_parts
 from .scan_profile import ScanProfile
@@ -1219,11 +1220,6 @@ STATIC_NAMES_BUSY = ("another coordinator or a compaction holds the static-names
 #: What comes of a scan the static-names store's lease held off (`busy_reason`'s tails), by who held it.
 STATIC_NAMES_AFTER = {"coordinator": "search for this scan comes with its append or the next run",
                       "compaction": "search for this scan comes with the first append after it publishes"}
-
-#: A Batch job's name (lowercase letters, digits and hyphens, a letter first): a lease `holder` that is one, not a
-#: `host:pid` (a holder outside Batch).
-BATCH_JOB_NAME = re.compile(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
-
 
 def busy_out(ctx: Ctx, step: str) -> Path:
     """Where `step`'s append writes the holder it found (`append_runner.BUSY_OUT_VAR`), any earlier run's removed."""

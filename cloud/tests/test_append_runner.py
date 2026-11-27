@@ -519,6 +519,134 @@ def test_a_renewed_lease_stays_held_and_a_stale_one_is_taken_over(tmp_path):
     assert json.loads((tmp_path / "l.json").read_text())["owner"] == b.owner
 
 
+def _ended_lease(path, clock: Clock, holder: str, ended, logs: list[str]) -> ar.CoordinatorLease:
+    return ar.CoordinatorLease(ar.LocalLeaseFile(path), holder=holder, now=clock, ended=ended, log=logs.append)
+
+
+def _held(path, clock: Clock, holder: str, region: str | None = "r1") -> None:
+    ar.CoordinatorLease(ar.LocalLeaseFile(path), holder=holder, now=clock, region=region).take()
+
+
+def test_a_lease_whose_holder_ended_is_taken_at_once(tmp_path):
+    """A held lease whose holder's job has ended (cancelled, failed) is taken without waiting out its TTL, logged; the
+    job is looked up in the region its record names."""
+    clock, logs, asked = Clock(), [], []
+    _held(tmp_path / "l.json", clock, "job-a")
+
+    def ended(job, region):
+        asked.append((job, region))
+        return f"{job} CANCELLED"
+    b = _ended_lease(tmp_path / "l.json", clock, "job-b", ended, logs)
+    b.take()
+    assert (asked, logs, json.loads((tmp_path / "l.json").read_text())["owner"]) == (
+        [("job-a", "r1")], ["coordinator lease: its holder ended (job-a CANCELLED): taking it"], b.owner)
+
+
+def test_a_lease_whose_holder_runs_stays_held(tmp_path):
+    clock, logs = Clock(), []
+    _held(tmp_path / "l.json", clock, "job-a")
+    with pytest.raises(ar.Busy) as e:
+        _ended_lease(tmp_path / "l.json", clock, "job-b", lambda job, region: None, logs).take()
+    assert (str(e.value), logs) == ("the coordinator lease is held by job-a (since 2026-10-22T12:00:00+00:00)", [])
+
+
+def test_an_unreadable_holder_state_falls_back_to_the_ttl(tmp_path):
+    """A failed state read never takes a lease: the TTL decides, and the failure is logged."""
+    clock, logs = Clock(), []
+    _held(tmp_path / "l.json", clock, "job-a")
+
+    def ended(job, region):
+        raise RuntimeError("403 forbidden")
+    b = _ended_lease(tmp_path / "l.json", clock, "job-b", ended, logs)
+    with pytest.raises(ar.Busy):
+        b.take()
+    clock.tick(ar.COORD_TTL_S + 1)
+    b.take()
+    # read once: past the TTL, the holder's state isn't asked
+    assert logs == ["coordinator lease: holder job-a's state unreadable (RuntimeError: 403 forbidden); its TTL decides"]
+
+
+@pytest.mark.parametrize("holder, region", [("host:123", "r1"), ("job-a", None)])
+def test_a_holder_with_no_job_name_or_no_region_is_never_looked_up(tmp_path, holder, region):
+    """Only a job named with its region is asked about: another region's lookup would 404 for a live holder."""
+    clock, asked = Clock(), []
+    _held(tmp_path / "l.json", clock, holder, region)
+    with pytest.raises(ar.Busy):
+        _ended_lease(tmp_path / "l.json", clock, "job-b", lambda job, region: asked.append(job), []).take()
+    assert asked == []
+
+
+def test_a_lease_record_keeps_its_region_and_an_adopter_carries_it(tmp_path, monkeypatch):
+    clock = Clock()
+    monkeypatch.setenv(ar.JOB_REGION_VAR, "us-east1")
+    a = ar.CoordinatorLease(ar.LocalLeaseFile(tmp_path / "a.json"), holder="job-a", now=clock)
+    a.take()
+    monkeypatch.delenv(ar.JOB_REGION_VAR)
+    ar.CoordinatorLease(ar.LocalLeaseFile(tmp_path / "b.json"), holder="job-b", now=clock, region="r2").take()
+    c = ar.CoordinatorLease(ar.LocalLeaseFile(tmp_path / "b.json"), holder="job-b", now=clock, adopt=True)
+    c.take()
+    assert ([json.loads((tmp_path / f).read_text()).get("region") for f in ("a.json", "b.json")]) == ["us-east1", "r2"]
+
+
+class _HTTPError(Exception):
+    def __init__(self, code):
+        super().__init__(f"HTTP {code}")
+        self.response = type("R", (), {"status_code": code})()
+
+
+def _backend(states: dict[str, str], code: int = 404):
+    """A job backend per region: `states[region]` the job's state there; any other region raises HTTP `code`."""
+    from dt_cloud import job_backend as jb
+
+    class Backend:
+        def __init__(self, region):
+            self.region = region
+
+        def status(self, job):
+            if self.region not in states:
+                raise _HTTPError(code)
+            return jb.JobStatus(states[self.region], "")
+    return lambda region=None, project=None, **kw: Backend(region)
+
+
+@pytest.mark.parametrize("state, want", [("CANCELLED", "j CANCELLED"), ("SUCCEEDED", "j SUCCEEDED"), ("FAILED", "j FAILED"),
+                                         ("RUNNING", None), ("QUEUED", None)])
+def test_job_ended_names_a_terminal_state(monkeypatch, state, want):
+    from dt_cloud import job_backend as jb
+
+    monkeypatch.setattr(jb, "resolve", _backend({"r1": state}))
+    assert ar.job_ended("p")("j", "r1") == want
+
+
+def test_job_ended_reads_a_missing_job_as_gone_and_raises_other_errors(monkeypatch):
+    from dt_cloud import job_backend as jb
+
+    monkeypatch.setattr(jb, "resolve", _backend({}))
+    assert ar.job_ended("p")("j", "r1") == "j gone"
+    monkeypatch.setattr(jb, "resolve", _backend({}, code=500))
+    with pytest.raises(_HTTPError):
+        ar.job_ended("p")("j", "r1")
+
+
+@pytest.mark.parametrize("record_region, taken", [("r1", False), ("r2", True)])
+def test_a_404_takes_the_lease_only_in_the_records_own_region(tmp_path, monkeypatch, record_region, taken):
+    """The holder runs in r1, and r2's backend has no such job (404). A record naming r1 is asked in r1 (running: held);
+    only a record naming r2, where the job is gone, is taken. The taker's own region never stands in for the record's."""
+    from dt_cloud import job_backend as jb
+
+    monkeypatch.setattr(jb, "resolve", _backend({"r1": "RUNNING"}))
+    monkeypatch.setenv(ar.JOB_REGION_VAR, "r2")
+    clock = Clock()
+    _held(tmp_path / "l.json", clock, "job-a", record_region)
+    b = ar.CoordinatorLease(ar.LocalLeaseFile(tmp_path / "l.json"), holder="job-b", now=clock, ended=ar.job_ended("p"), log=lambda m: None)
+    if taken:
+        b.take()
+    else:
+        with pytest.raises(ar.Busy):
+            b.take()
+    assert json.loads((tmp_path / "l.json").read_text())["holder"] == ("job-b" if taken else "job-a")
+
+
 def test_release_removes_only_its_own_lease(tmp_path):
     clock = Clock()
     a = _lease(tmp_path / "l.json", clock, "job-a")
