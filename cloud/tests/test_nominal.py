@@ -118,6 +118,11 @@ class Writer:
         return N.converge(self.cfg, rows, deepcopy(self.saved), self.slack, self.save, lambda: None, now=lambda: 1000)
 
 
+def test_durations_take_hours_and_minutes_from_an_hour():
+    assert [N.hm(s) for s in (0, 24, 562, 3599, 3600, 3629, 3631, 7366, 38461)] == [
+        "0m 00s", "0m 24s", "9m 22s", "59m 59s", "1h 0m", "1h 0m", "1h 1m", "2h 3m", "10h 41m"]
+
+
 def test_copy_states_boundary_trigger_mix_and_exact_run_links():
     rows = [row(2, trigger='manual'), row(1), row(0, 'failed')]
     good, boundary = N.streak(rows)

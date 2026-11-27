@@ -386,10 +386,19 @@ def starter(row: dict) -> tuple[str, str | None]:
     return face or TRIGGER_EMOJI[row['run']['trigger']], None if face else by
 
 
+def hm(seconds: float) -> str:
+    """A duration: under an hour in minutes and seconds (`9m 22s`), from an hour in hours and minutes, to the nearest
+    minute (`1h 55m`): seconds don't matter at that length."""
+    if seconds < 3600:
+        return f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
+    h, m = divmod(round(seconds / 60), 60)
+    return f"{h}h {m}m"
+
+
 def took(row: dict) -> str:
-    """A run's duration (`115m 54s`), or `duration unknown`."""
+    """A run's duration (`1h 56m`, `9m 22s`), or `duration unknown`."""
     seconds = row.get('secs')
-    return 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
+    return 'duration unknown' if seconds is None else hm(seconds)
 
 
 def reply(cfg: Config, row: dict) -> str:
@@ -416,7 +425,7 @@ def si(n: float, sign: bool = False) -> str:
 def outcome(row: dict, duration: bool = True) -> str:
     """A finished run's duration, cost and output (its generated files' size and change), as far as recorded."""
     seconds = row.get('secs') if duration else None
-    parts = [] if seconds is None else [f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"]
+    parts = [] if seconds is None else [hm(seconds)]
     if row.get('cost_usd') is not None:
         parts.append(f"${row['cost_usd']:.2f}")
     if row.get('out_bytes') is not None:
@@ -955,7 +964,7 @@ def phases(row: dict, n: int = 5) -> str:
     """A run's `n` longest phases, longest first (`list marin-na 9m 22s`)."""
     spans = sorted((s for s in row.get('spans') or [] if s.get('end') is not None and s.get('start') is not None),
                    key=lambda s: (s['start'] - s['end'], s['phase']))[:n]
-    return ' · '.join(f"{s['phase']} {int(s['end'] - s['start']) // 60}m {int(s['end'] - s['start']) % 60:02d}s" for s in spans)
+    return ' · '.join(f"{s['phase']} {hm(s['end'] - s['start'])}" for s in spans)
 
 
 def status(cfg: Config, done: list[dict]) -> str:
