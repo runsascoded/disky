@@ -119,7 +119,8 @@ class Writer:
 
 
 def test_durations_take_hours_and_minutes_from_an_hour():
-    assert [N.hm(s) for s in (0, 24, 562, 3599, 3600, 3629, 3631, 7366, 38461)] == [
+    # a half minute rounds up (3630 s = 60.5 min), as pages-kit's `took`
+    assert [N.hm(s) for s in (0, 24, 562, 3599, 3600, 3629, 3630, 7366, 38461)] == [
         "0m 00s", "0m 24s", "9m 22s", "59m 59s", "1h 0m", "1h 0m", "1h 1m", "2h 3m", "10h 41m"]
 
 

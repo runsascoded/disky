@@ -1,7 +1,7 @@
 /** The monthly admin thread's opening post (`@disk-tree/pages-kit/admin/monthOp`, specs/admin-monthly-thread.md): its
  *  text over a fixture month, as specs. */
 import { describe, expect, it } from 'vitest'
-import { metaLine, monthOpText, type MonthOpCfg, type MonthOpInput, type OpRun, si, statusLine } from '@disk-tree/pages-kit/admin/monthOp'
+import { metaLine, monthOpText, type MonthOpCfg, type MonthOpInput, type OpRun, si, statusLine, took } from '@disk-tree/pages-kit/admin/monthOp'
 
 const T = (iso: string) => Date.parse(iso) / 1000
 const SITE = 'https://ops.example.test'
@@ -71,6 +71,13 @@ const META: MonthOpInput['meta'] = {
 
 const CFG: MonthOpCfg = { site: SITE }
 const lines = (input: MonthOpInput, cfg: MonthOpCfg = CFG) => monthOpText(input, cfg).split('\n')
+
+describe('took', () => {
+  it('minutes and seconds under an hour, hours and minutes from one (a half minute up, as `nominal.hm`)', () => {
+    expect([0, 24, 562, 3599, 3600, 3629, 3630, 7366, 38461].map(took)).toEqual([
+      '0m 00s', '0m 24s', '9m 22s', '59m 59s', '1h 0m', '1h 0m', '1h 1m', '2h 3m', '10h 41m'])
+  })
+})
 
 describe('monthOpText', () => {
   it('a month of mixed outcomes, linked both ways', () => {
