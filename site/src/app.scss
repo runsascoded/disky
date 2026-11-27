@@ -2785,31 +2785,6 @@ select.assign-sel {
   .li.manual { cursor: default; border-radius: 4px; padding: 1px 5px; margin: -1px -5px; outline: none; }
   .li.manual.lit, .li.manual:focus-visible { color: var(--ink); background: color-mix(in oklab, #f0b72f 18%, transparent); }
 }
-// The change strip under the objects line (`ChangeStrip`, specs/change-metrics.md §4.2): written up (added green,
-// modified a neutral hatch on it), deleted down (red), net a dot; colors the diff's polarity (green grew, red shrank).
-#over-time {
-  .cs-add { background: var(--grew); }
-  .cs-del { background: var(--shrank); }
-  .cs-mod { background: repeating-linear-gradient(45deg, var(--ink-3) 0 2px, transparent 2px 4px); }
-  .cs-net, .cs-net-sw { background: var(--ink); border-radius: 50%; }
-  .change-strip {
-    .cs-bar { outline: none; cursor: default; border-radius: 2px; }
-    .cs-bar.on, .cs-bar:focus-visible { background: color-mix(in oklab, var(--ink-3) 16%, transparent); }
-    .cs-axis { font-size: 10px; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .cs-tip {
-      z-index: var(--z-float); white-space: nowrap; pointer-events: none;
-      background: var(--panel); color: var(--ink); border: 1px solid color-mix(in oklab, var(--ink-3) 55%, var(--line));
-      border-radius: 6px; padding: 5px 8px; font-size: 12px; font-variant-numeric: tabular-nums; box-shadow: 0 4px 14px rgb(0 0 0 / 0.22);
-    }
-  }
-  .change-legend {
-    display: flex; gap: 12px; flex-wrap: wrap; margin-top: 2px;
-    .li { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); font-size: 12px; }
-    .sw { width: 10px; height: 10px; border-radius: 3px; }
-    .cs-net-sw { width: 6px; height: 6px; }
-  }
-  .change-note { color: var(--ink-3); font-size: 12px; margin: 2px 0 0; }
-}
 // The diff window's length beside its pickers (`fmtSpan`; its tooltip gives other units)
 .d-span {
   margin-left: 8px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap;
