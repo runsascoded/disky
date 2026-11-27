@@ -4,7 +4,7 @@ import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseFill, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
   type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseDeferred, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
   isMaintenance, liveness, LOST_S, maintStore, phaseStatus, processingSecs, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, outcomeSteps, passingSince, runOutcomeLabel, statusMatches,
-  stepFailure, STATUS_FILTERS, typicalScanSecs, aboutDur,
+  stepFailure, STATUS_FILTERS, typicalScanSecs, aboutDur, jobTarget, reasonJob,
   type PhaseIssue,
 } from './scanRunsModel'
 
@@ -195,6 +195,36 @@ describe('phase spans', () => {
     expect(issues).toEqual([{ phase: 'static-names', outcome: 'skipped', recovery: null, reason: skip }])
     expect([runOutcome(RUNS[2], issues), runOutcomeLine(RUNS[2], issues)]).toEqual(['incomplete', `incomplete: static-names ${skip}`])
     expect(phaseSpans(RUNS[2], ps).map(s => s.status)).toEqual(['done', 'done', 'done'])
+  })
+  it('a busy skip naming its holder: the job in its reason, linked to its recorded run, else its Batch job', () => {
+    const skip = 'skipped (busy): compaction 2026-10-15cw.c003 → c004 (job sn-compact-2026-11-25-1800-215800 in us-east1, since 11-25 21:58Z) '
+      + 'holds the static-names store; search for this scan comes with the first append after it publishes'
+    const ps: ScanRunPhase[] = [{ ...phase('b', 'static-names', 1, 2300, 2310), note: `overlapped, ${skip}` }]
+    const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
+    expect([issues, runOutcomeLine(RUNS[2], issues)]).toEqual([
+      [{ phase: 'static-names', outcome: 'skipped', recovery: null, reason: skip }], `incomplete: static-names ${skip}`])
+    const j = reasonJob(skip)!
+    expect([j, skip.slice(j.start, j.end)]).toEqual([
+      { job: 'sn-compact-2026-11-25-1800-215800', region: 'us-east1', start: 57, end: 90 }, 'sn-compact-2026-11-25-1800-215800'])
+    const compaction = run({ run_id: 'uid-c', scan: '2026-11-25T1800', kind: 'compact', job_name: 'sn-compact-2026-11-25-1800-215800', started_ts: 4000 })
+    const older = { ...compaction, run_id: 'uid-old', started_ts: 3000 }
+    expect([
+      jobTarget(j.job, j.region, [RUNS[2], older, compaction], 'p'),
+      jobTarget(j.job, j.region, [RUNS[2]], 'p'),
+      jobTarget(j.job, null, [RUNS[2]], 'p'),
+      jobTarget(j.job, j.region, [RUNS[2]], null),
+    ]).toEqual([
+      { run: 'uid-c' },
+      { href: 'https://console.cloud.google.com/batch/jobsDetail/regions/us-east1/jobs/sn-compact-2026-11-25-1800-215800/details?project=p' },
+      null,
+      null,
+    ])
+    expect([
+      reasonJob('skipped (busy): another coordinator (job cw-sn-catchup-1, since 02:10Z) holds the static-names store\'s lease'),
+      reasonJob('skipped (busy): another coordinator (cw-usage-snapshot-group0-0:4211, since 02:10Z) holds it'),
+      reasonJob('skipped (busy): another coordinator or a compaction holds the static-names store\'s lease'),
+      reasonJob('failed: the Batch job failed (exit 1)'),
+    ]).toEqual([{ job: 'cw-sn-catchup-1', region: null, start: 41, end: 56 }, null, null, null])
   })
   it('a skip clause only at a closed note\'s start or after a comma', () => {
     expect([

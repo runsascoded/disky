@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import type { ScanRun } from './scanRunsModel'
-import { agoLong, fmtRunShort, IssueStanding, OUTCOME_HEAD, fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
+import { agoLong, fmtRunShort, IssueStanding, type JobLinks, OUTCOME_HEAD, fmtRunTime, ReasonText, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
@@ -66,6 +66,23 @@ describe('IssueStanding', () => {
   })
   it('keeps "Done by" for a linked phase-recovery attempt', () => {
     expect(render(run('phase-recovery'))).toMatch(/^Done by <a href="\/scans\/r1">a later attempt<\/a> at .+\.$/)
+  })
+})
+
+describe('ReasonText', () => {
+  const text = 'compaction g.c003 → c004 (job sn-compact-x in us-east1, since 21:58Z) holds the static-names store'
+  const render = (jobs?: JobLinks): string => renderToStaticMarkup(createElement(
+    MemoryRouter, null, createElement(ReasonText, { text, jobs, runHref: (id: string) => `/scans/${id}` }),
+  ))
+  const compaction = { run_id: 'uid-c', scan: '2026-11-25T1800', kind: 'compact', job_name: 'sn-compact-x', started_ts: 1 } as ScanRun
+  it('links the job a busy skip names: its recorded run, else its Batch job, else nothing', () => {
+    expect([render({ runs: [compaction], project: 'p' }), render({ runs: [], project: 'p' }), render({ runs: [], project: null }), render()]).toEqual([
+      'compaction g.c003 → c004 (job <a href="/scans/uid-c"><code>sn-compact-x</code></a> in us-east1, since 21:58Z) holds the static-names store',
+      'compaction g.c003 → c004 (job <a href="https://console.cloud.google.com/batch/jobsDetail/regions/us-east1/jobs/sn-compact-x/details?project=p" '
+      + 'target="_blank" rel="noreferrer"><code>sn-compact-x</code> ↗</a> in us-east1, since 21:58Z) holds the static-names store',
+      text,
+      text,
+    ])
   })
 })
 

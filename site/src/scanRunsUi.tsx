@@ -6,8 +6,8 @@ import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
 import {
-  BEHIND, compactSpans, DEFERRED, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, overlappingFailures, PASSING, phaseFamilies, phaseFamily, phaseFill, phaseOutcome, runOutcome, scanRunOf,
-  type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun,
+  BEHIND, compactSpans, DEFERRED, issueLeaves, issueNext, issueState, issueWhat, jobTarget, outcomeParts, overlappingFailures, PASSING, phaseFamilies, phaseFamily, phaseFill, phaseOutcome,
+  reasonJob, runOutcome, scanRunOf, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun,
 } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
 import { DEFAULT_STORE, STORES, type Store, storeQuery, storeUrl } from './stores'
@@ -134,13 +134,29 @@ export function IssueStanding({ issue: i, runHref }: { issue: PhaseIssue; runHre
   return <>Done by {link}{r.finished_ts != null && <> at {fmtRunTime(r.finished_ts)}</>}.</>
 }
 
-/** A succeeded run's issues, one block each: what happened (with the recorded verdict when it has one), what it
- * leaves short while nothing has done its work nor passed its check since (its step's `leaves`), and where it stands. */
-export function IssueList({ issues, runHref }: { issues: readonly PhaseIssue[]; runHref?: (id: string) => string }) {
+/** Where a reason's job links (`jobTarget`): the runs to find its recorded run among, and the project its Batch page needs. */
+export interface JobLinks { runs: readonly ScanRun[]; project: string | null }
+
+/** `text`, with the Batch job it names (`reasonJob`: a busy skip's lease holder) linked to the run that job recorded
+ * (`runHref`), else to its Batch console page; plain where `jobs` isn't given or there is nowhere to go. */
+export function ReasonText({ text, jobs, runHref }: { text: string; jobs?: JobLinks; runHref?: (id: string) => string }) {
+  const j = reasonJob(text)
+  const to = j && jobs ? jobTarget(j.job, j.region, jobs.runs, jobs.project) : null
+  if (!j || !to || ('run' in to && !runHref)) return <>{text}</>
+  const name = <code>{j.job}</code>
+  return <>{text.slice(0, j.start)}{'run' in to
+    ? <Link to={runHref!(to.run)}>{name}</Link>
+    : <a href={to.href} target="_blank" rel="noreferrer">{name} ↗</a>}{text.slice(j.end)}</>
+}
+
+/** A succeeded run's issues, one block each: what happened (with the recorded verdict when it has one; a job it names
+ * linked through `jobs`), what it leaves short while nothing has done its work nor passed its check since (its step's
+ * `leaves`), and where it stands. */
+export function IssueList({ issues, runHref, jobs }: { issues: readonly PhaseIssue[]; runHref?: (id: string) => string; jobs?: JobLinks }) {
   return <div className="sr-issues">{issues.map(i => {
     const more = i.outcome === BEHIND || i.outcome === DEFERRED ? i.reason : i.detail
     return <div key={i.phase} className={issueState(i)}>
-      <div><b>{i.phase}</b> {issueWhat(i)}</div>
+      <div><b>{i.phase}</b> <ReasonText text={issueWhat(i)} jobs={jobs} runHref={runHref} /></div>
       {issueLeaves(i) && <div>{issueLeaves(i)}</div>}
       {more && <div className="dim">{more}</div>}
       <div className="dim"><IssueStanding issue={i} runHref={runHref} /></div>
@@ -167,7 +183,7 @@ const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'b
  * A succeeded run with issues reads `<outcome> · <steps>`, or `<check> failed · passing since <scan>` (`outcomeParts`);
  * its tip lists every issue (`IssueList`) and pins on a click or a tap, so a phone reaches it and the recovering (or
  * passing) run's link (`runHref`) can be followed. */
-export function Status({ run, failedAt, issues = [], cell, lost, runHref }: { run: ScanRun; failedAt?: string | null; issues?: PhaseIssue[]; cell?: boolean; lost?: boolean; runHref?: (id: string) => string }) {
+export function Status({ run, failedAt, issues = [], cell, lost, runHref, jobs }: { run: ScanRun; failedAt?: string | null; issues?: PhaseIssue[]; cell?: boolean; lost?: boolean; runHref?: (id: string) => string; jobs?: JobLinks }) {
   if (run.status === 'running' && lost) {
     return <Tooltip cell={cell} content={<><div>{QUIET_TIP}</div><div className="dim">Its duration stops at its last write; a later run's start marks it failed once Batch confirms its job ended.</div></>}>
       <span className="sr-status lost">lost?</span>
@@ -176,7 +192,7 @@ export function Status({ run, failedAt, issues = [], cell, lost, runHref }: { ru
   if (run.status === 'succeeded' && issues.length) {
     const outcome = runOutcome(run, issues)
     const { head, tail } = outcomeParts(run, issues)
-    return <Tooltip cell={cell} pinnable content={<><div>{OUTCOME_HEAD[outcome]}</div><IssueList issues={issues} runHref={runHref} /></>}>
+    return <Tooltip cell={cell} pinnable content={<><div>{OUTCOME_HEAD[outcome]}</div><IssueList issues={issues} runHref={runHref} jobs={jobs} /></>}>
       <span className={`sr-status ${OUTCOME_CLASS[outcome]}`}>{head}{tail && <> <span className="sr-steps">· {tail}</span></>}</span>
     </Tooltip>
   }

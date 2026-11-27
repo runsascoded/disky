@@ -673,6 +673,25 @@ export const mapHref = (scan: string, storePath = '/', slug: (id: string) => str
 export const batchHref = (project: string, region: string, job: string, tab: 'details' | 'logs' = 'details'): string =>
   `https://console.cloud.google.com/batch/jobsDetail/regions/${region}/jobs/${job}/${tab}?project=${encodeURIComponent(project)}`
 
+/** The Batch job a busy skip's reason names (`dt_cloud.scan_steps.busy_reason`: `compaction g.c003 → c004 (job <name> in
+ * <region>, since 21:58Z) holds …`): its name, its region when said, and where the name sits in `text`; else null. */
+export interface ReasonJob { job: string; region: string | null; start: number; end: number }
+export function reasonJob(text: string): ReasonJob | null {
+  const m = /\(job ([a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)(?: in ([a-z]+-[a-z]+\d+))?[,)]/.exec(text)
+  if (!m) return null
+  const start = m.index + '(job '.length
+  return { job: m[1], region: m[2] ?? null, start, end: start + m[1].length }
+}
+
+/** Where a job a reason names goes: the run it recorded on /scans (`run`: a compaction's or a merge's, `dt_cloud.maint_runs`;
+ * the newest by that job name), else its Batch console page (`href`: with the project and its region), else null. */
+export function jobTarget(job: string, region: string | null, runs: readonly Pick<ScanRun, 'run_id' | 'job_name' | 'started_ts'>[],
+  project: string | null): { run: string } | { href: string } | null {
+  const run = runs.filter(r => r.job_name === job).sort((a, b) => (b.started_ts ?? 0) - (a.started_ts ?? 0))[0]
+  if (run) return { run: run.run_id }
+  return project && region ? { href: batchHref(project, region, job) } : null
+}
+
 /** Logs Explorer's `;query=` is parsed as URL params: `(`/`)` must be escaped
  * too (`encodeURIComponent` leaves them), or the query is cut at the first `(`. */
 export const logsQueryParam = (query: string): string => encodeURIComponent(query).replace(/\(/g, '%28').replace(/\)/g, '%29')
