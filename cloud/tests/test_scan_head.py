@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import signal
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -396,7 +397,7 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
         return record_sql(rec, now)
 
     monkeypatch.setattr(scan_runs, "record_sql", spy)
-    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda timeout=None: 0))
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, stdout=BytesIO(), wait=lambda timeout=None: 0))
     assert H.head(prof, NF, tmp_path / "launch") == 0
     assert (runs_written[0], runs_written[-1][:2], set(dbs)) == (
         ("2026-10-16T1200", "meta", "running", "schedule"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
@@ -449,7 +450,7 @@ def test_head_stores_the_dag_before_the_run(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(H.subprocess, "run", preview)
-    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: events.append("nextflow run") or SimpleNamespace(pid=0, wait=lambda timeout=None: 0))
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: events.append("nextflow run") or SimpleNamespace(pid=0, stdout=BytesIO(), wait=lambda timeout=None: 0))
     assert H.head(prof, nf_dir, launch) == 0
     assert previews == [H.preview_argv(nf_dir, launch)]
     assert previews[0][-3:] == ["-preview", "-with-dag", str(launch / "dag-preview.mmd")]
@@ -497,7 +498,7 @@ def test_head_publishes_cache_hits_while_nextflow_is_running(tmp_path, monkeypat
                 raise H.subprocess.TimeoutExpired(argv, timeout)
             return 0
 
-        return SimpleNamespace(pid=0, wait=wait)
+        return SimpleNamespace(pid=0, stdout=BytesIO(), wait=wait)
 
     monkeypatch.setattr(H, '_record', record)
     monkeypatch.setattr(H, 'publish_reports', lambda *args: [])
@@ -533,7 +534,7 @@ def test_head_publishes_independent_failed_and_resumed_ownership_receipts(tmp_pa
         code = next(codes)
         (launch / 'trace.tsv').write_text('task_id\thash\tnative_id\tname\tstatus\texit\tworkdir\n'
                                           f'1\tab/cccccc\t-\tindex\t{"FAILED" if code else "CACHED"}\t{code}\t{task_dir}\n')
-        return SimpleNamespace(pid=0, wait=lambda timeout: code)
+        return SimpleNamespace(pid=0, stdout=BytesIO(), wait=lambda timeout: code)
 
     monkeypatch.setattr(H.subprocess, 'Popen', popen)
     for store, run in [('primary', 'run-1'), ('meta', 'run-1'), ('primary', 'run-2')]:
@@ -710,3 +711,36 @@ def test_head_drives_its_backend(tmp_path, monkeypatch, rc, term, calls, finish)
     session = H.session_id("fix", "2026-10-16T1200")
     assert fake.calls == [("prepare", "2026-10-16T1200", session, "list_source"), ("store_preview",), ("start",), *calls]
     assert [(n, a) for n, a in records if n != "start"] == [("finish", finish)]
+
+
+class Tick:
+    def __init__(self, t: float = 0.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def test_the_heads_liveness_detail_names_the_tasks_running():
+    """The head's view of its Nextflow run (`NfTasks`): each task submitted (Nextflow's stdout) more times than the trace
+    has ended it is running, oldest first (then by name), with the time since its latest submission; a retry runs again; cached and
+    failed rows are counted; past three running, `+N more`."""
+    clock = Tick()
+    nf = H.NfTasks(clock)
+    for t, line in [
+        (0, "[ab/123456] Submitted process > list_source (s3://a)"),
+        (0, "[ab/123457] Submitted process > list_source (s3://b)"),
+        (300, "[cd/000001] Submitted process > index"),
+        (300, "executor >  google-batch (3)"),
+        (900, "[ef/000002] Submitted process > static_names"),
+        (900, "[ef/000003] Submitted process > interval_store"),
+        (960, "[aa/000004] Re-submitted process > index"),
+        (1000, "[bb/000005] Submitted process > probe"),
+    ]:
+        clock.t = t
+        nf.feed(line)
+    clock.t = 3600
+    trace = ("task_id\tname\tstatus\n1\tlist_source (s3://a)\tCOMPLETED\n2\tlist_source (s3://b)\tCOMPLETED\n"
+             "3\tindex\tFAILED\n4\twarm_cache\tCACHED\n5\tdigest\tCACHED\n6\tprob")
+    assert nf.status(trace) == "4 done (2 cached), 1 failed, running interval_store 45m, static_names 45m, index 44m, +1 more"
+    assert H.NfTasks(clock).status("") == "0 done"

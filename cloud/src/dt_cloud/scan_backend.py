@@ -70,6 +70,11 @@ class Backend(ABC):
         """The run's DAG file (in `engine`'s format), when what it says (e.g. which tasks a resume found done) changed
         since the last call; else None."""
 
+    def status(self, run: Run) -> str | None:
+        """While the run runs, one line on how far along it is (the head's liveness detail: tasks done, the ones
+        running); None when the backend can't say."""
+        return None
+
     @abstractmethod
     def interrupt(self) -> None:
         """The head got a TERM / INT: stop the run (`wait` then returns)."""

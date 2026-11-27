@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import io
 import json
 import os
 import re
@@ -37,6 +38,7 @@ from urllib.parse import urlparse
 
 from . import scan_dag
 from .cost_labels import ENV as LABELS_ENV, check_label, deployment_labels
+from .heartbeat import PUMP_JOIN_S, Tail, clean_line, fmt_secs, set_detail, set_stage
 from .scan_backend import Backend, Run
 from .scan_dag import ScanDag
 from .scan_dag_nf import render
@@ -267,6 +269,53 @@ def first_failed(trace: Path) -> str | None:
     return None
 
 
+#: Nextflow's line for a task it submits (`NXF_ANSI_LOG=false`): `[ab/123456] Submitted process > <task name>` (a retry:
+#: `Re-submitted`); the name is the trace's `name`.
+NF_SUBMITTED = re.compile(r"^\[[0-9a-f]{2}/[0-9a-f]{6}\] (?:Submitted|Re-submitted) process > (?P<name>.+)$")
+#: A traced task's statuses that end one of its submissions (a `CACHED` row was never submitted).
+NF_ENDED = frozenset({"COMPLETED", "FAILED", "ABORTED"})
+#: The running tasks a head's liveness detail names; past it, `+N more`.
+NF_RUNNING_SHOWN = 3
+
+
+class NfTasks(Tail):
+    """The head's view of its Nextflow run, from Nextflow's stdout (fed as a `Tail`: each `NF_SUBMITTED` line, when
+    `clock` saw it) and its trace (`status`): what the head's liveness line says while Nextflow runs."""
+
+    def __init__(self, clock=time.monotonic):
+        super().__init__(clock)
+        self.submitted: dict[str, list[float]] = {}
+
+    def feed(self, text: str) -> None:
+        super().feed(text)
+        if m := NF_SUBMITTED.match(clean_line(text)):
+            with self._lock:
+                self.submitted.setdefault(m["name"], []).append(self.clock())
+
+    def status(self, trace: str) -> str:
+        """`<n> done[ (<c> cached)][, <f> failed][, running <task> <time>, …]`: the trace's rows (`trace`, its TSV; an
+        incomplete last row counts for nothing) and each task submitted more times than the trace has ended it, oldest
+        submission first, with the time since its latest."""
+        rows = list(csv.DictReader(io.StringIO(trace), delimiter="\t")) if trace else []
+        by = {s: sum(r.get("status") == s for r in rows) for s in ("COMPLETED", "CACHED", "FAILED", "ABORTED")}
+        ended: dict[str, int] = {}
+        for r in rows:
+            if r.get("status") in NF_ENDED and r.get("name"):
+                ended[r["name"]] = ended.get(r["name"], 0) + 1
+        now = self.clock()
+        with self._lock:
+            running = sorted((ts[-1], n) for n, ts in self.submitted.items() if len(ts) > ended.get(n, 0))
+        done = by["COMPLETED"] + by["CACHED"]
+        parts = [f"{done} done" + (f" ({by['CACHED']} cached)" if by["CACHED"] else "")]
+        if failed := by["FAILED"] + by["ABORTED"]:
+            parts.append(f"{failed} failed")
+        if running:
+            shown = ", ".join(f"{n} {fmt_secs(now - t)}" for t, n in running[:NF_RUNNING_SHOWN])
+            more = len(running) - NF_RUNNING_SHOWN
+            parts.append(f"running {shown}" + (f", +{more} more" if more > 0 else ""))
+        return ", ".join(parts)
+
+
 def echo_task_logs(trace: Path, work: Path, out=err) -> int:
     """Each traced task's `.command.log` (its stdout + stderr) under a `--- task <name> [<hash>] <status>` line, in trace
     order: the local executor's tasks log only into their work dirs, which a container's exit takes with it (a cloud
@@ -484,6 +533,7 @@ class NextflowBackend(Backend):
         self.nf_dir = nf_dir
         self.proc: subprocess.Popen | None = None
         self.seen_cached: tuple[str, ...] = ()
+        self.tasks = NfTasks()
 
     def _cloud(self, run: Run) -> bool:
         return run.profile.executor.kind != "local"
@@ -516,13 +566,25 @@ class NextflowBackend(Backend):
             run.profile, run.profile_json, run.scan, run.gen, run.session,
             None if run.run_id_source == "unrecorded" else run.run_id, run.run_id_source, run.run_id, str(uuid.uuid4()),
             run.now.isoformat(), run.env, task_work_root(run.profile))
-        self.proc = subprocess.Popen(self.argv, cwd=run.launch, env=self.nf_env, start_new_session=True)
+        # its stdout through `tasks` on the way to ours: what it submits, for the liveness line (`status`)
+        self.proc = subprocess.Popen(self.argv, cwd=run.launch, env=self.nf_env, start_new_session=True, stdout=subprocess.PIPE)
+        self.pump = self.tasks.pump(self.proc.stdout, sys.stdout)
 
     def wait(self, timeout: float) -> int | None:
         try:
-            return self.proc.wait(timeout=timeout)
+            rc = self.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return None
+        self.pump.join(PUMP_JOIN_S)
+        return rc
+
+    def status(self, run: Run) -> str | None:
+        trace = run.launch / "trace.tsv"
+        try:
+            text = trace.read_text(errors="replace") if trace.exists() else ""
+        except OSError:
+            text = ""
+        return self.tasks.status(text)
 
     def progress(self, run: Run) -> Path | None:
         from .run_dag import cached_tasks
@@ -649,6 +711,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
             backend.store_preview(run)
 
     stopped: list[int] = []
+    set_stage(f"{backend.engine}: run")
     backend.start(run)
 
     def stop(sig: int, frame) -> None:  # noqa: ANN001
@@ -664,11 +727,13 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
                 beat()
             if recording and (dag := backend.progress(run)) is not None:
                 _record(dag_cmd, [run_id, str(dag)])
+            set_detail(backend.status(run))
             if (rc := backend.wait(10)) is not None:
                 break
     finally:
         for s, h in prev.items():
             signal.signal(s, h)
+    set_stage(f"{backend.engine}: finish")
     if stopped:
         rc = 128 + stopped[0]
         backend.cancel(run)
