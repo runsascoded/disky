@@ -753,6 +753,13 @@ def test_weekly_variant_is_a_reply_per_week_edited_as_days_land():
         icon_emoji=":calendar:",
     ))]
     assert tpl.edited_variants == ("body", "weekly")
+    # its days are the daily replies' (`sender`: each day's morning scan), not `body`'s (each day's last scan): a day
+    # whose 12:00 scan hasn't landed has no line yet, so no change is dated a day earlier than its daily reply dates it
+    half = D.Month(lead=MONTH.lead, rows=MONTH.rows[:3])
+    assert [u.reply.body for u in tpl.units(half, "weekly")] == [
+        f":arrow_deg50: [9/1]({SITE}/?d=26090112-1d#over-time) — **713 TiB (+8.0, 1.1%)** · "
+        f"[main]({SITE}/main-data?d=26090112-1d#over-time): 78.4% of 1P (197.0 Ti free)",
+    ]
 
 
 def test_weekly_units_split_by_iso_week():

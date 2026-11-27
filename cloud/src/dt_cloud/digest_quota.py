@@ -627,7 +627,8 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
 
 
 def day_line(day: DayRow, cfg: DigestConfig) -> DayLine:
-    """``day``'s line in a weekly reply: the ``body`` variant's."""
+    """``day``'s line in a weekly reply: the ``body`` variant's text over the ``sender`` variant's day (its morning
+    scan, so each day's change is the daily reply's)."""
     return DayLine(dt.date.fromisoformat(day.date), day.scan, reply(day, "body", cfg).body)
 
 
@@ -735,7 +736,9 @@ class QuotaTemplate:
 
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:
         if variant == "weekly":
-            days = day_rows(month, "body", self.cfg.reply_hour)
+            # the `sender` variant's days (each its morning scan, the day the daily replies and the site's `?d=` links
+            # date a change by), each rendered as the `body` variant's line
+            days = day_rows(month, "sender", self.cfg.reply_hour)
             return weekly_units([day_line(d, self.cfg) for d in days], lambda i, j: week_summary(days[i:j + 1], self.cfg), self.cfg.op_sender())
         return [Unit(day.date, day.scan, reply(day, variant, self.cfg)) for day in day_rows(month, variant, self.cfg.reply_hour)]
 
