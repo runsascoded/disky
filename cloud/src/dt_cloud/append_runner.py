@@ -647,6 +647,86 @@ class GcsLeaseFile:
             return False
 
 
+class S3LeaseFile:
+    """`LeaseFile` on an S3-API object (R2, S3), by ETag preconditions: `PutObject` with `If-None-Match: *` creates,
+    with `If-Match: <etag>` replaces. A delete re-reads the ETag, then deletes with `If-Match` (R2 and S3 honor it;
+    a store that ignored it would leave only the window between that read and the delete)."""
+
+    def __init__(self, bucket: str, key: str, client):
+        self.bucket, self.key, self.client = bucket, key, client
+
+    @staticmethod
+    def _code(e: Exception) -> str:
+        return str(getattr(e, "response", {}).get("Error", {}).get("Code", ""))
+
+    def _refused(self, e: Exception) -> bool:
+        """A precondition that failed (the record exists, or moved), or a record that's gone: a lost race, not an error."""
+        return self._code(e) in ("PreconditionFailed", "412", "ConditionalRequestConflict", "409", "NoSuchKey", "404")
+
+    def create(self, text: str) -> bool:
+        try:
+            self.client.put_object(Bucket=self.bucket, Key=self.key, Body=text.encode(), ContentType="application/json", IfNoneMatch="*")
+            return True
+        except Exception as e:
+            if self._refused(e):
+                return False
+            raise
+
+    def read(self) -> tuple[dict, Any] | None:
+        try:
+            got = self.client.get_object(Bucket=self.bucket, Key=self.key)
+        except Exception as e:
+            if self._code(e) in ("NoSuchKey", "404"):
+                return None
+            raise
+        with got["Body"] as body:
+            return json.loads(body.read()), got["ETag"]
+
+    def replace(self, text: str, token: Any) -> Any | None:
+        try:
+            return self.client.put_object(Bucket=self.bucket, Key=self.key, Body=text.encode(), ContentType="application/json", IfMatch=token)["ETag"]
+        except Exception as e:
+            if self._refused(e):
+                return None
+            raise
+
+    def delete(self, token: Any) -> bool:
+        if (cur := self.read()) is None or cur[1] != token:
+            return False
+        try:
+            self.client.delete_object(Bucket=self.bucket, Key=self.key, IfMatch=token)
+            return True
+        except Exception as e:
+            if self._refused(e):
+                return False
+            raise
+
+
+def lease_file(url: str) -> LeaseFile:
+    """The `LeaseFile` for a lease record at `url`: `gs://` (`GcsLeaseFile`), `r2://` / `s3://` (`S3LeaseFile`, an R2
+    bucket's endpoint and credential profile from `blobfs`), else a local path (`LocalLeaseFile`)."""
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    key = u.path.lstrip("/")
+    if u.scheme == "gs":
+        return GcsLeaseFile(u.netloc, key)
+    if u.scheme in ("r2", "s3"):
+        import boto3
+        from disk_tree import blobfs
+
+        endpoint = blobfs.r2_endpoint(u.netloc) if u.scheme == "r2" else None
+        if u.scheme == "r2" and not endpoint:
+            raise RuntimeError(f"{url}: no R2 endpoint for {u.netloc} (`blobfs.r2_endpoint`)")
+        profile = blobfs.bucket_profile(u.netloc)
+        session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+        client = session.client("s3", endpoint_url=endpoint, **({"region_name": "auto"} if endpoint else {}))
+        return S3LeaseFile(u.netloc, key, client)
+    if u.scheme:
+        raise ValueError(f"{url}: no lease backend for {u.scheme}://")
+    return LocalLeaseFile(Path(url))
+
+
 class CoordinatorLease:
     """The coordinator lease on `file`, for one run (`owner`, a fresh uuid): `take` it (or raise `Busy`), `renew` it
     (the heartbeat; a renewal that finds it changed marks it lost), `check` (raises `LeaseLost` once lost), `release`.
