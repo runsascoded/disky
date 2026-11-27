@@ -5,7 +5,8 @@ import { SiteNav } from './SiteNav'
 import { SiteKbd } from './SiteKbd'
 import { CAPS, useExecJobs, useRunDetail, useRunFiles } from './plans'
 import { RunDetail } from './StagedRuns'
-import { joinRuns, runFilesRel, runLabel, sumProgress, viewBuckets, viewLive, viewState, type PlanSummaryFile, type ProgressFile } from './runs'
+import { joinRuns, progressFromSamples, runFilesRel, runLabel, sumProgress, viewBuckets, viewLive, viewState, type PlanSummaryFile, type ProgressFile } from './runs'
+import { useRunHistories } from './RunProgress'
 import { useUnits } from './units'
 import { fmtBytesPrecise } from './types'
 import { RunTaskLogs } from './RunTaskLogs'
@@ -23,7 +24,11 @@ export function RunPage() {
   const buckets = view ? viewBuckets(view) : []
   const targets = buckets.length ? buckets : Object.keys(planQ?.data?.buckets ?? {})
   const progressQs = useRunFiles<ProgressFile>(dir ? targets.map(b => `${dir}progress/${b}.json`) : [], live)
-  const progress = progressQs.flatMap(q => q.data ? [q.data] : [])
+  // No run dir to read (cw: `CAPS.runFiles` off): the samples the site recorded of the job's progress files, as the
+  // runs table reads them (before, this page showed no progress on such a deployment, live or not).
+  const [historyQ] = useRunHistories(run && !CAPS.runFiles ? [run.run_id] : [], !CAPS.runFiles)
+  const sampled = historyQ?.data?.samples?.length ? progressFromSamples(historyQ.data.samples) : []
+  const progress = CAPS.runFiles ? progressQs.flatMap(q => q.data ? [q.data] : []) : sampled
   const { units, suffixB } = useUnits()
   const fmtBytes = (b: number) => fmtBytesPrecise(b, units, suffixB)
   const { hash } = useLocation()

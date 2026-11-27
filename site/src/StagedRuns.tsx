@@ -275,7 +275,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       {r?.undo_state === 'partial' && !ctl.undoing && <Tooltip content="Some of what this run deleted is live again, not all of it: an undo restored part, or found it live. Undo again to retry the rest."><span className="tag">partly undone</span></Tooltip>}
                       {r?.purge_state === 'done' && <span className="tag">purged</span>}
                     </td>
-                    <td>{r && <RunProgress id={r.run_id} live={live} compact fmtBytes={fmtBytes} lifetime={secs != null ? { objects: r.finished_ts ? r.deleted_objects : p?.deletes ?? 0, seconds: secs } : undefined} />}</td>
+                    <td>{r && <RunProgress id={r.run_id} live={live} compact fmtBytes={fmtBytes} lifetime={secs != null && (r.finished_ts || p) ? { objects: r.finished_ts ? r.deleted_objects : p!.deletes, seconds: secs } : undefined} />}</td>
                     <td className="num"><Tooltip cell content={<>{elapsedDetails(v).map(line => <div key={line}>{line}</div>)}</>}><span>{secs == null ? <span className="dim">—</span> : fmtDur(secs)}</span></Tooltip></td>
                     <td className="num">{attempted && !r?.skipped_gone ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_gone) : p ? fmtN(p.gone) : <span className="dim">—</span>}</td>
                     <td className="num">{attempted && !r?.skipped_overwritten ? <Tooltip content={NOT_OBSERVABLE}><span className="dim">—</span></Tooltip> : r?.finished_ts ? fmtN(r.skipped_overwritten ?? 0) : <span className="dim">—</span>}</td>
