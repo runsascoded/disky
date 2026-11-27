@@ -210,6 +210,25 @@ def test_a_runs_step_alerts_are_one_slack_message_and_its_failure_retitles_it():
     ]
 
 
+def test_a_notices_own_links_stay_on_its_line():
+    """`line_links` (what a message names: a busy skip's lease holder) go on the notice's own line of the grouped
+    message, ahead of its task logs, and are kept in the group's metadata; a line without any is as before."""
+    ch = SlackGroups()
+    holder = ('compaction job', 'https://site.test/scans?job=sn-compact-x&region=us-east1')
+    for n in (replace(step('⚠️ s', 'static-names skipped (busy): compaction g.c003 → c004 (job sn-compact-x) holds it', 'u1'),
+                      line_links=(holder,)),
+              step('⚠️ s', 'probe failed (exit 1)', 'u2')):
+        assert send(n, ['slack'], env=SLACK, post=ch) == [('slack', None)]
+    assert [(m['text'], [line.get('links') for line in m['metadata']['event_payload']['lines']]) for m in ch.messages] == [
+        ('*⚠️ s*\n'
+         'static-names skipped (busy): compaction g.c003 → c004 (job sn-compact-x) holds it · '
+         '<https://site.test/scans?job=sn-compact-x&region=us-east1|compaction job> · <https://logs.test/q?uid=u1|task logs>\n'
+         'probe failed (exit 1) · <https://logs.test/q?uid=u2|task logs>\n'
+         '<https://site.test/scans/r1|scan> · <https://site.test/scans|all scans>',
+         [[list(holder)], None]),
+    ]
+
+
 def test_an_alerts_icon_is_its_kind_and_a_failure_joining_a_warning_posts_the_group_again():
     """An icon is fixed once posted (Slack's `chat.update` can't change it): a group whose priority rises posts again
     under the higher notice's icon, then deletes its earlier message; a lower one joining is an edit, as without icons."""

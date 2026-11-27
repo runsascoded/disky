@@ -719,12 +719,14 @@ FOLDED = '↪'
 
 
 def alert_lines(alert: dict) -> tuple[str, list[str]]:
-    """A run's top-level alert as its title and its lines (each step's message, with its task logs), in the thread's
-    markdown: from its `disky_alert` metadata (`push.Notice.group`), else parsed from an ungrouped alert's text."""
+    """A run's top-level alert as its title and its lines (each step's message, with its own links, e.g. a busy skip's
+    lease holder, then its task logs), in the thread's markdown: from its `disky_alert` metadata (`push.Notice.group`),
+    else parsed from an ungrouped alert's text."""
     payload = alert.get('metadata', {}).get('event_payload') or {}
     if alert.get('metadata', {}).get('event_type') == 'disky_alert' and payload.get('lines'):
-        return payload['title'], [line['message'] + (f" · [{line.get('url_title') or 'logs'}]({line['url']})" if line.get('url') else '')
-                                  for line in payload['lines']]
+        def links(line: dict) -> list[tuple[str, str]]:
+            return [(label, url) for label, url in line.get('links') or []] + ([(line.get('url_title') or 'logs', line['url'])] if line.get('url') else [])
+        return payload['title'], [line['message'] + ''.join(f" · [{label}]({url})" for label, url in links(line)) for line in payload['lines']]
     head, *rest = alert['text'].split('\n')
     logs = ''
     if rest and rest[-1].startswith('<'):

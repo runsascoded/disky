@@ -1445,6 +1445,22 @@ def scan_alert_links(
     return (*links, ("all scans", scans))
 
 
+def batch_job_url(project: str, region: str, job: str) -> str:
+    """A Batch job's console page (the site's `scanRunsModel.batchHref`)."""
+    from urllib.parse import quote
+
+    return f"https://console.cloud.google.com/batch/jobsDetail/regions/{region}/jobs/{job}/details?project={quote(project, safe='')}"
+
+
+def job_scans_url(site_url: str, job: str, region: str | None = None) -> str:
+    """A Batch job's run on the site, by its name: `/scans?job=<name>[&region=<region>]`, which opens the run that job
+    recorded (a compaction's, a merge's: `maint_runs`) once it has, else its Batch console page (`region` and the
+    site's project). The primary store's list: maintenance runs are recorded there."""
+    from urllib.parse import quote
+
+    return f"{site_url.strip().rstrip('/')}/scans?job={quote(job, safe='')}" + (f"&region={quote(region, safe='')}" if region else "")
+
+
 class JobRun:
     """One job's view of its run: profile, run id, sink, state file and alerted marker."""
 
@@ -1649,8 +1665,9 @@ class JobRun:
         except (KeyError, IndexError, ValueError):
             return None
 
-    def alert(self, level: str, message: str) -> None:
-        """Post a `fail` / `warn` alert through `disk-tree notify`'s channels (or print it, under `DT_ALERTS=stderr`).
+    def alert(self, level: str, message: str, links: Sequence[tuple[str, str]] = ()) -> None:
+        """Post a `fail` / `warn` alert through `disk-tree notify`'s channels (or print it, under `DT_ALERTS=stderr`),
+        `links` (`(label, url)`) beside its message: what it names (a skip's lease holder, `scan_steps.busy_links`).
         A `fail` waits for the run's scan-health thread when it groups failures (`nominal.defers_failures`): the report
         posts it then, unless the run became a reply in a failure thread. Never raises: alerting must never mask the
         failure it reports."""
@@ -1663,9 +1680,9 @@ class JobRun:
                 return
         except Exception as e:  # noqa: BLE001 — a broken nominal config posts the alert now
             err(self.redact(f"alert deferral failed (posting now): {type(e).__name__}: {e}"))
-        self.post_alert(level, message)
+        self.post_alert(level, message, links)
 
-    def post_alert(self, level: str, message: str) -> None:
+    def post_alert(self, level: str, message: str, links: Sequence[tuple[str, str]] = ()) -> None:
         """`alert`'s post, now."""
         try:
             from disk_tree.notify import push
@@ -1674,17 +1691,17 @@ class JobRun:
             title = self.redact(f"{'❌' if level == 'fail' else '⚠️'} {label} {self.scan or ''}".rstrip())
             message = self.redact(message)
             if (self.env.get(ALERTS_ENV) or "").strip() == "stderr":
-                err(f"alert (suppressed): {title}: {message}")
+                err(f"alert (suppressed): {title}: {message}" + "".join(f" · {label}: {u}" for label, u in links))
                 return
             chans = push.configured(self.env)
             if not chans:
                 err(f"alert (no channel configured): {title}: {message}")
                 return
             url = self.logs_url()
-            links = scan_alert_links(self.env.get("SITE_URL"), self.run_id, self.facts().get("store", "primary"))
+            site = scan_alert_links(self.env.get("SITE_URL"), self.run_id, self.facts().get("store", "primary"))
             # The icon says its kind (specs/done/scan-thread-senders.md); the title keeps its emoji for the other channels
-            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0, links, group=self.run_id,
-                                 icon=":x:" if level == "fail" else ":warning:")
+            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0, site, group=self.run_id,
+                                 icon=":x:" if level == "fail" else ":warning:", line_links=tuple(links))
             for c, e in push.send(notice, chans, env=self.env, post=push.http_post):
                 err(self.redact(f"alert: {c}: {e or 'sent'}"))
         except Exception as e:  # noqa: BLE001

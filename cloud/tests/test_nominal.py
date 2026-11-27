@@ -754,7 +754,7 @@ def deferring_job(tmp_path, group, monkeypatch, env=None):
     job.profile, job.recording, job.dry_run, job.env, job.run_id = profile, True, False, env or {}, 'r9'
     job.key, job.dir = 'k', tmp_path / 'dt-scan-run'
     job.redact = lambda s: s
-    job.post_alert = lambda level, message: posted.append((level, message))
+    job.post_alert = lambda level, message, links=(): posted.append((level, message))
     return job, posted
 
 
@@ -975,6 +975,19 @@ def test_a_failure_threads_reply_folds_its_runs_top_level_alerts_and_leaves_each
     w.slack.calls.clear()
     w.run([r3, *history(2)])
     assert w.slack.calls == []
+
+
+def test_a_folded_lines_own_links_come_before_its_task_logs():
+    """A busy skip's line names the job holding the lease (`push.Notice.line_links`): its reply line links it, then the
+    task logs."""
+    holder = 'https://site.test/scans?job=sn-compact-x&region=us-east1'
+    message = ('static-names skipped (busy): compaction g.c003 → c004 (job sn-compact-x in us-east1, since 11-25 21:58Z) holds the '
+               'static-names store; search for this scan comes with the first append after it publishes')
+    alert = {'text': 'unused', 'metadata': {'event_type': 'disky_alert', 'event_payload': {'title': '⚠️ Test scans 2026-11-26T0002', 'lines': [
+        {'message': message, 'url': 'https://logs.test/u1', 'url_title': 'task logs', 'links': [['compaction job', holder]]},
+        {'message': 'probe failed (exit 1)'}]}}}
+    assert N.alert_lines(alert) == ('⚠️ Test scans 2026-11-26T0002', [
+        f'{message} · [compaction job]({holder}) · [task logs](https://logs.test/u1)', 'probe failed (exit 1)'])
 
 
 def test_alert_messages_never_returns_a_threads_own_head():

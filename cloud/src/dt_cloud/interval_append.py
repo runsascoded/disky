@@ -1718,7 +1718,8 @@ def append_cmd(catch_up: bool, compact_now: bool, latest: bool, no_merge: bool, 
     runner.compact_wait = compact_wait
     runner.candidate = candidate
     t0 = monotonic()
-    done = exit_on(f"interval-store append {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m), compacting=True)
+    done = exit_on(f"interval-store append {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m), compacting=True,
+                   facts={"region": runner.p.region, "project": runner.p.project})
     print(json.dumps({"gen": runner.p.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "s": round(monotonic() - t0, 1),
                       "stages": runner.timings, "compaction": runner.compaction}))
 
@@ -1755,7 +1756,7 @@ def deferral_cmd(profile: str | None, scan_id: str) -> None:
         blob.upload_from_string(json.dumps({"scan": scan_id, "stuck": doc["stuck"][0], "gen": runner.p.gen, "holder": held["holder"]}) + "\n")
     elif blob is not None and episode == "end":
         blob.delete()
-    print(json.dumps({"gen": runner.p.gen, "scan": scan_id, "compacting": {"holder": held["holder"], "since": held["at"]} if held else None,
+    print(json.dumps({"gen": runner.p.gen, "scan": scan_id, "compacting": {"holder": held["holder"], "since": held.get("since") or held["at"]} if held else None,
                       **doc, "episode": episode}))
 
 

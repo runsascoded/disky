@@ -449,6 +449,54 @@ def test_a_held_lease_refuses_another_coordinator(tmp_path):
     assert str(e.value) == "the coordinator lease is held by job-a (since 2026-10-22T12:00:00+00:00)"
 
 
+def test_a_renewal_keeps_when_the_lease_was_taken(tmp_path):
+    """`at` moves with each beat; `since` stays the take's, so a refusal names when the holder took it, not its last beat."""
+    clock = Clock()
+    a, b = _lease(tmp_path / "l.json", clock, "job-a"), _lease(tmp_path / "l.json", clock, "job-b")
+    a.take()
+    clock.tick(ar.HEARTBEAT_S)
+    a.renew()
+    with pytest.raises(ar.Busy) as e:
+        b.take()
+    assert ({k: v for k, v in json.loads((tmp_path / "l.json").read_text()).items() if k != "owner"}, str(e.value), e.value.lease) == (
+        {"holder": "job-a", "at": "2026-10-22T12:05:00+00:00", "since": "2026-10-22T12:00:00+00:00", "ttl_s": ar.COORD_TTL_S},
+        "the coordinator lease is held by job-a (since 2026-10-22T12:00:00+00:00)", "coordinator")
+
+
+def test_exit_on_writes_the_holder_where_dt_busy_out_says(tmp_path, monkeypatch):
+    """A `Busy` exit writes `busy_record` (with the CLI's `facts`) to `$DT_BUSY_OUT`: a compaction's generations and job,
+    a coordinator's job and start. Unset, nothing is written; the exit codes are as ever."""
+    out, logs = tmp_path / "busy.json", []
+    held = {"owner": "o", "holder": "sn-compact-x", "at": "2026-11-26T03:00:00+00:00", "since": "2026-11-25T21:58:00+00:00",
+            "ttl_s": ar.COORD_TTL_S, "gen": "2026-10-15cw.c003"}
+
+    def compacting():
+        raise ar.Compacting("2026-10-15cw.c003", "sn-compact-x", "2026-11-25T21:58:00+00:00", held=held)
+
+    def coordinated():
+        a = _lease(tmp_path / "l.json", Clock(), "job-a")
+        a.take()
+        _lease(tmp_path / "l.json", Clock(), "job-b").take()
+
+    def code(fn, compact: bool = False) -> int:
+        with pytest.raises(SystemExit) as e:
+            ar.exit_on("runs add s", fn, logs.append, compacting=compact, facts={"region": "us-east1", "project": "proj"})
+        return e.value.code
+
+    assert (code(compacting), (tmp_path / "busy.json").exists()) == (ar.BUSY, False)
+    monkeypatch.setenv(ar.BUSY_OUT_VAR, str(out))
+    assert (code(compacting, compact=True), json.loads(out.read_text())) == (ar.COMPACTING, {
+        "lease": "compaction", "holder": "sn-compact-x", "since": "2026-11-25T21:58:00+00:00", "gen": "2026-10-15cw.c003",
+        "to": "2026-10-15cw.c004", "region": "us-east1", "project": "proj"})
+    assert (code(coordinated), json.loads(out.read_text())) == (ar.BUSY, {
+        "lease": "coordinator", "holder": "job-a", "since": "2026-10-22T12:00:00+00:00", "region": "us-east1", "project": "proj"})
+    assert logs == [
+        "runs add s: generation 2026-10-15cw.c003 is being compacted by sn-compact-x (since 2026-11-25T21:58:00+00:00): the append waits for its successor",
+        "runs add s: generation 2026-10-15cw.c003 is being compacted by sn-compact-x (since 2026-11-25T21:58:00+00:00): the append waits for its successor",
+        "runs add s: the coordinator lease is held by job-a (since 2026-10-22T12:00:00+00:00)",
+    ]
+
+
 def test_a_renewed_lease_stays_held_and_a_stale_one_is_taken_over(tmp_path):
     clock = Clock()
     a, b = _lease(tmp_path / "l.json", clock, "job-a"), _lease(tmp_path / "l.json", clock, "job-b")
@@ -461,7 +509,7 @@ def test_a_renewed_lease_stays_held_and_a_stale_one_is_taken_over(tmp_path):
     clock.tick(2)
     b.take()
     assert json.loads((tmp_path / "l.json").read_text()) == {
-        "owner": b.owner, "holder": "job-b", "at": "2026-10-22T12:30:00+00:00", "ttl_s": ar.COORD_TTL_S}
+        "owner": b.owner, "holder": "job-b", "at": "2026-10-22T12:30:00+00:00", "since": "2026-10-22T12:30:00+00:00", "ttl_s": ar.COORD_TTL_S}
     # `a`'s next beat finds it taken: lost, and `a` neither renews nor releases b's lease
     a.renew()
     with pytest.raises(ar.LeaseLost) as e:

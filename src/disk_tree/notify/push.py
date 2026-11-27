@@ -57,6 +57,9 @@ class Notice:
     #: Slack only: the post's icon, a ``:name:`` emoji code (the bot's ``chat:write.customize``), fixed once posted:
     #: a grouped message whose priority rises is posted again under the new notice's icon, and the old one deleted.
     icon: Optional[str] = None
+    #: Links that belong to the message itself (what it names, e.g. the job holding a lease), ``(label, url)``: on its
+    #: own line of a grouped Slack message, ahead of its ``url``; elsewhere ahead of the other links.
+    line_links: tuple[tuple[str, str], ...] = ()
 
 
 # `post(url, body, headers) -> (status, response body)`; the seam tests replace.
@@ -97,7 +100,7 @@ def configured(env: Mapping[str, str] = os.environ) -> list[str]:
 
 
 def pushover(n: Notice, env: Mapping[str, str], post: Post) -> None:
-    message = n.message + ''.join(f'\n{label}: {url}' for label, url in n.links)
+    message = n.message + ''.join(f'\n{label}: {url}' for label, url in (*n.line_links, *n.links))
     form = {'token': secret(env, 'PUSHOVER_TOKEN'), 'user': secret(env, 'PUSHOVER_USER'), 'title': n.title, 'message': message, 'priority': str(n.priority)}
     if n.url:
         form['url'] = n.url
@@ -110,7 +113,7 @@ def pushover(n: Notice, env: Mapping[str, str], post: Post) -> None:
 
 
 def discord(n: Notice, env: Mapping[str, str], post: Post) -> None:
-    links = ([(n.url_title, n.url)] if n.url else []) + list(n.links)
+    links = list(n.line_links) + ([(n.url_title, n.url)] if n.url else []) + list(n.links)
     link = '\n' + ' · '.join(f'[{label}](<{url}>)' if label else f'<{url}>' for label, url in links) if links else ''
     payload = {
         'content': f'**{n.title}**\n{n.message}{link}',
@@ -125,7 +128,7 @@ def discord(n: Notice, env: Mapping[str, str], post: Post) -> None:
 
 def slack_text(n: Notice) -> str:
     """The ``text`` :func:`slack` posts for ``n``: the title bold, the message, then the links."""
-    links = ([(n.url_title, n.url)] if n.url else []) + list(n.links)
+    links = list(n.line_links) + ([(n.url_title, n.url)] if n.url else []) + list(n.links)
     link = '\n' + ' · '.join(f'<{url}|{label}>' if label else f'<{url}>' for label, url in links) if links else ''
     return f'*{n.title}*\n{n.message}{link}'
 
@@ -153,9 +156,15 @@ def _links(links: list[tuple[Optional[str], str]]) -> str:
     return ' · '.join(f'<{url}|{label}>' if label else f'<{url}>' for label, url in links)
 
 
+def slack_line(line: dict) -> str:
+    """A grouped alert's line for one notice: its message, then its own links (``links``, then ``url``)."""
+    links = [(lb, u) for lb, u in line.get('links', [])] + ([(line.get('url_title'), line['url'])] if line.get('url') else [])
+    return line['message'] + (f" · {_links(links)}" if links else '')
+
+
 def slack_group_text(group: dict) -> str:
-    """A grouped alert's ``text``: its title bold, a line per notice (with that notice's link), the shared links."""
-    lines = [line['message'] + (f" · {_links([(line.get('url_title'), line['url'])])}" if line.get('url') else '') for line in group['lines']]
+    """A grouped alert's ``text``: its title bold, a line per notice (``slack_line``), the shared links."""
+    lines = [slack_line(line) for line in group['lines']]
     return f"*{group['title']}*\n" + '\n'.join(lines) + (f"\n{_links([(lb, u) for lb, u in group['links']])}" if group['links'] else '')
 
 
@@ -170,7 +179,7 @@ def slack(n: Notice, env: Mapping[str, str], post: Post, now: Optional[float] = 
     if not n.group:
         _slack_call(SLACK_URL, {'channel': channel, 'text': slack_text(n), 'unfurl_links': False, 'unfurl_media': False, **icon}, env, post)
         return
-    line = {k: v for k, v in (('message', n.message), ('url', n.url), ('url_title', n.url_title)) if v}
+    line = {k: v for k, v in (('message', n.message), ('url', n.url), ('url_title', n.url_title), ('links', [list(x) for x in n.line_links])) if v}
     found = None
     try:
         res = _slack_call(SLACK_HISTORY_URL, {'channel': channel, 'oldest': str((now or time.time()) - SLACK_GROUP_WINDOW_S),

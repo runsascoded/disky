@@ -152,15 +152,22 @@ class NotNext(Exception):
 
 
 class Busy(Exception):
-    """Another coordinator holds the store's coordinator lease: exit 4."""
+    """Another coordinator holds the store's coordinator lease: exit 4. `held`: the holding lease's record (`holder`,
+    `since`, a compaction's `gen`, …) when one was read; `lease`: which lease (`coordinator`, `compaction`)."""
+
+    def __init__(self, message: str, held: Mapping[str, Any] | None = None, lease: str | None = None):
+        super().__init__(message)
+        self.held, self.lease = (dict(held) if held is not None else None), lease
 
 
 class Compacting(Busy):
     """A live compaction holds the generation (`Runner.wait_compaction`): the append is deferred, not refused for good.
-    `gen` the generation being compacted, `holder` the compaction's job, `since` when it took the lease."""
+    `gen` the generation being compacted, `holder` the compaction's job, `since` when it took the lease; `held` its
+    lease's record."""
 
-    def __init__(self, gen: str, holder: str, since: str):
-        super().__init__(f"generation {gen} is being compacted by {holder} (since {since}): the append waits for its successor")
+    def __init__(self, gen: str, holder: str, since: str, held: Mapping[str, Any] | None = None):
+        super().__init__(f"generation {gen} is being compacted by {holder} (since {since}): the append waits for its successor",
+                         held={**(held or {}), "holder": holder, "gen": gen}, lease="compaction")
         self.gen, self.holder, self.since = gen, holder, since
 
 
@@ -652,11 +659,15 @@ class CoordinatorLease:
         self.file, self.holder, self.now, self.ttl_s = file, holder, now, ttl_s
         self.extra, self.adopt, self.tolerate_errors, self.what, self.log = extra or {}, adopt, tolerate_errors, what, log
         self.owner, self.token, self.lost = uuid4().hex, None, None
+        #: When its holder took it (`take`; an adopted record's own): the record's `since`, kept across renewals (`at`).
+        self.since: str | None = None
 
     def record(self) -> str:
-        return json.dumps({"owner": self.owner, "holder": self.holder, "at": self.now().isoformat(), "ttl_s": self.ttl_s, **self.extra}) + "\n"
+        return json.dumps({"owner": self.owner, "holder": self.holder, "at": self.now().isoformat(), "since": self.since, "ttl_s": self.ttl_s,
+                           **self.extra}) + "\n"
 
     def take(self) -> None:
+        self.since = self.now().isoformat()
         for _ in range(3):
             if self.file.create(self.record()):
                 self.token = self.file.read()[1]
@@ -665,14 +676,16 @@ class CoordinatorLease:
                 continue
             held, token = cur
             if self.adopt and held.get("holder") == self.holder:
+                self.since = held.get("since") or self.since
                 if (new := self.file.replace(self.record(), token)) is not None:
                     self.token = new
                     return
                 continue
             if not lease_stale(held, self.now(), self.ttl_s):
-                raise Busy(f"the {self.what} is held by {held.get('holder', held['owner'])} (since {held['at']})")
+                raise Busy(f"the {self.what} is held by {held.get('holder', held['owner'])} (since {held.get('since') or held['at']})",
+                           held=held, lease=self.what.removesuffix(" lease"))
             self.file.delete(token)
-        raise Busy(f"the {self.what} changed hands while being taken")
+        raise Busy(f"the {self.what} changed hands while being taken", lease=self.what.removesuffix(" lease"))
 
     def renew(self) -> None:
         if self.lost is not None:
@@ -1837,7 +1850,7 @@ class Runner:
         """`Busy` while a live compaction holds the generation (`compaction_holds`): a scan appended to it would supersede
         the compaction; once it wrote its successor, the next run appends there (`follow`)."""
         if self.compacting is not None and (held := compaction_holds(self.compacting(), self.p.gen, self.now())):
-            raise Compacting(self.p.gen, held["holder"], held["at"])
+            raise Compacting(self.p.gen, held["holder"], held.get("since") or held["at"], held=held)
 
     def one(self, d: str) -> None:
         raise NotImplementedError
@@ -2103,9 +2116,34 @@ class Runner:
             self.log(f"merge: failed, not fatal (every listed run is whole; the next run plans again): {e}")
 
 
-def exit_on(label_: str, fn: Callable[[], Any], log: Callable[[str], None], compacting: bool = False) -> Any:
+#: Where `exit_on` writes a `Busy`'s holder (`busy_record`, one JSON object), when set: the caller (a scan's static-names
+#: or interval-store step) names the holder in its phase note and alert, linked to its run (`scan_steps.busy_reason`).
+BUSY_OUT_VAR = "DT_BUSY_OUT"
+
+
+def busy_record(e: Busy, facts: Mapping[str, str | None] | None = None) -> dict:
+    """What a `Busy` says about its holder, each field only when known: `lease` (`coordinator`, `compaction`), `holder`
+    (its Batch job's name, else `host:pid`), `since` (when the holder took the lease; a record from before `since` was
+    kept has none), a compaction's `gen` and the generation it writes (`to`, `next_gen`), and `facts` (`region`,
+    `project`: where the store's jobs run)."""
+    held = e.held or {}
+    gen = held.get("gen") if e.lease == "compaction" else None
+    out = {"lease": e.lease, "holder": held.get("holder") or held.get("owner"), "since": held.get("since"), "gen": gen,
+           "to": next_gen(gen) if gen else None, **dict(facts or {})}
+    return {k: v for k, v in out.items() if v}
+
+
+def write_busy(e: Busy, facts: Mapping[str, str | None] | None = None, env: Mapping[str, str] = os.environ) -> None:
+    """`busy_record(e, facts)` to `$DT_BUSY_OUT` (nothing when it is unset)."""
+    if out := env.get(BUSY_OUT_VAR):
+        Path(out).write_text(json.dumps(busy_record(e, facts)) + "\n")
+
+
+def exit_on(label_: str, fn: Callable[[], Any], log: Callable[[str], None], compacting: bool = False,
+            facts: Mapping[str, str | None] | None = None) -> Any:
     """`fn()`, a CLI's run: `NotNext` exits `NOT_NEXT`, `Busy` `BUSY` (with `compacting`, a `Compacting` one `COMPACTING`), a
-    failed stage (`RuntimeError`, `LeaseLost`) exits 1, each logged as `<label>: <why>`."""
+    failed stage (`RuntimeError`, `LeaseLost`) exits 1, each logged as `<label>: <why>`. A `Busy` also writes its holder
+    (`write_busy`, with `facts`) where `$DT_BUSY_OUT` says."""
     try:
         return fn()
     except NotNext as e:
@@ -2113,9 +2151,11 @@ def exit_on(label_: str, fn: Callable[[], Any], log: Callable[[str], None], comp
         sys.exit(NOT_NEXT)
     except Compacting as e:
         log(f"{label_}: {e}")
+        write_busy(e, facts)
         sys.exit(COMPACTING if compacting else BUSY)
     except Busy as e:
         log(f"{label_}: {e}")
+        write_busy(e, facts)
         sys.exit(BUSY)
     except RuntimeError as e:
         log(f"{label_}: {e}")

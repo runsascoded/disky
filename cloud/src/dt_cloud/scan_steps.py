@@ -64,6 +64,7 @@ import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -183,8 +184,8 @@ class _Printer:
         err(phase_line(name, self._clock(), note))
         return 0 if warn else rc
 
-    def alert(self, level: str, message: str) -> None:
-        err(f"alert ({level}, no run recorded): {message}")
+    def alert(self, level: str, message: str, links: Sequence[tuple[str, str]] = ()) -> None:
+        err(f"alert ({level}, no run recorded): {message}" + "".join(f" · {label}: {url}" for label, url in links))
 
     def phases(self) -> list[dict]:
         return []
@@ -248,6 +249,8 @@ class Ctx:
     last: subprocess.CompletedProcess | None = None
     #: The open phase's explicit skip (`skip`): its end's note says `skipped (<kind>): <reason>`
     skipped: str | None = None
+    #: The skip's alert links (`skip`'s `links`: `(label, url)` pairs, e.g. the job holding a store's lease)
+    skip_links: tuple[tuple[str, str], ...] = ()
     #: The open phase's end note, set by its body (e.g. the probe's verdict); None: `phase`'s own `note`
     note: str | None = None
 
@@ -405,6 +408,7 @@ class Ctx:
         self.run.begin(name)
         set_stage(name)
         self.failure = self.skipped = self.note = None
+        self.skip_links = ()
         try:
             with self.beating(name):
                 yield
@@ -415,22 +419,24 @@ class Ctx:
             self.run.end(name, 1)
             raise
         finally:
-            failure, skipped, set_note = self.failure, self.skipped, self.note
+            failure, skipped, set_note, links = self.failure, self.skipped, self.note, self.skip_links
             self.failure = self.skipped = self.note = None
+            self.skip_links = ()
         note = set_note or note
         if failure:
             self.run.end(name, failure[0], warn=True, msg=failure[1], note=note)
         elif skipped:
             self.run.end(name, 0, note=f"{note}, {skipped}" if note else skipped)
-            self.run.alert("warn", f"{name} {skipped}")
+            self.run.alert("warn", f"{name} {skipped}", **({"links": links} if links else {}))
         else:
             self.run.end(name, 0, note=note)
 
-    def skip(self, kind: str, reason: str) -> None:
+    def skip(self, kind: str, reason: str, links: Sequence[tuple[str, str]] = ()) -> None:
         """The open phase's work was skipped, for `reason`: it ends done, its note's `skipped (<kind>): <reason>`
         (`scan_runs.phase_skip`) making the run read short on /scans with that reason (as its step's failure would),
-        and a warn alert names it."""
+        and a warn alert names it, with `links` (`(label, url)`: what the reason names, e.g. the job holding a lease)."""
         self.skipped = f"skipped ({kind}): {reason}"
+        self.skip_links = tuple(links)
 
     def recorded_skip(self, phase: str) -> str | None:
         """`<phase> skipped (<kind>): <reason>` when this run's record says `phase`'s latest closed attempt was skipped
@@ -1139,24 +1145,27 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                    else ["build", *args, *ctx.opt("static-names", "build_args", [])])
             ctx.sh(["dt-cloud", "static-names", *sub], fatal=False, warn=f"static-names {sub[0]} failed for {ctx.scan}")
         return
-    from .append_runner import BUSY, NOT_NEXT
+    from .append_runner import BUSY, BUSY_OUT_VAR, NOT_NEXT
 
     prof = ctx.opt("static-names", "profile") or ctx.env["STATIC_NAMES_PROFILE"]
     # exit 4: another coordinator (a catch-up, or an earlier scan's run) or a compaction holds the store's lease; it
     # appends this scan too, else the next run does. Until then search refuses the scan: an explicit skip (the probe
     # reads it from the record and skips those refusals; /scans shows the run `incomplete`, with this reason, until a
-    # later run's append makes it `recovered`)
+    # later run's append makes it `recovered`). The reason names the holder (`busy_reason`), its alert links it
     with ctx.phase("static-names", note="overlapped"):
         # `merge: false`: the due carries (and a compaction) wait for `runs merge` on its own schedule, never a scan's task.
         # `compact_cmd`: the carries are submitted here (not waited on), and a due compaction, an hours-long fold, is
         # deferred (`-D`) to this command, which runs `runs merge` apart (cw: its own coordinator job)
         merge = ctx.opt("static-names", "merge", True)
         compact_cmd = ctx.opt("static-names", "compact_cmd") if merge else None
+        busy = busy_out(ctx, "static-names")
         out = ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", *([] if merge else ["-M"]), *(["-D"] if compact_cmd else []), ctx.scan],
-                     env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False, warn=f"static-names runs add failed for {ctx.scan}",
-                     allowed_codes=(BUSY,), capture=bool(compact_cmd))
+                     env={"STATIC_NAMES_PROFILE": str(prof), BUSY_OUT_VAR: str(busy)}, fatal=False,
+                     warn=f"static-names runs add failed for {ctx.scan}", allowed_codes=(BUSY,), capture=bool(compact_cmd))
         if ctx.last is not None and ctx.last.returncode == BUSY:
-            ctx.skip("busy", STATIC_NAMES_BUSY)
+            rec = read_busy(busy)
+            ctx.skip("busy", busy_reason(rec, "static-names", **STATIC_NAMES_AFTER) if rec else STATIC_NAMES_BUSY,
+                     links=busy_links(ctx.env, rec))
         elif ctx.last is not None and ctx.last.returncode == NOT_NEXT:
             ctx.note = PASSED_OVER  # failed, and no later run's append takes the scan: /scans never reads it recovered
         elif out and (deferred := json.loads(out.strip().splitlines()[-1]).get("deferred")):
@@ -1201,9 +1210,71 @@ def static_lag(ctx: Ctx, probe: bool = False) -> dict | None:
 #: later run's takes it, and /scans (`scanRunsModel.phasePassedOver`) never reads the failure as recovered by one.
 PASSED_OVER = "passed over: the store's append order is past this scan, or its path sort isn't published; no later run appends it"
 
-#: Why a scan's static-names step was skipped (`runs add` exit `BUSY`): its phase note's reason, and the probe's.
+#: Why a scan's static-names step was skipped (`runs add` exit `BUSY`): its phase note's reason, and the probe's, when
+#: the CLI said nothing of the holder (`busy_reason` names it).
 STATIC_NAMES_BUSY = ("another coordinator or a compaction holds the static-names store's lease; search for this scan "
                      "comes with its append or the next run")
+#: What comes of a scan the static-names store's lease held off (`busy_reason`'s tails), by who held it.
+STATIC_NAMES_AFTER = {"coordinator": "search for this scan comes with its append or the next run",
+                      "compaction": "search for this scan comes with the first append after it publishes"}
+
+#: A Batch job's name (lowercase letters, digits and hyphens, a letter first): a lease `holder` that is one, not a
+#: `host:pid` (a holder outside Batch).
+BATCH_JOB_NAME = re.compile(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def busy_out(ctx: Ctx, step: str) -> Path:
+    """Where `step`'s append writes the holder it found (`append_runner.BUSY_OUT_VAR`), any earlier run's removed."""
+    p = ctx.work / f"{step}.busy.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.unlink(missing_ok=True)
+    return p
+
+
+def read_busy(p: Path) -> dict | None:
+    """The holder an append exiting `BUSY` wrote (`append_runner.busy_record`); None when it wrote none (a CLI from before
+    the record)."""
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def busy_when(since: str, now: datetime) -> str:
+    """A lease's `since` in UTC: `21:58Z` on `now`'s UTC day, else `11-25 21:58Z`."""
+    t = datetime.fromisoformat(since).astimezone(timezone.utc)
+    return t.strftime("%H:%MZ" if t.date() == now.astimezone(timezone.utc).date() else "%m-%d %H:%MZ")
+
+
+def busy_reason(rec: Mapping, store: str, coordinator: str, compaction: str, now: datetime | None = None) -> str:
+    """A skip's reason naming the lease's holder (`append_runner.busy_record`): `compaction <gen> → <its successor's
+    suffix> (job <name> in <region>, since <time>) holds the <store> store; <compaction>`, or `another coordinator (…)
+    holds the <store> store's lease; <coordinator>`. A holder that is no Batch job name (`host:pid`) is named bare; any
+    part the record lacks is left out. /scans links the `job <name>` (`scanRunsModel.reasonHolder`)."""
+    now = now or datetime.now(timezone.utc)
+    h = rec.get("holder")
+    who = [] if not h else [f"job {h}" + (f" in {rec['region']}" if rec.get("region") else "") if BATCH_JOB_NAME.fullmatch(h) else h]
+    who += [f"since {busy_when(rec['since'], now)}"] if rec.get("since") else []
+    paren = f" ({', '.join(who)})" if who else ""
+    if rec.get("lease") == "compaction":
+        gens = f" {rec['gen']} → {rec['to'].rsplit('.', 1)[-1]}" if rec.get("gen") and rec.get("to") else ""
+        return f"compaction{gens}{paren} holds the {store} store; {compaction}"
+    return f"another coordinator{paren} holds the {store} store's lease; {coordinator}"
+
+
+def busy_links(env: Mapping[str, str], rec: Mapping | None) -> tuple[tuple[str, str], ...]:
+    """A busy skip's alert link to the lease's holder, labelled by its lease (`compaction job`): `<SITE_URL>/scans?job=…`
+    (`scan_runs.job_scans_url`: the site opens the job's recorded run, else its Batch job), else, without `$SITE_URL`, the
+    job's Batch console page (the record's project and region). None for a holder that is no Batch job, or nowhere to
+    link."""
+    from .scan_runs import batch_job_url, job_scans_url
+
+    h = (rec or {}).get("holder")
+    if not rec or not h or not BATCH_JOB_NAME.fullmatch(h):
+        return ()
+    label = f"{rec.get('lease') or 'holder'} job"
+    if (site := (env.get("SITE_URL") or "").strip()):
+        return ((label, job_scans_url(site, h, rec.get("region"))),)
+    if rec.get("project") and rec.get("region"):
+        return ((label, batch_job_url(rec["project"], rec["region"], h)),)
+    return ()
 
 
 @step("publish-r2", stage="serve", soft=True, options={"args": list, "require": list, "keys": list, "barrier": bool},
@@ -1267,20 +1338,23 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
     timeout = ctx.opt("interval-store", "timeout")
     if ctx.opt("interval-store", "profile"):
-        from .append_runner import BUSY, COMPACTING, NOT_NEXT
+        from .append_runner import BUSY, BUSY_OUT_VAR, COMPACTING, NOT_NEXT
 
         cmd = ["dt-cloud", "interval-store", "append", "-c", "-w", str(ctx.opt("interval-store", "merge_wait", 0)), ctx.scan]
         env = {"INTERVAL_STORE_PROFILE": str(ctx.opt("interval-store", "profile"))}
         if ctx.env.get("JOB_IMAGE"):
             env["INTERVAL_STORE_IMAGE"] = ctx.env["JOB_IMAGE"]
+        busy = busy_out(ctx, "interval-store")
         ctx.run.begin("interval-store")
         err("+ " + " ".join(cmd))
         with ctx.beating("interval-store") as tail:
-            ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env}, tail=tail)
+            ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env, BUSY_OUT_VAR: str(busy)}, tail=tail)
         if ran.rc == BUSY:
             # this run appended nothing: an explicit skip (`scan_runs.phase_skip`), so /scans reads the scan short until
-            # an append holds it, and never takes this step for one that did an earlier run's work
-            ctx.run.end("interval-store", 0, note=INTERVAL_STORE_BUSY)
+            # an append holds it, and never takes this step for one that did an earlier run's work; the note names the
+            # holder when the CLI said (`busy_reason`)
+            rec = read_busy(busy)
+            ctx.run.end("interval-store", 0, note=f"skipped (busy): {busy_reason(rec, 'interval', **INTERVAL_STORE_AFTER)}" if rec else INTERVAL_STORE_BUSY)
             return
         if ran.rc == COMPACTING:
             # a live compaction holds the generation: deferred, not failed (`scanRunsModel.phaseDeferred`); the next run's append takes
@@ -1342,6 +1416,10 @@ def warm_series(ctx: Ctx) -> None:
 #: Why a scan's staged interval-store step was skipped (`append` exit `BUSY`): its phase note.
 INTERVAL_STORE_BUSY = ("skipped (busy): another coordinator holds the interval store's lease; this scan comes with its "
                        "append or the next run")
+#: What comes of a scan the interval store's lease held off (`busy_reason`'s tails). A compaction holding the generation
+#: exits `COMPACTING` instead (`deferred_note`), so its tail is only for a record that says so on exit `BUSY`.
+INTERVAL_STORE_AFTER = {"coordinator": "this scan comes with its append or the next run",
+                        "compaction": "this scan comes with the first append after it publishes"}
 
 
 def interval_deferral(ctx: Ctx, env: Mapping[str, str]) -> dict | None:

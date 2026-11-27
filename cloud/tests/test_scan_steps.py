@@ -261,6 +261,73 @@ def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
     assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
+class BusyRunner(Runner):
+    """`Runner`, whose `prefix` command exits `BUSY` after writing `rec` where `$DT_BUSY_OUT` says (`append_runner.exit_on`)."""
+
+    def __init__(self, tmp: Path, prefix: str, rec: dict):
+        super().__init__(tmp, codes={prefix: 4})
+        self.prefix, self.rec = prefix, rec
+
+    def __call__(self, argv, env, stdout=None, text=True):
+        if " ".join(argv[:3]) == self.prefix:
+            Path(env["DT_BUSY_OUT"]).write_text(json.dumps(self.rec) + "\n")
+        return super().__call__(argv, env, stdout, text)
+
+
+COMPACTION_HOLDER = {"lease": "compaction", "holder": "sn-compact-2026-11-25-1800-215800", "since": "2026-11-25T21:58:00+00:00",
+                     "gen": "2026-10-15cw.c003", "to": "2026-10-15cw.c004", "region": "us-east1", "project": "proj"}
+COMPACTION_REASON = ("compaction 2026-10-15cw.c003 → c004 (job sn-compact-2026-11-25-1800-215800 in us-east1, since 11-25 21:58Z) "
+                     "holds the static-names store; search for this scan comes with the first append after it publishes")
+
+
+@pytest.mark.parametrize("site, link", [
+    ("https://site.example.org", "https://site.example.org/scans?job=sn-compact-2026-11-25-1800-215800&region=us-east1"),
+    (None, "https://console.cloud.google.com/batch/jobsDetail/regions/us-east1/jobs/sn-compact-2026-11-25-1800-215800/details?project=proj"),
+])
+def test_static_names_busy_names_and_links_its_holder(tmp_path, env, monkeypatch, site, link):
+    """Exit 4 with the holder written (`$DT_BUSY_OUT`): the skip names the compaction, its generations, its job, region and
+    start; the alert links the job: its run on /scans by name (the site resolves it), else, without a site, its Batch
+    console page. The record's file is the step's own, fresh each run."""
+    if site:
+        env["SITE_URL"] = site
+    c = ctx(tmp_path, env, runner=BusyRunner(tmp_path, "dt-cloud static-names runs", COMPACTION_HOLDER))
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    c.run.alert = lambda level, msg, links=(): phases.append(("alert", level, msg, links))
+    monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
+    monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    assert S.run_step("static-names", None, env) == 0
+    assert phases == [
+        ("begin", "static-names"),
+        ("end", "static-names", 0, {"note": f"overlapped, skipped (busy): {COMPACTION_REASON}"}),
+        ("alert", "warn", f"static-names skipped (busy): {COMPACTION_REASON}", (("compaction job", link),)),
+    ]
+    assert c.sh_impl.envs[0]["DT_BUSY_OUT"] == str(c.work / "static-names.busy.json")
+
+
+def test_busy_reason_names_what_the_record_says():
+    """`busy_reason`: a start on the scan's own UTC day is a time alone; a coordinator outside Batch (`host:pid`) is named
+    bare, without a link; a record without a start or region leaves them out."""
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 11, 26, 3, 0, tzinfo=timezone.utc)
+    same_day = {**COMPACTION_HOLDER, "since": "2026-11-26T01:05:00+00:00"}
+    host = {"lease": "coordinator", "holder": "cw-usage-snapshot-group0-0:4211", "since": "2026-11-26T02:10:00+00:00"}
+    bare = {"lease": "coordinator", "holder": "cw-sn-catchup-20261126-020000"}
+    assert [S.busy_reason(r, "static-names", **S.STATIC_NAMES_AFTER, now=now) for r in (same_day, host, bare)] == [
+        "compaction 2026-10-15cw.c003 → c004 (job sn-compact-2026-11-25-1800-215800 in us-east1, since 01:05Z) holds the static-names "
+        "store; search for this scan comes with the first append after it publishes",
+        "another coordinator (cw-usage-snapshot-group0-0:4211, since 02:10Z) holds the static-names store's lease; search for this "
+        "scan comes with its append or the next run",
+        "another coordinator (job cw-sn-catchup-20261126-020000) holds the static-names store's lease; search for this scan comes "
+        "with its append or the next run",
+    ]
+    assert [S.busy_links({"SITE_URL": "https://s.test"}, r) for r in (host, bare, None)] == [
+        (), (("coordinator job", "https://s.test/scans?job=cw-sn-catchup-20261126-020000"),), ()]
+    assert S.busy_links({}, bare) == ()
+
+
 @pytest.mark.parametrize("episode, alerts", [
     ("start", [("warn", "static name index lags: its newest scan is 2026-10-15T1200, 2 published scans behind "
                         "(2026-10-15T1800 … 2026-10-16T1200, 18.0 h); search refuses them until the catch-up appends them")]),
@@ -799,6 +866,28 @@ def test_interval_store_busy_is_a_skip(tmp_path, env, monkeypatch):
     c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
     S.interval_store(c, None)
     note = "skipped (busy): another coordinator holds the interval store's lease; this scan comes with its append or the next run"
+    assert phases == [("begin", "interval-store"), ("end", "interval-store", 0, {"note": note})]
+    assert scan_runs.phase_skip(note) == note
+
+
+def test_interval_store_busy_names_its_holder(tmp_path, env, monkeypatch):
+    """Exit 4 with the holder written (`$DT_BUSY_OUT`): the skip clause names the coordinator's job, region and start."""
+    from dt_cloud import scan_runs
+
+    rec = {"lease": "coordinator", "holder": "iv-catchup-x", "since": "2026-11-25T21:58:00+00:00", "region": "us-east1"}
+
+    def busy(cmd, timeout, grace, **kw):
+        Path(kw["env"]["DT_BUSY_OUT"]).write_text(json.dumps(rec) + "\n")
+        return scan_runs.Ran(4, False, None)
+
+    monkeypatch.setattr(scan_runs, "run_grouped", busy)
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json"}})
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    S.interval_store(c, None)
+    note = ("skipped (busy): another coordinator (job iv-catchup-x in us-east1, since 11-25 21:58Z) holds the interval store's "
+            "lease; this scan comes with its append or the next run")
     assert phases == [("begin", "interval-store"), ("end", "interval-store", 0, {"note": note})]
     assert scan_runs.phase_skip(note) == note
 

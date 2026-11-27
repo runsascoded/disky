@@ -517,7 +517,8 @@ def add_cmd(catch_up: bool, defer_compaction: bool, gen: str | None, compact_now
     runner.compact_now = compact_now
     runner.defer_compaction = defer_compaction
     runner.candidate = candidate
-    done = exit_on(f"static-names runs add {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
+    done = exit_on(f"static-names runs add {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m),
+                   facts={"region": cfg.region, "project": cfg.project})
     print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction,
                       "deferred": runner.deferred}))
 
