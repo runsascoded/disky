@@ -1,5 +1,6 @@
 """`dt-cloud vm-pack` (specs/vm-mode.md §6): the mirror, the pack, the pointer, idempotence, pruning; and the
 `vm-pack` scan step's command."""
+import hashlib
 import json
 import os
 import stat
@@ -90,6 +91,43 @@ def test_build_without_a_generation(tmp_path, fsb):
     with pytest.raises(FileNotFoundError) as e:
         V.build(str(tmp_path / "s"), tmp_path / "w", fsb)
     assert str(e.value) == f"{tmp_path}/s/interval-store: no CURRENT.json"
+
+
+def test_pull_mirrors_the_pointers_pack_once(tmp_path, fsb):
+    root = store(tmp_path / "s", {"2026-11-13T0702.json": ["deltas/a"]})
+    dest = tmp_path / "packs/t"
+    assert V.pull(str(root), dest) == {"state": "none"}
+    assert not dest.exists()
+    doc = V.build(str(root), tmp_path / "w", fsb)
+    got = V.pull(str(root), dest)
+    assert ({k: v for k, v in got.items() if k != "pull_s"}, sorted(p.name for p in dest.iterdir())) == (
+        {**doc, "state": "pulled"}, ["current.fsb", "current.json"])
+    assert (dest / "current.fsb").read_bytes() == (root / doc["key"]).read_bytes()
+    assert json.loads((dest / "current.json").read_text()) == doc
+    assert V.pull(str(root), dest) == {**doc, "state": "current"}
+    # A newer manifest's pack replaces it in place.
+    (root / "interval-store" / GEN / "manifests/2026-11-14T0702.json").write_text(json.dumps({"runs": []}))
+    newer = V.build(str(root), tmp_path / "w", fsb)
+    assert V.pull(str(root), dest)["state"] == "pulled"
+    assert ((dest / "current.fsb").read_bytes(), json.loads((dest / "current.json").read_text())) == (
+        (root / newer["key"]).read_bytes(), newer)
+
+
+def test_pull_refuses_a_pack_its_pointer_doesnt_name(tmp_path, fsb):
+    """A checksum mismatch leaves the pack being served (and its pointer) as they were, and no temporary file."""
+    root = store(tmp_path / "s", {"2026-11-13T0702.json": []})
+    dest = tmp_path / "packs/t"
+    first = V.build(str(root), tmp_path / "w", fsb)
+    V.pull(str(root), dest)
+    (root / "interval-store" / GEN / "manifests/2026-11-14T0702.json").write_text(json.dumps({"runs": []}))
+    newer = V.build(str(root), tmp_path / "w", fsb)
+    (root / newer["key"]).write_text("corrupt")
+    with pytest.raises(ValueError) as e:
+        V.pull(str(root), dest)
+    bad = hashlib.sha256(b"corrupt").hexdigest()
+    assert str(e.value) == f"{root}/{newer['key']}: sha256 {bad} differs from vm-pack/CURRENT.json's {newer['sha256']}"
+    assert (sorted(p.name for p in dest.iterdir()), json.loads((dest / "current.json").read_text())) == (
+        ["current.fsb", "current.json"], first)
 
 
 LABELS = {"DISKY_LABELS": "app=disky,deployment=d1", "SCAN_ID": "2026-11-13T1734"}
