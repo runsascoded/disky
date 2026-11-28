@@ -228,6 +228,13 @@ export interface Env {
   FOOTER_CACHE_MAX_BYTES?: string
   /** The Analytics Engine dataset the usage points go to (`_lib/usage.ts`, specs/usage-metrics.md); unset = none. */
   USAGE?: AnalyticsEngineDataset
+  /** VM mode beside the indexes (`_lib/vmServe.ts`, specs/vm-pilot.md step 4): `vmd`'s base URL (its tunnel's host),
+   *  this deployment's tenant there, and (a secret) the tenant's HMAC key. Any unset: VM mode is off. */
+  VMD_URL?: string
+  VM_TENANT?: string
+  VM_KEY?: string
+  /** The share (0–1) of new browser sessions pinned `vm`; unset = none (every new session `idx`). */
+  VM_SHARE?: string
 }
 
 export interface Ctx {

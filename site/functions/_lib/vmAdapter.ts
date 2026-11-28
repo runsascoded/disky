@@ -1,11 +1,11 @@
 /** VM mode's Worker-side adapter (specs/vm-mode.md §7): a parsed view as `vmd`'s `/v1/view` request, its answer as
- * `/api/subtree`'s or `/api/diff`'s body, and the signatures both ways (§4.3). Pure (WebCrypto only); no route calls
- * it yet: the lane decision and the wiring are the next phase's (specs/serverless-tiers.md §5). */
+ * `/api/subtree`'s or `/api/diff`'s body, and the signatures both ways (§4.3). Pure (WebCrypto only); `vmServe.ts`
+ * is the routes' side (the session's pin, the `vmd` client, the fallback; specs/vm-pilot.md step 4). */
 import type { QueryAst } from './queryAst.js'
 import type { OwnerScope } from './scope.js'
 import { ATTEN_DEFAULT, type DiffRow, type ViewNode } from './view.js'
 
-const { ceil, log2, max, round } = Math
+const { ceil, log2, max, min, round } = Math
 
 /** A generation's pins, as `vmd` echoes them (the pack's header). */
 export interface VmPins {
@@ -104,11 +104,20 @@ export interface VmViewOpts {
    *  Ryan's decision, specs/vm-mode.md §10 item 1). Always sent, so the request names its policy. */
   atten?: number
   maxDepth?: number
+  /** An absolute byte floor in place of the viewport's share: a union or group member's read, drawn under the
+   *  composite's one threshold (`/api/subtree`'s `threshold`, as the index reader takes it). The window is then
+   *  `1 + ⌈share_log2 / atten_log2⌉` (no deeper node clears a floor that is the composite's share), unless `maxDepth`. */
+  floorBytes?: number
   deadlineMs?: number
 }
 
 export function vmRequest(o: VmViewOpts): VmViewRequest {
-  const cell: VmCell = { share_log2: shareLog2(o.w, o.h, o.minArea), atten_log2: attenLog2(o.atten ?? ATTEN_DEFAULT),...(o.maxDepth ? { depth: o.maxDepth } : {}) }
+  const a = attenLog2(o.atten ?? ATTEN_DEFAULT)
+  const s = shareLog2(o.w, o.h, o.minArea)
+  const depth = o.maxDepth ? min(64, o.maxDepth) : o.floorBytes !== undefined && a > 0 ? min(64, 1 + ceil(s / a)) : undefined
+  const cell: VmCell = o.floorBytes !== undefined
+    ? { atten_log2: a, floor_bytes: ceil(o.floorBytes), ...(depth ? { depth } : {}) }
+    : { share_log2: s, atten_log2: a, ...(depth ? { depth } : {}) }
   const owners = vmOwners(o)
   return {
     pins: o.pins,
@@ -197,10 +206,14 @@ export async function signRequest(key: string, tenant: string, method: string, p
   return { 'x-disky-tenant': tenant, 'x-disky-ts': t, 'x-disky-sig': await hmac(key, `v1\n${method}\n${path}\n${tenant}\n${t}\n${await sha256Hex(body)}`) }
 }
 
+/** A reply's signature as `vmd` writes it (tests' fake `vmd`). */
+export const signResponse = async (key: string, tenant: string, ts: string, body: string): Promise<string> =>
+  hmac(key, `v1-resp\n${tenant}\n${ts}\n${await sha256Hex(body)}`)
+
 /** Whether a reply's signature is the server's: over the tenant, the request's time and the reply's body. */
 export async function checkResponse(key: string, tenant: string, ts: string, body: string, sig: string | null): Promise<boolean> {
   if (!sig) return false
-  const want = await hmac(key, `v1-resp\n${tenant}\n${ts}\n${await sha256Hex(body)}`)
+  const want = await signResponse(key, tenant, ts, body)
   if (want.length !== sig.length) return false
   let d = 0
   for (let i = 0; i < want.length; i++) d |= want.charCodeAt(i) ^ sig.charCodeAt(i)
