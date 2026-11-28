@@ -33,7 +33,8 @@ import { scanArg } from '../_lib/scanArg.js'
 import { ahead, HELD_BYTES, loadScopes, traceJoins } from '../_lib/shared.js'
 import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, type Union, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
-import type { UnionView } from '../_lib/stores.js'
+import { isPrimary, type UnionView } from '../_lib/stores.js'
+import { BeTrack, beOf, stampBe, vmDiffBody, vmServe, vmWhyNot } from '../_lib/vmServe.js'
 import { atRoot, groupBlock, groupDiffRows, groupOf, groupReachesHidden, memberRequestOf, requestedGroup } from '../_lib/groups.js'
 
 type DiffCtx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
@@ -57,7 +58,13 @@ interface MemberDiff {
   same?: boolean
 }
 
+/** One store's diff (`diffOfStore`), saying which backend answered it (the session's pin, as `/api/subtree`'s). */
 async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
+  const be = new BeTrack(ctx0.request, ctx0.env)
+  return stampBe(await diffOfStore(ctx0, be, member), be)
+}
+
+async function diffOfStore(ctx0: DiffCtx, be: BeTrack, member?: MemberDiff): Promise<Response> {
   const st = serverTiming()
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
@@ -118,7 +125,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
   await loadScopes()
   const early = ahead(ctx.env, !!member || await presentsCredentials(ctx as never))
   try {
-    return await diffGated(ctx, st, early, gate, { from, to, path, w, h, minArea, atten, top, summary, depth, lens, rawOwner, owner, classes, qRaw, qp, query, member })
+    return await diffGated(ctx, st, early, gate, { from, to, path, w, h, minArea, atten, top, summary, depth, lens, rawOwner, owner, classes, qRaw, qp, query, member, be })
   } finally {
     early.done()
   }
@@ -130,9 +137,9 @@ async function diffGated(
   st: ReturnType<typeof serverTiming>,
   early: ReturnType<typeof ahead>,
   gate: Promise<Identity | null | Response>,
-  o: { from: string; to: string; path: string; w: number; h: number; minArea: number; atten: number; top: number; summary: boolean; depth?: number; lens?: Lens; rawOwner: string | null; owner: ReturnType<typeof parseOwner>; classes: ReturnType<typeof parseClasses>; qRaw: string; qp: ReturnType<typeof queryParam>; query: ReturnType<typeof queryParam>['query']; member?: MemberDiff },
+  o: { from: string; to: string; path: string; w: number; h: number; minArea: number; atten: number; top: number; summary: boolean; depth?: number; lens?: Lens; rawOwner: string | null; owner: ReturnType<typeof parseOwner>; classes: ReturnType<typeof parseClasses>; qRaw: string; qp: ReturnType<typeof queryParam>; query: ReturnType<typeof queryParam>['query']; member?: MemberDiff; be: BeTrack },
 ): Promise<Response> {
-  const { from, to, path, w, h, minArea, atten, top, summary, depth, rawOwner, owner, classes, qRaw, qp, member } = o
+  const { from, to, path, w, h, minArea, atten, top, summary, depth, rawOwner, owner, classes, qRaw, qp, member, be } = o
   let { lens, query } = o
   const url = new URL(ctx.request.url)
   const scans = early.later(() => Promise.all(['from', 'to'].map(key => scanArg(ctx.env, url.searchParams, key))))
@@ -152,8 +159,8 @@ async function diffGated(
     storeKey(ctx.env),
   )
   // Unscoped and unfiltered (the map's diffs): the key is the gate's to none of (no lens, ledger head or name rule), so
-  // its lookup starts beside the gate too.
-  const plain = !lens && !owner && !query
+  // its lookup starts beside the gate too. A `vm` session's first lookup is `vmd`'s key's, after the gate.
+  const plain = !lens && !owner && !query && be.pin !== 'vm'
   const early1 = plain ? early.later(async () => {
     const g = await gens()
     const key = keyOf(0, g, lensParam(undefined), descentOf(false))
@@ -195,6 +202,25 @@ async function diffGated(
     const deltaOk = descentOf(!!lens)
     const descent = deltaOk && ctx.env.DIFF_DESCENT === '1'
     const cacheKey = keyOf(head, g, lensTag, deltaOk)
+    // A `vm` session: `vmd` answers what it can (as `/api/subtree`'s), else the index reader, saying why.
+    if (be.pin === 'vm') {
+      const not = vmWhyNot({ primary: isPrimary(ctx.env), store: storeKey(ctx.env), query, lens, owner, restricted: !!restriction, descent })
+      if (not?.outside) be.outside(not.why)
+      else if (not) be.fallback(not.why)
+      else {
+        const r = await vmServe(ctx, st, {
+          scans: [from, to],
+          view: { from, to, path, w, h, minArea, atten, maxDepth: summary ? 1 : depth, classes, ...(member?.threshold !== undefined ? { floorBytes: member.threshold } : {}) },
+          idxKey: cacheKey,
+          body: a => vmDiffBody(a, { from, to, path, top, summary }),
+        })
+        if (r instanceof Response) {
+          be.vm()
+          return r
+        }
+        be.fallback(r.why)
+      }
+    }
     // …and both scans covered by the static index for this literal (else `scan-not-indexed`).
     if (query && indexedOnly(ctx.env)) {
       const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [from, to], { maxBytes: HELD_BYTES }))
@@ -326,11 +352,11 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       const answer = await unionFilteredDiff(view, comparable, (p, threshold) => ask(p, { id: un.id, ...(threshold === undefined ? {} : { threshold }) }), { w, h, minArea })
       if (answer instanceof Response) return answer
       const { reads, refused, ...body } = answer
-      return new Response(JSON.stringify({ prev: cf.date, curr: ct.date, path, q, ...body, union: { view: view.key, sources: sources.map(s => refusedOf(s, refused)) } }), { headers: {
+      return stampBe(new Response(JSON.stringify({ prev: cf.date, curr: ct.date, path, q, ...body, union: { view: view.key, sources: sources.map(s => refusedOf(s, refused)) } }), { headers: {
         'content-type': 'application/json; charset=utf-8',
         'server-timing': `${unionTiming(pre, marks)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
         'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
-      } })
+      } }), beOf(ctx0.request, ctx0.env, reads))
     }
     const tr = performance.now()
     const roots = await Promise.all(comparable.map(p => Promise.all([p.from!, p.to!].map(date => ivRetry(() => readRootAgg(p.env, { date, path: '' }))))))
@@ -348,7 +374,7 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
     const still = comparable.flatMap((p, i) => p.change === 'unchanged' ? [roots[i][0] ?? { b: 0, o: 0 }] : [])
     const sum = (k: keyof DiffSides | 'expansions' | 'lookups') =>
       bodies.reduce((n, b) => n + b[k], 0) + (k === 'expansions' || k === 'lookups' ? 0 : still.reduce((n, r) => n + (k.startsWith('bytes') ? r.b : r.o), 0))
-    return new Response(JSON.stringify({
+    return stampBe(new Response(JSON.stringify({
       prev: cf.date, curr: ct.date, path,
       rows: unionDiffRows(view, bodies.map((b, i) => ({ store: changed[i].store, rows: b.rows, total: b }))),
       bytes_before: sum('bytes_before'), bytes_after: sum('bytes_after'), objects_before: sum('objects_before'), objects_after: sum('objects_after'),
@@ -364,7 +390,7 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       'content-type': 'application/json; charset=utf-8',
       'server-timing': `${unionTiming(pre, marks)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
       'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
-    } })
+    } }), beOf(ctx0.request, ctx0.env, reads))
   } catch (e) {
     const refused = ivRefusal(e)
     if (refused) return refused
@@ -454,7 +480,7 @@ async function groupDiff(ctx0: DiffCtx, name: string): Promise<Response> {
     }
     const sum = (k: 'expansions' | 'lookups') => bs.reduce((n, b) => n + b[k], 0)
     const lead = held[0]?.body as (MemberDiffBody & { lens?: string; owner?: unknown }) | undefined
-    return new Response(JSON.stringify({
+    return stampBe(new Response(JSON.stringify({
       prev: from, curr: to, path: '',
       ...(lead?.lens ? { lens: lead.lens } : {}),
       ...(lead?.owner ? { owner: lead.owner } : {}),
@@ -475,7 +501,7 @@ async function groupDiff(ctx0: DiffCtx, name: string): Promise<Response> {
     }), { headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
-    } })
+    } }), beOf(ctx0.request, ctx0.env, reads))
   } catch (e) {
     const refused = ivRefusal(e)
     if (refused) return refused

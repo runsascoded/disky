@@ -21,6 +21,7 @@ import { sizeAssignments } from './_lib/activitySize.js'
 import { serverKind } from './_lib/activityShape.js'
 import type { Ctx } from './_lib/auth.js'
 import { generationHeaders, instrumentBindings, Meter, metered, usagePoint, type UsageEnv, writeUsage } from './_lib/usage.js'
+import { pinCookie, stampKind, type VmEnv } from './_lib/vmServe.js'
 
 const isHtml = (res: Response): boolean => (res.headers.get('content-type') ?? '').startsWith('text/html')
 
@@ -58,7 +59,22 @@ export const assetMiss = (): Response => new Response('asset not found\n', {
   headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
 })
 
-type MiddlewareCtx = { request: Request; env: OgEnv & UsageEnv & ZstdEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
+type MiddlewareCtx = { request: Request; env: OgEnv & UsageEnv & ZstdEnv & VmEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
+
+/** `res` carrying the session's backend pin (`_lib/vmServe.ts` `pinCookie`: a `?be=` re-pin, a page view's first pin),
+ *  when there is one to set. A copy when its headers are immutable. */
+export function withPin(res: Response, request: Request, env: VmEnv, rand?: () => number): Response {
+  const c = pinCookie(request, env, request.method === 'GET' && isHtml(res), rand)
+  if (!c) return res
+  try {
+    res.headers.append('set-cookie', c)
+    return res
+  } catch {
+    const copy = new Response(res.body, res)
+    copy.headers.append('set-cookie', c)
+    return copy
+  }
+}
 
 export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => {
   zstdUse(ctx.env.ZSTD_WASM === '1' ? ZSTD_MODULE : null)
@@ -68,7 +84,7 @@ export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => {
   const left: Promise<unknown>[] = []
   const wu = ctx.waitUntil
   const sctx: MiddlewareCtx = wu ? { ...ctx, waitUntil: p => { left.push(p); wu(p) } } : ctx
-  const res = generationHeaders(withBuild(await metered(m, ctx, () => { instrumentBindings(ctx.env); return serve(sctx) })), m)
+  const res = withPin(generationHeaders(withBuild(await metered(m, ctx, () => { instrumentBindings(ctx.env); return serve(sctx) })), m), ctx.request, ctx.env)
   if (wu && ctx.env.USAGE) {
     const wallMs = Date.now() - m.t0
     wu(Promise.allSettled(left)
@@ -119,6 +135,9 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
     res0 = refusal
   }
   res0 = clearedOnSignIn(ctx.request, ctx.env, res0)
+  // A map answer no route stamped says which backend gave it (a `vm` session's series, search summary, or an early
+  // refusal: the index reader's, and why).
+  res0 = stampKind(res0, ctx.request, ctx.env)
   mark('mw-next', t)
   // Server-Timing on API answers only (pages and assets keep their headers as Pages sent them).
   const res = url.pathname.startsWith('/api/') ? withMiddlewareTiming(res0, [...phases, ['mw', Date.now() - t0]], nth) : res0

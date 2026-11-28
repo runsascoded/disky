@@ -33,7 +33,9 @@ import { ahead, loadScopes, traceJoins } from '../_lib/shared.js'
 import { type FilteredRoot, filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, type Resolved, resolveUnion, UnionOverlap, unionFiltered, unionFilterFields, unionFor, unionRoot, vectorOf } from '../_lib/union.js'
 import { atRoot, groupBlock, groupOf, groupReachesHidden, groupRoot, memberRequestOf, requestedGroup } from '../_lib/groups.js'
 import { filterThreshold } from '../_lib/filter.js'
-import type { UnionView } from '../_lib/stores.js'
+import { isPrimary, type UnionView } from '../_lib/stores.js'
+import { BeTrack, beOf, stampBe, VM_NODE_NOTE, vmMeta, vmServe, vmWhyNot } from '../_lib/vmServe.js'
+import { subtreeBody } from '../_lib/vmAdapter.js'
 
 
 type SubtreeCtx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
@@ -62,7 +64,15 @@ interface MemberRead {
   threshold?: number
 }
 
+/** One store's subtree (`subtreeOf`), saying which backend answered it: the session's pin (`?be=`, the `disky_be`
+ *  cookie) picks `vmd` or the index reader, and a `vm` session's request `vmd` can't answer falls back, saying why
+ *  (`_lib/vmServe.ts`, specs/vm-pilot.md step 4). */
 async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Promise<Response> {
+  const be = new BeTrack(ctx0.request, ctx0.env)
+  return stampBe(await subtreeOf(ctx0, gate, be, member), be)
+}
+
+async function subtreeOf(ctx0: SubtreeCtx, gate: boolean, be: BeTrack, member?: MemberRead): Promise<Response> {
   const st = serverTiming()
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
@@ -127,7 +137,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
   await loadScopes()
   const early = ahead(ctx.env, !gating || await presentsCredentials(ctx as never))
   try {
-    return await subtreeGated(ctx, st, early, gated, { date0, path, w, h, minArea, atten, lens, rawOwner, owner, by, depth, classes, qRaw, full, qp, query, member })
+    return await subtreeGated(ctx, st, early, gated, { date0, path, w, h, minArea, atten, lens, rawOwner, owner, by, depth, classes, qRaw, full, qp, query, member, be })
   } finally {
     early.done()
   }
@@ -139,9 +149,9 @@ async function subtreeGated(
   st: ReturnType<typeof serverTiming>,
   early: ReturnType<typeof ahead>,
   gated: Promise<Identity | null | Response>,
-  o: { date0: string; path: string; w: number; h: number; minArea: number; atten: number; lens?: Lens; rawOwner: string | null; owner: ReturnType<typeof parseOwner>; by?: string; depth?: number; classes: ReturnType<typeof parseClasses>; qRaw: string; full: boolean; qp: ReturnType<typeof queryParam>; query: ReturnType<typeof queryParam>['query']; member?: MemberRead },
+  o: { date0: string; path: string; w: number; h: number; minArea: number; atten: number; lens?: Lens; rawOwner: string | null; owner: ReturnType<typeof parseOwner>; by?: string; depth?: number; classes: ReturnType<typeof parseClasses>; qRaw: string; full: boolean; qp: ReturnType<typeof queryParam>; query: ReturnType<typeof queryParam>['query']; member?: MemberRead; be: BeTrack },
 ): Promise<Response> {
-  const { path, w, h, minArea, atten, rawOwner, owner, by, depth, classes, qRaw, full, qp, member } = o
+  const { path, w, h, minArea, atten, rawOwner, owner, by, depth, classes, qRaw, full, qp, member, be } = o
   let { lens, query } = o
   let date = o.date0
   const url = new URL(ctx.request.url)
@@ -164,8 +174,8 @@ async function subtreeGated(
     storeKey(ctx.env),
   )
   // Unscoped and unfiltered (the map's views): the key is the gate's to none of (no lens, ledger head or name rule),
-  // so its lookup starts beside the gate too.
-  const plain = !lens && !owner && !query
+  // so its lookup starts beside the gate too. A `vm` session's first lookup is `vmd`'s key's, after the gate.
+  const plain = !lens && !owner && !query && be.pin !== 'vm'
   const looked = plain ? early.later(async () => {
     const f = await facts()
     const d = await dated()
@@ -218,6 +228,26 @@ async function subtreeGated(
     const [head, [xtra, g, indexed]] = await st.time('pre', Promise.all([(lens || owner) && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), facts1()]))
     if (!indexed) return noScan('date', date)
     const cacheKey = keyOf(date, head, xtra, g, lensTag)
+    // A `vm` session: `vmd` answers what it can (its cache key is this one's plus the backend and the pack's pins);
+    // anything else, or `vmd` down or loading, falls through to the index reader, and the response says why.
+    if (be.pin === 'vm') {
+      const not = vmWhyNot({ primary: isPrimary(ctx.env), store: storeKey(ctx.env), query, lens, owner, by, restricted: !!restriction })
+      if (not?.outside) be.outside(not.why)
+      else if (not) be.fallback(not.why)
+      else {
+        const r = await vmServe(ctx, st, {
+          scans: [date],
+          view: { date, path, w, h, minArea, atten, maxDepth: depth, classes, ...(member?.threshold !== undefined ? { floorBytes: member.threshold } : {}) },
+          idxKey: cacheKey,
+          body: a => ({ ...subtreeBody(a, { date, w, h, minArea, atten, rootLabel: ctx.env.ROOT_LABEL ?? 'all buckets' }), vm: vmMeta(a) }),
+        })
+        if (r instanceof Response) {
+          be.vm(VM_NODE_NOTE)
+          return r
+        }
+        be.fallback(r.why)
+      }
+    }
     // …and a scan the static index covers for this literal (else `scan-not-indexed`, not a path-store scan).
     if (query && indexedOnly(ctx.env)) {
       const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [date], { firstPaint: !full }))
@@ -353,7 +383,7 @@ async function groupSubtree(ctx0: SubtreeCtx, name: string): Promise<Response> {
     })
     const bs = members.map(m => m.body)
     const lead = held[0]?.body
-    return new Response(JSON.stringify({
+    return stampBe(new Response(JSON.stringify({
       date, path: '', w, h, minArea, atten,
       tier: bs[0]?.tier ?? lead?.tier ?? 'none', index: bs[0]?.index ?? lead?.index ?? 'none',
       ...(lead?.lens ? { lens: lead.lens } : {}),
@@ -365,7 +395,7 @@ async function groupSubtree(ctx0: SubtreeCtx, name: string): Promise<Response> {
       ...(bs.some(b => b.budgetCut) ? { budgetCut: true } : {}),
       group: groupBlock(group),
       tree: groupRoot(group.label, kids),
-    }), { headers: unionHeaders(reads) })
+    }), { headers: unionHeaders(reads) }), beOf(ctx0.request, ctx0.env, reads))
   } catch (e) {
     const refused = ivRefusal(e)
     if (refused) return refused
@@ -425,7 +455,7 @@ async function unionFilteredRoot(ctx0: SubtreeCtx, view: UnionView, resolved: Re
   const parts = answered.map(i => ({ store: ready[i].store, date: ready[i].date!, body: bodies.get(i)! }))
   const { tree, ...fields } = unionFiltered(view, ctx0.env.ROOT_LABEL ?? 'all buckets', parts, refused)
   const bs = parts.map(p => p.body)
-  return new Response(JSON.stringify({
+  return stampBe(new Response(JSON.stringify({
     date: resolved.date, path: '', w: o.w, h: o.h, minArea: o.minArea, atten: o.atten,
     tier: bs[0]?.tier ?? 'none', index: bs[0]?.index ?? 'none',
     threshold: Math.round(threshold),
@@ -436,7 +466,7 @@ async function unionFilteredRoot(ctx0: SubtreeCtx, view: UnionView, resolved: Re
     ...fields,
     ...(bs.some(x => x.budgetCut) ? { budgetCut: true } : {}),
     tree,
-  }), { headers: unionHeaders(answered.map(i => reads[i])) })
+  }), { headers: unionHeaders(answered.map(i => reads[i])) }), beOf(ctx0.request, ctx0.env, answered.map(i => reads[i])))
 }
 
 /**
@@ -481,7 +511,7 @@ async function unionSubtree(ctx0: SubtreeCtx, view: UnionView): Promise<Response
     type Body = { tier: string; index: string; nodes: number; truncated: boolean; budgetCut?: true; tree: ViewNode }
     const bodies = await Promise.all(reads.map(r => r.json() as Promise<Body>))
     const tree = unionRoot(view, ctx0.env.ROOT_LABEL ?? 'all buckets', bodies.map((b, i) => ({ store: ready[i].store, date: ready[i].date!, tree: b.tree, roots: rows[i] })))
-    return new Response(JSON.stringify({
+    return stampBe(new Response(JSON.stringify({
       date: resolved.date, path, w, h, minArea, atten,
       tier: bodies[0]?.tier ?? 'none', index: bodies[0]?.index ?? 'none',
       threshold: Math.round(threshold),
@@ -490,7 +520,7 @@ async function unionSubtree(ctx0: SubtreeCtx, view: UnionView): Promise<Response
       union: vectorOf(resolved),
       ...(bodies.some(x => x.budgetCut) ? { budgetCut: true } : {}),
       tree,
-    }), { headers: unionHeaders(reads) })
+    }), { headers: unionHeaders(reads) }), beOf(ctx0.request, ctx0.env, reads))
   } catch (e) {
     const refused = ivRefusal(e)
     if (refused) return refused
