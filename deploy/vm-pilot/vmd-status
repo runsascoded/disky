@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""vmd-status TENANT [URL]: `vmd`'s `GET /v1/status` for TENANT, signed with `$VMD_KEY` (specs/vm-mode.md §4.3) and its
+reply's signature checked; prints the reply's JSON, exits 1 unless it is a 200. URL defaults to the box's own vmd
+(`http://127.0.0.1:7340`); through the tunnel, the stack's hostname. The key never reaches argv:
+
+    with-secrets VMD_KEY=vm-pilot-vmd-key-oa-r2 -- vmd-status oa-r2
+    DISKY_SECRETS_PROJECT=oa-internal-450019 deploy/vm-pilot/with-secrets VMD_KEY=vm-pilot-vmd-key-oa-r2 -- \
+        deploy/vm-pilot/vmd-status oa-r2 https://vmd-pilot.oa.dev
+"""
+import hashlib
+import hmac
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+
+def sign(key: bytes, s: str) -> str:
+    return hmac.new(key, s.encode(), hashlib.sha256).hexdigest()
+
+
+def main(tenant: str, url: str = "http://127.0.0.1:7340") -> int:
+    key = os.environ.get("VMD_KEY", "").encode()
+    if not key:
+        print("vmd-status: $VMD_KEY is unset (run under with-secrets)", file=sys.stderr)
+        return 2
+    path, ts = "/v1/status", str(int(time.time()))
+    empty = hashlib.sha256(b"").hexdigest()
+    headers = {"x-disky-tenant": tenant, "x-disky-ts": ts, "x-disky-sig": sign(key, f"v1\nGET\n{path}\n{tenant}\n{ts}\n{empty}"),
+               "user-agent": "disky-vmd-status"}
+    rq = urllib.request.Request(url.rstrip("/") + path, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(rq, timeout=30) as r:
+            status, body, sig = r.status, r.read(), r.headers.get("x-disky-sig")
+    except urllib.error.HTTPError as e:
+        status, body, sig = e.code, e.read(), e.headers.get("x-disky-sig")
+    if sig is not None and not hmac.compare_digest(sig, sign(key, f"v1-resp\n{tenant}\n{ts}\n{hashlib.sha256(body).hexdigest()}")):
+        print("vmd-status: the reply's signature doesn't check", file=sys.stderr)
+        return 1
+    print(json.dumps({"status": status, "body": json.loads(body) if body else None}))
+    return 0 if status == 200 else 1
+
+
+if __name__ == "__main__":
+    if len(sys.argv) not in (2, 3):
+        print(__doc__.strip().splitlines()[0], file=sys.stderr)
+        sys.exit(2)
+    sys.exit(main(*sys.argv[1:]))

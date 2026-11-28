@@ -2,6 +2,7 @@
 # (`DISKY_JOB_BACKEND=local`: containers under `--cgroup-parent=scan.slice`, supervisors via `systemd-run --slice=scan.slice`).
 # Install: copy to /etc/systemd/system/, `systemctl daemon-reload`.
 # Values are placeholders until the box is sized (the spec's "Slices" table): MemoryMax = the scan budget.
+# On the box, bootstrap.sh adds a drop-in (`scan.slice.d/budget.conf`) with the stack's `vmPilot.scanMemoryMax`.
 [Unit]
 Description=disky VM pilot: scans (local job backend)
 Before=slices.target

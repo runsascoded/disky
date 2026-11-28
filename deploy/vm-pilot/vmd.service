@@ -1,0 +1,25 @@
+# VM mode's query server (specs/vm-mode.md) on the VM pilot's box, in serve.slice. Its tenants and packs are
+# /etc/disky/vmd.json's (pack-sync writes it; vmd re-reads it every few seconds); each tenant's HMAC key comes from Secret
+# Manager into this process's environment at start (`vmd.secrets`: `VMD_KEY_<TENANT>=<secret>` names), so a new tenant's
+# key needs a restart. Listens on loopback only: the tunnel (disky-tunnel.service) is the one way in.
+[Unit]
+Description=disky vmd (VM mode's query server)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Slice=serve.slice
+DynamicUser=yes
+RuntimeDirectory=disky-vmd
+Environment=CLOUDSDK_CONFIG=%t/disky-vmd/gcloud
+ExecStart=/usr/local/lib/disky/with-secrets -f /etc/disky/vmd.secrets -- /usr/local/bin/vmd -c /etc/disky/vmd.json
+Restart=always
+RestartSec=5
+# The packs may be locked in memory (specs/vm-pilot.md "The box"); serve.slice's MemoryMin protects them meanwhile.
+LimitMEMLOCK=infinity
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

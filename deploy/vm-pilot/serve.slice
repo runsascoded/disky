@@ -1,6 +1,7 @@
 # The VM pilot's serving budget (specs/vm-pilot.md "The box"): `vmd` and its mapped packs.
 # Install: copy to /etc/systemd/system/, `systemctl daemon-reload`; `vmd`'s unit names `Slice=serve.slice`.
 # Values are placeholders until the box is sized (the spec's "Slices" table): MemoryMin = the packs + headroom.
+# On the box, bootstrap.sh adds a drop-in (`serve.slice.d/budget.conf`) with the stack's `vmPilot.serveMemoryMin`.
 [Unit]
 Description=disky VM pilot: serving (vmd + packs)
 Before=slices.target

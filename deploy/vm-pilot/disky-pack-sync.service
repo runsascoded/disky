@@ -1,0 +1,11 @@
+# One pass of the VM pilot's pack sync (pack-sync): each tenant's current pack pulled from its store, vmd's config
+# rewritten. In scan.slice: a download never takes CPU or disk from serving.
+[Unit]
+Description=disky VM pilot: pull each tenant's current vmd pack
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Slice=scan.slice
+ExecStart=/usr/local/lib/disky/pack-sync
