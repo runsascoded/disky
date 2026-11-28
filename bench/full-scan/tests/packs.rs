@@ -3,9 +3,9 @@
 //! (`tests/golden/slim-packs.json`; the header's one timing, `stats.build_s`, left out). The digests are the loader's
 //! from before class columns came from the store (`classes.rs`; it knew `c2`..`c4` and gcs's names for them), taken in
 //! CI on the commit that added this test. Each fixture as committed (class columns `c2`..`c4`, read off the store or
-//! named by `-C`) and as a copy under gcs's names with gcs's `-C` (`2=nearline_bytes,3=coldline_bytes,4=archive_bytes`,
-//! what `dt-cloud vm-pack build` passes there) gives exactly those bytes: gcs's slots, their order and its packs are
-//! unchanged.
+//! named by `-C`; on gcs's branch, its own names with its `-C`) and as a copy under gcs's names with gcs's `-C`
+//! (`2=nearline_bytes,3=coldline_bytes,4=archive_bytes`, what `dt-cloud vm-pack build` passes there) gives exactly
+//! those bytes: gcs's slots, their order and its packs are unchanged.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -35,17 +35,29 @@ fn fixtures() -> Vec<PathBuf> {
     v
 }
 
-/// Whether the fixtures are cloud's (class columns `c2`..`c4`), what the pins are of. A deployment branch's fixtures
-/// carry its own class columns (hf: `private_bytes`, `git_bytes`); there the tests say so and pass.
-fn cloud_fixtures(fx: &[PathBuf]) -> bool {
+/// The fixtures' class columns. Each branch cuts them under its own: cloud's `c2`..`c4` (what the pins are of), gcs's
+/// names for the same classes (the same data, read with gcs's `-C`), or another deployment's (hf: `private_bytes`,
+/// `git_bytes`: other classes, where the pins don't apply; the tests say so and pass).
+#[derive(Clone, Copy, PartialEq)]
+enum Fixtures {
+    Cloud,
+    Gcs,
+    Other,
+}
+
+fn fixture_columns(fx: &[PathBuf]) -> Fixtures {
     let p = fx[0].join("served/path.parquet");
     let b = ParquetRecordBatchReaderBuilder::try_new(File::open(&p).unwrap()).unwrap();
     let names: Vec<String> = b.schema().fields().iter().map(|f| f.name().clone()).collect();
-    let cloud = GCS_NAMES.iter().all(|(c, _)| names.iter().any(|n| n == c));
-    if !cloud {
-        eprintln!("{}: not cloud's fixtures (columns {names:?}); the pinned packs are cloud's", p.display());
+    let has = |cols: [&str; 3]| cols.iter().all(|c| names.iter().any(|n| n == c));
+    if has(GCS_NAMES.map(|(c, _)| c)) {
+        Fixtures::Cloud
+    } else if has(GCS_NAMES.map(|(_, g)| g)) {
+        Fixtures::Gcs
+    } else {
+        eprintln!("{}: neither cloud's nor gcs's class columns ({names:?}); the pinned packs are of those", p.display());
+        Fixtures::Other
     }
-    cloud
 }
 
 /// A fresh scratch dir under cargo's per-target tmp.
@@ -121,15 +133,18 @@ fn slim_pack(gen: &Path, named: Option<&str>, out: &Path) -> String {
 #[test]
 fn fixture_slim_packs() {
     let fx = fixtures();
-    if !cloud_fixtures(&fx) {
+    let kind = fixture_columns(&fx);
+    if kind == Fixtures::Other {
         return;
     }
     let tmp = scratch("fixture-slim-packs");
     let mut got: BTreeMap<String, String> = BTreeMap::new();
     for g in fx {
         let n = g.file_name().unwrap().to_string_lossy().into_owned();
-        let plain = slim_pack(&g, None, &tmp.join(format!("{n}.fsb")));
-        assert_eq!(slim_pack(&g, Some("2=c2,3=c3,4=c4"), &tmp.join(format!("{n}-named.fsb"))), plain, "{n}: its class columns named");
+        let plain = slim_pack(&g, (kind == Fixtures::Gcs).then_some(GCS), &tmp.join(format!("{n}.fsb")));
+        if kind == Fixtures::Cloud {
+            assert_eq!(slim_pack(&g, Some("2=c2,3=c3,4=c4"), &tmp.join(format!("{n}-named.fsb"))), plain, "{n}: its class columns named");
+        }
         let gcs = tmp.join(format!("{n}-gcs"));
         renamed_copy(&g, &gcs, &GCS_NAMES);
         assert_eq!(slim_pack(&gcs, Some(GCS), &tmp.join(format!("{n}-gcs.fsb"))), plain, "{n}: under gcs's class column names");
@@ -147,7 +162,7 @@ fn fixture_slim_packs() {
 #[test]
 fn gcs_names_need_their_classes_named() {
     let fx = fixtures();
-    if !cloud_fixtures(&fx) {
+    if fixture_columns(&fx) == Fixtures::Other {
         return;
     }
     let tmp = scratch("gcs-unnamed");
