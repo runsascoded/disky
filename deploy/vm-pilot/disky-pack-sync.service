@@ -8,4 +8,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 Slice=scan.slice
+# `dt-cloud` reads `$HOME` (disk_tree.config: ~/.config/disk-tree, the buckets.yml it consults for an r2:// store);
+# a system unit has none, so the first pass failed with `KeyError: 'HOME'` (2026-11-28)
+Environment=HOME=/var/lib/disky-pack-sync
+StateDirectory=disky-pack-sync
 ExecStart=/usr/local/lib/disky/pack-sync
