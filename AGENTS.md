@@ -224,7 +224,9 @@ dt-cloud scan box submit -a ACCOUNT -i IMAGE PROFILE  # A deployment's scan on t
                           # default `scan.slice`'s memory.max), the head one local job as ACCOUNT (the data bucket a gcsfuse volume,
                           # the existing disk `<tenant>-nf` its Nextflow cache and reports), recorded on /scans as `manual` (`-b` who).
                           # `-x ENV` drops a secret binding the account can't read, `-S STEP` a step; `-s SCAN -g GEN` resumes; `-n`
-                          # prints the profile, spec and DAG. `scan box report JOB`: per task, wall time, trace RSS and the cgroup's samples
+                          # prints the profile, spec and DAG; `-c` runs the same job as a check of its setup (mount, metadata
+                          # server, a secret, `scan head -n`), no scan. `scan box report JOB`: per task, wall time, trace RSS and
+                          # the cgroup's samples
 dt-cloud local-job status|logs|cancel [JOB]  # The local job backend's jobs on this host (`$DISKY_LOCAL_JOBS`): states, each run's
                           # wall time / `memory.peak` / OOM kills, output, a cancel (TERM, 60 s; then the job's gcsfuse mounts,
                           # network and metadata server go). A local job's containers authenticate through a metadata server of
