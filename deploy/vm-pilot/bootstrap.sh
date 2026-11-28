@@ -113,11 +113,19 @@ printf '[Slice]\nMemoryMin=%s\n' "$SERVE_MEMORY_MIN" | put_text "$UNITS/serve.sl
 printf '[Slice]\nMemoryMax=%s\n' "$SCAN_MEMORY_MAX" | put_text "$UNITS/scan.slice.d/budget.conf" 0644 && changed=1
 [ "$changed" = 0 ] || systemctl daemon-reload
 
-# 5. Docker: its data root on the data disk; Artifact Registry through gcloud's credential helper (the VM's account).
+# 5. Docker: its data root on the data disk; job containers kept off the metadata server (`no-metadata.conf`); the
+# tenants' Artifact Registry hosts pulled as the job's own account (`docker-credential-disky`: the token the local job
+# backend minted, from the environment), never as the box's.
+docker_changed=0
 printf '{"data-root": "%s/docker", "log-opts": {"max-size": "50m", "max-file": "3"}}\n' "$DATA" \
-  | put_text /etc/docker/daemon.json 0644 && systemctl restart docker
-systemctl enable --now docker
-[ -z "$REGISTRIES" ] || gcloud auth configure-docker --quiet "$REGISTRIES" >/dev/null 2>&1
+  | put_text /etc/docker/daemon.json 0644 && docker_changed=1
+put "$HERE/docker-no-metadata.conf" /etc/systemd/system/docker.service.d/no-metadata.conf 0644 && { systemctl daemon-reload; docker_changed=1; }
+put "$HERE/docker-credential-disky" /usr/local/bin/docker-credential-disky 0755 || true
+printf '%s\n' "$REGISTRIES" | jq -R 'split(",") | map(select(length > 0)) | {credHelpers: (map({(.): "disky"}) | add // {})}' \
+  | put_text /root/.docker/config.json 0600 || true
+systemctl enable -q docker
+if [ "$docker_changed" = 1 ]; then systemctl restart docker; else systemctl start docker; fi
+iptables -C DOCKER-USER -d 169.254.169.254/32 -j REJECT  # the drop-in's rule is in place, or this run stops here
 
 # 6. vmd + fsb, built once per bench/full-scan tree in job/Dockerfile's Rust image (cargo's registry cached on the disk).
 TREE=$(git -C "$SRC" rev-parse "$SHA:bench/full-scan")

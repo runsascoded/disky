@@ -45,18 +45,17 @@ if not pilot["zone"].startswith(f"{region}-"):
 names = [t.name for t in tenants]
 if len(set(names)) != len(names):
     raise ValueError(f"vmPilot.tenants: duplicate names in {names}")
-for t in pilot["tenants"]:
-    if missing := sorted(set((t.get("pack") or {}).get("secrets", {}).values()) - set(t.get("secrets") or ())):
-        raise ValueError(f"vmPilot.tenants[{t['name']}].pack.secrets names {missing}, not in its secrets (no grant)")
 if not SHA.fullmatch(pilot["ref"]):
     pulumi.log.warn(f"vmPilot.ref {pilot['ref']!r} is not a full sha: each boot checks out whatever it names then")
 own = {pilot["tunnelSecret"]: "the Cloudflare Tunnel's connector token (cloudflared)"}
 own.update({t["vmdKeySecret"]: f"vmd's HMAC key for tenant {t['name']} (= its site's VM_KEY)" for t in pilot["tenants"]})
 
-# The box's own config, read by `bootstrap.sh` from the metadata server: names only, never a secret's value.
+# The box's own config, read by `bootstrap.sh` from the metadata server: names only, never a secret's value. The pack
+# sync reads `pack_secrets` as the tenant's `job_account` (impersonated), never as the box.
 box_tenants = [
     {
         "name": t["name"],
+        "job_account": t["jobAccount"],
         "vmd_key_secret": t["vmdKeySecret"],
         "store": t["pack"]["store"],
         "pack_env": t["pack"].get("env") or {},
@@ -85,8 +84,8 @@ box = VmBox(
         "disky-ref": pilot["ref"],
         "disky-tunnel-secret": pilot["tunnelSecret"],
         "disky-tenants": json.dumps(box_tenants, sort_keys=True),
-        # Docker's credential helper for these hosts (the tenants' job images)
-        "disky-registries": ",".join(sorted({f"{r.location}-docker.pkg.dev" for t in tenants for r in t.repositories})),
+        # The hosts whose pulls go through the job's own token (`docker-credential-disky`): the tenants' job images
+        "disky-registries": ",".join(sorted(pilot["registries"])),
         "disky-scan-memory-max": str(pilot.get("scanMemoryMax", "8G")),
         "disky-serve-memory-min": str(pilot.get("serveMemoryMin", "3G")),
     },

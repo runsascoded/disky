@@ -1,5 +1,6 @@
 # The VM pilot's box (specs/vm-pilot.md "The box", Ryan's go 2026-11-27): one e2-standard-4 + a 50 GB pd-balanced data
 # disk in oa-internal-450019, in r2's Batch region; tenants `oa-r2` (r2.oa.dev; its `deployment` label) and `hf`.
+# Per-deployment isolation: the box holds nothing of a tenant's but the right to mint its job account's tokens.
 config:
   gcp:project: oa-internal-450019
   gcp:region: us-west1
@@ -21,10 +22,15 @@ config:
     repo: https://github.com/Open-Athena/disky.git
     ref: cloud
     tunnelSecret: vm-pilot-tunnel-token
+    # The tenants' image hosts: pulled with the job's own token (deploy/vm-pilot/docker-credential-disky)
+    registries: [us-west1-docker.pkg.dev, us-central1-docker.pkg.dev]
     tenants:
       - name: oa-r2
+        # o/r2 `job/r2.json` `job_account`: holds r2's scan secrets, its data bucket and its images
+        jobAccount: oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com
         vmdKeySecret: vm-pilot-vmd-key-oa-r2
-        # `dt-cloud vm-pack pull`: the store `vm-pack build` publishes to, beside the interval store the site reads
+        # `dt-cloud vm-pack pull`: the store `vm-pack build` publishes to, beside the interval store the site reads; its
+        # credentials read as the job account
         pack:
           store: r2://oa-r2-usage-index
           env:
@@ -33,21 +39,9 @@ config:
           secrets:
             AWS_ACCESS_KEY_ID: oa-r2-index-access-key-id
             AWS_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
-        # r2's scan secrets (o/r2 `job/r2.json` `secrets` + `optional_secrets_live`; `job/profiles/r2.yml`)
-        secrets:
-          - oa-r2-source-access-key-id
-          - oa-r2-source-secret-access-key
-          - oa-r2-index-access-key-id
-          - oa-r2-index-secret-access-key
-          - oa-r2-d1-token
-          - oa-r2-site-grant
-          - oa-r2-slack-bot-token
-          - oa-r2-cf-analytics-token
-          - oa-r2-cf-pages-token
-        buckets: [oa-r2-usage-data]
-        repositories:
-          - {location: us-west1, name: oa-r2-usage}
       - name: hf
+        # o/hf `job/profiles/hf.yml` `executor.service_account`
+        jobAccount: hf-usage-job@oa-internal-450019.iam.gserviceaccount.com
         vmdKeySecret: vm-pilot-vmd-key-hf
         pack:
           store: r2://oa-hf-usage-index
@@ -57,19 +51,3 @@ config:
             DISKY_R2_ENDPOINT_URL: hf-usage-r2-endpoint
             AWS_ACCESS_KEY_ID: hf-usage-r2-access-key-id
             AWS_SECRET_ACCESS_KEY: hf-usage-r2-secret-access-key
-        # hf's scan secrets (o/hf `job/profiles/hf.yml` `secrets` + the list task's `HF_LFS_TOKEN`)
-        secrets:
-          - hf-usage-hf-token
-          - hf-usage-hf-lfs-token
-          - hf-usage-cf-token
-          - hf-usage-cf-pages-token
-          - hf-usage-cf-account-id
-          - hf-usage-r2-endpoint
-          - hf-usage-r2-access-key-id
-          - hf-usage-r2-secret-access-key
-          - hf-usage-slack-bot-token
-          - hf-usage-job-grant
-          - hf-usage-cf-analytics-token
-        buckets: [oa-hf-usage-data]
-        repositories:
-          - {location: us-central1, name: hf-usage}

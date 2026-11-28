@@ -2,10 +2,11 @@
 
 The shape and none of the names: a stack program (`shared/__main__.py`, the VM pilot's) instantiates it.
 
-- **Its own account**, holding only what the box's work needs: log writing, `secretAccessor` on the box's own secrets
-  (the tunnel token, each tenant's `vmd` key) and on each tenant's scan secrets (other stacks' containers, granted
-  here additively), `objectAdmin` on each tenant's data buckets, read on each tenant's image repositories. The local
-  job backend runs every tenant's jobs with these credentials (specs/vm-pilot.md "Identity").
+- **Its own account**, holding nothing of any tenant's: log writing, `secretAccessor` on the box's own secrets (the
+  tunnel token, each tenant's `vmd` key), and `iam.serviceAccountTokenCreator` on each tenant's job account. Whatever
+  the box does for a tenant it does as that tenant's job account (per-deployment isolation, as on Batch): the local job
+  backend mints each job a short-lived token for its spec's account, and the pack sync reads the tenant's store
+  credentials impersonating it. The job accounts already hold their deployments' secrets, buckets and images.
 - **No ingress.** A VPC of its own (so the default network's `0.0.0.0/0` SSH / RDP / ICMP rules never reach it), whose
   only ingress rule is IAP's TCP forwarding to port 22. No external address: egress through a Cloud NAT on the VPC's one
   subnet, Google APIs through Private Google Access. Serving reaches the box over its outbound Cloudflare Tunnel.
@@ -25,7 +26,7 @@ import pulumi
 import pulumi_gcp as gcp
 from pulumi import ComponentResource, ResourceOptions
 
-from gcp_jobs import Adopt, JobAccount, Secrets, grant_bucket, grant_secret
+from gcp_jobs import Adopt, JobAccount, Secrets
 
 #: IAP's TCP-forwarding range: the one ingress source (`gcloud compute ssh --tunnel-through-iap`).
 IAP_RANGE = "35.235.240.0/20"
@@ -34,26 +35,20 @@ DATA_DEVICE = "disky-data"
 
 
 @dataclass(frozen=True)
-class Repository:
-    """An Artifact Registry repository a tenant's job images come from."""
-
-    location: str
-    name: str
-    project: str | None = None
-
-
-@dataclass(frozen=True)
 class Tenant:
     """A deployment the box serves and scans for: `name` is `vmd`'s tenant and the local job backend's (a job spec's
-    `deployment` label)."""
+    `deployment` label); `job_account` the deployment's own job service account (its stack's), which the box
+    impersonates for everything it does for the tenant."""
 
     name: str
-    #: Existing Secret Manager ids (the tenant's own stack's) its jobs and its pack sync read: `secretAccessor` on each.
-    secrets: tuple[str, ...] = ()
-    #: Buckets its jobs read and write (its data store, Nextflow's work dir): `objectAdmin` on each.
-    buckets: tuple[str, ...] = ()
-    #: Repositories its job images come from: `artifactregistry.reader` on each.
-    repositories: tuple[Repository, ...] = ()
+    job_account: str
+
+    @property
+    def job_project(self) -> str:
+        domain = self.job_account.partition("@")[2]
+        if not domain.endswith(".iam.gserviceaccount.com"):
+            raise ValueError(f"tenant {self.name}: job account {self.job_account!r} isn't a project's service account")
+        return domain.removesuffix(".iam.gserviceaccount.com")
 
 
 @dataclass(frozen=True)
@@ -110,23 +105,15 @@ class VmBox(ComponentResource):
             opts=child,
         )
         grants: list[pulumi.Resource] = [self.secrets]
+        # The one grant per tenant: minting its job account's tokens (the local job backend, the pack sync)
         for t in box.tenants:
-            for sid in t.secrets:
-                grants.append(grant_secret(f"{name}-{t.name}-{sid}", project=project, secret_id=sid, member=member,
-                                           member_email=email, adopt=adopt, parent=self))
-            for b in t.buckets:
-                grants.append(grant_bucket(f"{name}-{t.name}-{b}", bucket=b, role="roles/storage.objectAdmin",
-                                           member=member, member_email=email, adopt=adopt, parent=self))
-            for r in t.repositories:
-                grants.append(gcp.artifactregistry.RepositoryIamMember(
-                    f"{name}-{t.name}-{r.name}",
-                    project=r.project or project,
-                    location=r.location,
-                    repository=r.name,
-                    role="roles/artifactregistry.reader",
-                    member=member,
-                    opts=child,
-                ))
+            grants.append(gcp.serviceaccount.IAMMember(
+                f"{name}-{t.name}-token-creator",
+                service_account_id=f"projects/{t.job_project}/serviceAccounts/{t.job_account}",
+                role="roles/iam.serviceAccountTokenCreator",
+                member=member,
+                opts=child,
+            ))
 
         base = box.account_id  # every GCP name: the account's, `disky-<name>`
         self.network = gcp.compute.Network(
@@ -223,13 +210,5 @@ class VmBox(ComponentResource):
 
 
 def tenants_from_config(items: Sequence[Mapping]) -> tuple[Tenant, ...]:
-    """The stack config's `tenants` list (`{name, secrets, buckets, repositories: [{location, name, project?}]}`)."""
-    return tuple(
-        Tenant(
-            name=t["name"],
-            secrets=tuple(t.get("secrets") or ()),
-            buckets=tuple(t.get("buckets") or ()),
-            repositories=tuple(Repository(**r) for r in t.get("repositories") or ()),
-        )
-        for t in items
-    )
+    """The stack config's `tenants` list (`{name, jobAccount, …}`)."""
+    return tuple(Tenant(name=t["name"], job_account=t["jobAccount"]) for t in items)
