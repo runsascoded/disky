@@ -1,0 +1,6 @@
+# The VM pilot's tunnel (specs/vm-pilot.md, Ryan's go 2026-11-27), in OA's Cloudflare account and the oa.dev zone (the
+# ids from `$CLOUDFLARE_ACCOUNT_ID` / `$CF_ZONE_ID`), beside r2.oa.dev and hf.oa.dev, whose Functions will call it.
+config:
+  disky-shared-cf:vmPilot:
+    tunnelName: disky-vm-pilot
+    hostname: vmd-pilot.oa.dev

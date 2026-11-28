@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Pulumi needs the IaC token, not the ambient D1/Pages job token.
+# `CF_PULUMI_DIR` (relative to infra/cf, default `.`): another Cloudflare program beside it, e.g. `shared`.
 set -euo pipefail
 { set +x; } 2>/dev/null
 iac_token=${CF_IAC_TOKEN:?Run under direnv with CF_IAC_TOKEN set}
@@ -11,4 +12,4 @@ if [ -z "$iac_token" ]; then
 fi
 export CLOUDFLARE_API_TOKEN=$iac_token
 unset iac_token
-exec pulumi -C "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" "$@"
+exec pulumi -C "$(cd "$(dirname "${BASH_SOURCE[0]}")/${CF_PULUMI_DIR:-.}" && pwd)" "$@"
