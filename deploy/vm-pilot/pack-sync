@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The VM pilot's pack sync (`disky-pack-sync.timer`): each tenant's current pack mirrored from its store
-# (`dt-cloud vm-pack pull`, with the tenant's store credentials from Secret Manager), then vmd's config rewritten to
+# (`dt-cloud vm-pack pull`, with the tenant's store credentials from Secret Manager, read as its job account), then vmd's config rewritten to
 # list every tenant whose pack is on disk. vmd re-reads both on its own (specs/vm-mode.md §5, "Hot swap"): a pack renamed
 # over `current.fsb` is mapped anew, a tenant added to the config loads. A tenant whose pull fails keeps its last pack.
 set -uo pipefail
@@ -17,9 +17,11 @@ n=$(jq length "$TENANTS")
 for ((i = 0; i < n; i++)); do
   t=$(jq -r ".[$i].name" "$TENANTS")
   store=$(jq -r ".[$i].store" "$TENANTS")
+  account=$(jq -r ".[$i].job_account" "$TENANTS")
   mapfile -t env < <(jq -r ".[$i].pack_env // {} | to_entries[] | \"\(.key)=\(.value)\"" "$TENANTS")
   mapfile -t sec < <(jq -r ".[$i].pack_secrets // {} | to_entries[] | \"\(.key)=\(.value)\"" "$TENANTS")
-  if out=$(env ${env[@]+"${env[@]}"} "$LIB/with-secrets" ${sec[@]+"${sec[@]}"} -- dt-cloud vm-pack pull -o "$store" -d "$PACKS/$t"); then
+  # The store's credentials read as the tenant's job account (impersonated): the box holds none of a tenant's secrets.
+  if out=$(env ${env[@]+"${env[@]}"} "$LIB/with-secrets" -i "$account" ${sec[@]+"${sec[@]}"} -- dt-cloud vm-pack pull -o "$store" -d "$PACKS/$t"); then
     echo "pack-sync: $t: $(jq -c '{state, key, bytes, scans}' <<< "$out")"
   else
     echo "pack-sync: $t: pull from $store failed" >&2

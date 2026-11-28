@@ -23,16 +23,8 @@ CF = INFRA / "cf" / "shared"
 PROJECT = "oa-internal-450019"
 EMAIL = f"disky-vm-pilot@{PROJECT}.iam.gserviceaccount.com"
 MEMBER = f"serviceAccount:{EMAIL}"
-R2_SECRETS = [
-    "oa-r2-source-access-key-id", "oa-r2-source-secret-access-key", "oa-r2-index-access-key-id",
-    "oa-r2-index-secret-access-key", "oa-r2-d1-token", "oa-r2-site-grant", "oa-r2-slack-bot-token",
-    "oa-r2-cf-analytics-token", "oa-r2-cf-pages-token",
-]
-HF_SECRETS = [
-    "hf-usage-hf-token", "hf-usage-hf-lfs-token", "hf-usage-cf-token", "hf-usage-cf-pages-token", "hf-usage-cf-account-id",
-    "hf-usage-r2-endpoint", "hf-usage-r2-access-key-id", "hf-usage-r2-secret-access-key", "hf-usage-slack-bot-token",
-    "hf-usage-job-grant", "hf-usage-cf-analytics-token",
-]
+R2_JOB = f"oa-r2-usage-job@{PROJECT}.iam.gserviceaccount.com"
+HF_JOB = f"hf-usage-job@{PROJECT}.iam.gserviceaccount.com"
 OWN = ["vm-pilot-tunnel-token", "vm-pilot-vmd-key-oa-r2", "vm-pilot-vmd-key-hf"]
 
 
@@ -86,10 +78,8 @@ def test_gcp_box(monkeypatch):
             "gcp:projects/iAMMember:IAMMember": ["vm-pilot-logging.logWriter"],
             "disky:gcp:Secrets": ["vm-pilot-secrets"],
             "gcp:secretmanager/secret:Secret": sorted(OWN),
-            "gcp:secretmanager/secretIamMember:SecretIamMember": sorted(
-                [f"{s}-accessor" for s in OWN] + [f"vm-pilot-oa-r2-{s}" for s in R2_SECRETS] + [f"vm-pilot-hf-{s}" for s in HF_SECRETS]),
-            "gcp:storage/bucketIAMMember:BucketIAMMember": ["vm-pilot-hf-oa-hf-usage-data", "vm-pilot-oa-r2-oa-r2-usage-data"],
-            "gcp:artifactregistry/repositoryIamMember:RepositoryIamMember": ["vm-pilot-hf-hf-usage", "vm-pilot-oa-r2-oa-r2-usage"],
+            "gcp:secretmanager/secretIamMember:SecretIamMember": sorted(f"{s}-accessor" for s in OWN),
+            "gcp:serviceaccount/iAMMember:IAMMember": ["vm-pilot-hf-token-creator", "vm-pilot-oa-r2-token-creator"],
             "gcp:compute/network:Network": ["vm-pilot"],
             "gcp:compute/subnetwork:Subnetwork": ["vm-pilot"],
             "gcp:compute/firewall:Firewall": ["vm-pilot-iap-ssh"],
@@ -101,16 +91,16 @@ def test_gcp_box(monkeypatch):
         r = mocks.resources
         assert r[("gcp:projects/iAMMember:IAMMember", "vm-pilot-logging.logWriter")] == {
             "project": PROJECT, "role": "roles/logging.logWriter", "member": MEMBER}
-        # Every secret grant is `secretAccessor` for the box's account, on exactly its own and its tenants' secrets.
+        # Per-deployment isolation: `secretAccessor` on the box's own three secrets only, and of each tenant's, only
+        # the right to mint its job account's tokens.
         grants = [v for (t, _), v in r.items() if t == "gcp:secretmanager/secretIamMember:SecretIamMember"]
         assert sorted((v["secretId"], v["role"], v["member"]) for v in grants) == sorted(
-            (s, "roles/secretmanager.secretAccessor", MEMBER) for s in OWN + R2_SECRETS + HF_SECRETS)
+            (s, "roles/secretmanager.secretAccessor", MEMBER) for s in OWN)
         assert {r[("gcp:secretmanager/secret:Secret", s)]["labels"]["component"] for s in OWN} == {"vm-pilot"}
-        assert sorted((v["bucket"], v["role"], v["member"]) for (t, _), v in r.items() if t == "gcp:storage/bucketIAMMember:BucketIAMMember") == [
-            ("oa-hf-usage-data", "roles/storage.objectAdmin", MEMBER), ("oa-r2-usage-data", "roles/storage.objectAdmin", MEMBER)]
-        assert sorted((v["location"], v["repository"], v["role"]) for (t, _), v in r.items()
-                      if t == "gcp:artifactregistry/repositoryIamMember:RepositoryIamMember") == [
-            ("us-central1", "hf-usage", "roles/artifactregistry.reader"), ("us-west1", "oa-r2-usage", "roles/artifactregistry.reader")]
+        assert sorted((v["serviceAccountId"], v["role"], v["member"]) for (t, _), v in r.items()
+                      if t == "gcp:serviceaccount/iAMMember:IAMMember") == [
+            (f"projects/{PROJECT}/serviceAccounts/{HF_JOB}", "roles/iam.serviceAccountTokenCreator", MEMBER),
+            (f"projects/{PROJECT}/serviceAccounts/{R2_JOB}", "roles/iam.serviceAccountTokenCreator", MEMBER)]
         # No ingress but IAP's SSH: one rule, on its own VPC (no default-network rule reaches it).
         fw = r[("gcp:compute/firewall:Firewall", "vm-pilot-iap-ssh")]
         assert {k: fw[k] for k in ("name", "direction", "sourceRanges", "targetServiceAccounts", "allows")} == {
@@ -148,12 +138,12 @@ def test_gcp_box(monkeypatch):
             "disky-serve-memory-min": "3G",
         }
         assert json.loads(md["disky-tenants"]) == [
-            {"name": "oa-r2", "vmd_key_secret": "vm-pilot-vmd-key-oa-r2", "store": "r2://oa-r2-usage-index",
+            {"name": "oa-r2", "job_account": R2_JOB, "vmd_key_secret": "vm-pilot-vmd-key-oa-r2", "store": "r2://oa-r2-usage-index",
              "pack_env": {"AWS_DEFAULT_REGION": "auto",
                           "DISKY_R2_ENDPOINT_URL": "https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com"},
              "pack_secrets": {"AWS_ACCESS_KEY_ID": "oa-r2-index-access-key-id",
                               "AWS_SECRET_ACCESS_KEY": "oa-r2-index-secret-access-key"}},
-            {"name": "hf", "vmd_key_secret": "vm-pilot-vmd-key-hf", "store": "r2://oa-hf-usage-index",
+            {"name": "hf", "job_account": HF_JOB, "vmd_key_secret": "vm-pilot-vmd-key-hf", "store": "r2://oa-hf-usage-index",
              "pack_env": {"AWS_DEFAULT_REGION": "auto"},
              "pack_secrets": {"AWS_ACCESS_KEY_ID": "hf-usage-r2-access-key-id",
                               "AWS_SECRET_ACCESS_KEY": "hf-usage-r2-secret-access-key",
