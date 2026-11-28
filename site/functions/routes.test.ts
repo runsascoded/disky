@@ -156,6 +156,40 @@ describe('middleware timing', () => {
   })
 })
 
+describe('VM mode\'s pin (`_lib/vmServe.ts`, specs/vm-pilot.md step 4)', () => {
+  const VM = { VMD_URL: 'https://vmd.test', VM_TENANT: 't1', VM_KEY: 'k', VM_SHARE: '1' }
+  const at = (url: string, upstream: Response, cookie?: string) =>
+    onRequest({ request: new Request(url, cookie ? { headers: { cookie } } : {}), env: VM as never, next: async () => upstream })
+  const json = () => new Response('{}', { headers: { 'content-type': 'application/json' } })
+  it('a page view without a pin gets one (`VM_SHARE`), a `?be=` re-pins any response, an API request keeps its own', async () => {
+    const got = await Promise.all([
+      at('https://r2.example/', html()),
+      at('https://r2.example/', html(), 'disky_be=idx'),
+      at('https://r2.example/api/subtree?be=idx', json(), 'disky_be=vm'),
+      at('https://r2.example/api/largest', json()),
+    ])
+    expect(got.map(r => r.headers.get('set-cookie'))).toEqual([
+      'disky_be=vm; Path=/; Max-Age=2592000; SameSite=Lax; Secure',
+      null,
+      'disky_be=idx; Path=/; Max-Age=2592000; SameSite=Lax; Secure',
+      null,
+    ])
+  })
+  it('a map answer no route stamped says which backend gave it: a `vm` session\'s series is the indexes\'', async () => {
+    const [series, idx, other] = await Promise.all([
+      at('https://r2.example/api/series?d=x', json(), 'disky_be=vm'),
+      at('https://r2.example/api/series?d=x', json()),
+      at('https://r2.example/api/largest', json(), 'disky_be=vm'),
+    ])
+    const be = (r: Response) => [(r.headers.get('server-timing') ?? '').split(', ').filter(e => e.startsWith('be;')), r.headers.get('x-disky-be-note')]
+    expect([be(series), be(idx), be(other)]).toEqual([
+      [['be;desc="idx-fallback"'], 'size over time: vmd has no series yet'],
+      [['be;desc="idx"'], null],
+      [[], null],
+    ])
+  })
+})
+
 describe('identify', () => {
   it('is one lookup per request and env: the gate\'s and the route\'s calls share it; another env (a union member) has its own', async () => {
     const { identify } = await import('./_lib/auth')
