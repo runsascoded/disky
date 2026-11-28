@@ -8,6 +8,8 @@ Pulumi components, one directory per provider, shared by every deployment, plus 
 | `cf/` | `capture_trigger.py` (`CaptureTrigger`) | a laptop deployment's capture trigger: the queue, and the R2 event notification that publishes a finished capture's marker (`captures/…/_SUCCESS.json`) to it | the consumer Worker (`capture-trigger/`, on `local`) is wrangler's |
 | `cf/` | `cron-dispatch/` (a Worker, deployed by wrangler) | GitHub Actions workflows started on Cloudflare's cron (`workflow_dispatch`), since GitHub's own `schedule:` runs hours late; configuration only (`wrangler.example.toml`), reusable for any repo; r2's is `wrangler.r2.toml` | the `GITHUB_TOKEN` secret (fine-grained, Actions read/write) goes in with `wrangler secret put` |
 | `gcp/` | `gcp_jobs.py` (`JobAccount`, `Secrets`, `BatchCron`, `RunJobCron`, `grant_secret`, `grant_bucket`) | a deployment's scheduled jobs: their service accounts and project roles, Secret Manager containers and accessors, Cloud Scheduler crons (→ Batch, or → a Cloud Run job), bucket grants | the Batch spec is generated from the branch's `job/*-submit.sh` under `PIN=1 DRY=1`; a Cloud Run job's image and plain env are its deploy script's |
+| `gcp/` | `vm_box.py` (`VmBox`) | a standing VM serving and scanning for several deployments: its account and grants (its own secrets, its tenants' scan secrets, buckets and image repositories), a VPC of its own with no ingress but IAP SSH, Cloud NAT egress, a data disk, the startup script | the box itself is configured by `deploy/vm-pilot/bootstrap.sh` from the instance's metadata |
+| `gcp/shared/`, `cf/shared/` | the `shared` stack's programs (projects `disky-shared-gcp`, `disky-shared-cf`) | resources labelled `deployment=shared`, owned by the root session: the VM pilot's box (`VmBox`) and its Cloudflare Tunnel + hostname (specs/vm-pilot.md "Runbook") | secret values (`gcloud secrets versions add`) |
 
 Two rules hold across `gcp/`: secret **values** are never managed (containers and IAM only; payloads go in with `gcloud secrets versions add`), and IAM is additive (`IAMMember`), so a stack can't clobber anyone else's grants on a shared project or bucket.
 
@@ -23,6 +25,8 @@ pulumi preview -s <stack>   # read-only; `up` is a human's call
 ```
 
 Pulumi runs the program under `uv`, from `infra/pyproject.toml`. Give it its own environment (`UV_PROJECT_ENVIRONMENT=infra/.venv`): in a shell where the repo's `.venv` is active, `uv` would sync infra's dependencies into the engine's venv.
+
+The `shared` stacks are their own Pulumi projects in their own directories (`gcp/shared/`, `cf/shared/`), so no deployment branch's `Pulumi.yaml` meets them on a merge: `pulumi -C infra/gcp/shared preview -s shared`, and `CF_PULUMI_DIR=shared infra/cf/run preview -s shared`.
 
 Every deployment's Cloudflare stack runs the shared `cf/stack/` program (gcs and cw-s3 moved onto it on 2026-10-03, `specs/done/iac-templates.md` phase 4, previews unchanged). Their GCP stacks still have their own `infra/gcp/__main__.py`.
 

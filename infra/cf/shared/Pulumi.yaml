@@ -1,0 +1,19 @@
+# The `shared` stack's Cloudflare program (owned by the root session): its own project name, so it shares the
+# gs://oa-pulumi backend with the deployments' CF stacks without colliding, and its own directory, so no deployment
+# branch's `infra/cf/Pulumi.yaml` meets it on a merge. `pulumi stack init shared --secrets-provider
+# gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi` adds the `secretsprovider` /
+# `encryptedkey` lines to `Pulumi.shared.yaml` (the tunnel token output is a secret). Run it as the IaC token:
+# `CF_PULUMI_DIR=shared infra/cf/run preview -s shared`.
+name: disky-shared-cf
+description: Shared disky Cloudflare resources — the VM pilot's tunnel, its route to vmd and its hostname
+backend:
+  url: gs://oa-pulumi
+runtime:
+  name: python
+  options:
+    toolchain: uv
+# The account and zone ids are not declared here (as hf's stack): `__main__.py` fills them from `$CLOUDFLARE_ACCOUNT_ID`
+# / `$CF_ZONE_ID` unless the stack config sets them.
+config:
+  disky-shared-cf:vmPilot:
+    description: "The VM pilot's tunnel: `tunnelName`, and the `hostname` routed to vmd (not linked from any page)"

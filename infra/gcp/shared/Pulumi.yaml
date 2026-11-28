@@ -1,0 +1,19 @@
+# The `shared` stack's GCP program (resources labelled `deployment=shared`, owned by the root session): its own project
+# name, so it shares the gs://oa-pulumi backend with the deployments' `gcs-usage-gcp` / `oa-r2-usage-gcp` stacks
+# without colliding (state is keyed by <project>/<stack>), and its own directory, so no deployment branch's
+# `infra/gcp/Pulumi.yaml` meets it on a merge. `pulumi stack init shared --secrets-provider
+# gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi` adds the `secretsprovider` /
+# `encryptedkey` lines to `Pulumi.shared.yaml` (specs/vm-pilot.md "Runbook").
+name: disky-shared-gcp
+description: Shared disky GCP resources (deployment=shared) — the VM pilot's box, its account, VPC, disks and secret containers (no values)
+backend:
+  url: gs://oa-pulumi
+runtime:
+  name: python
+  options:
+    toolchain: uv
+config:
+  disky-shared-gcp:labels:
+    description: "The stack's cost labels, `app=disky,deployment=shared` (each resource adds its `component`)"
+  disky-shared-gcp:vmPilot:
+    description: "The VM pilot's box (specs/vm-pilot.md): machine, zone, VPC range, the checkout it runs, its secrets, its tenants"
