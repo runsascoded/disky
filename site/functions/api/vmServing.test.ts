@@ -59,7 +59,7 @@ const envOf = (vm: boolean): Env => ({
   ...(vm ? VM_ENV : {}),
 })
 const get = (route: typeof subtree, qs: string, o: { vm?: boolean; cookie?: string } = {}) =>
-  route({ request: new Request(`https://site.test/api/x?${qs}`, o.cookie ? { headers: { cookie: o.cookie } } : {}), env: envOf(o.vm ?? true) })
+  route({ request: new Request(`http://localhost/api/x?${qs}`, o.cookie ? { headers: { cookie: o.cookie } } : {}), env: envOf(o.vm ?? true) })
 const read = async (r: Response) => ({ status: r.status, ...beOfResponse(r), body: await r.json() as Record<string, unknown> })
 
 const MAP = `date=${A}&path=&w=1280&h=768`
@@ -68,7 +68,7 @@ const MAP_VM = { ...subtreeBody(VIEW, { date: A, w: 1280, h: 768, minArea: 12, a
 describe('/api/subtree', () => {
   it('a `vm` session is answered by vmd; an `idx` one by the index reader, never from the `vm` entry', async () => {
     const plain = await read(await get(subtree, MAP, { vm: false }))
-    expect(plain.be).toEqual(undefined)
+    expect([plain.status, plain.be, plain.note]).toEqual([200, undefined, undefined])
     const idx = await read(await get(subtree, MAP))
     expect(idx).toEqual({ ...plain, be: 'idx' })
     expect(vmd.calls).toEqual([])
@@ -113,6 +113,7 @@ describe('/api/diff', () => {
 
   it('an `idx` session\'s diff is the index reader\'s', async () => {
     const plain = await read(await get(diff, D, { vm: false }))
+    expect([plain.status, (plain.body.rows as unknown[]).length > 0]).toEqual([200, true])
     await get(diff, D, { cookie: 'disky_be=vm' })
     expect(await read(await get(diff, D))).toEqual({ ...plain, be: 'idx' })
   })
@@ -121,9 +122,10 @@ describe('/api/diff', () => {
 describe('a union root', () => {
   it('its primary member is answered by vmd under the union\'s one floor, the store without a tenant by the index reader', async () => {
     const env = { ...(await unionDeployment())(), CACHE_KV: envOf(true).CACHE_KV }
-    const at = (cookie?: string, vm = true) => subtree({ request: new Request(`https://site.test/api/subtree?date=${UA}&path=&w=1280&h=768`, cookie ? { headers: { cookie } } : {}), env: vm ? { ...env, ...VM_ENV } : env })
+    const at = (cookie?: string, vm = true) => subtree({ request: new Request(`http://localhost/api/subtree?date=${UA}&path=&w=1280&h=768`, cookie ? { headers: { cookie } } : {}), env: vm ? { ...env, ...VM_ENV } : env })
     vmd = fakeVmd({ status: () => ({ ...HOT, current: { ...HOT.current!, newest: UC } }), view: () => ({ status: 200, body: { ...VIEW, scan: UA } }) })
     const plain = await read(await at(undefined, false))
+    expect(plain.status).toEqual(200)
     const total = (plain.body.tree as { bytes: number }).bytes
     const r = await read(await at('disky_be=vm'))
     expect([r.status, r.be, r.note]).toEqual([200, 'vm', `${VM_NODE_NOTE}; store 'meta' has no vmd tenant`])
