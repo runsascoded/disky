@@ -206,6 +206,24 @@ def test_the_measurement_joined_in_q_ranges_is_one_joins(world, tmp_path, monkey
     assert _md5s(tmp_path / "ranges") == _md5s(tmp_path / "one")
 
 
+def test_the_counts_and_crossers_built_in_hash_parts_measure_the_same(world, tmp_path, monkeypatch):
+    """`measure_kind` building the runs' counts (`im_d`) and the floor crossers (`im_c`) in hash parts (`AGG_PART_ROWS` 7: a
+    part per ~7 counts) writes the measurement one aggregate does, md5 for md5, and counts as many of each."""
+    root = world["a_store"]
+    rec = json.loads((root / "g.c001" / ar.COMPACTION).read_text())
+    base = root / rec["from"]
+    tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
+    docs = {}
+    for name, rows in (("one", 10**9), ("parts", 7)):
+        monkeypatch.setattr(sme, "AGG_PART_ROWS", rows)
+        con = sn.connect(2, "1GB", tmp_path / f"duckdb-{name}")
+        docs[name] = sme.incremental_measure(con, tiers, base / "roots-measure", str(root / "g.c001" / "catalog" / "members.parquet"),
+                                             tmp_path / name, floor=tiers[0].meta.get("floor", sl.FLOOR), log=lambda s: None)
+    assert [{k: d[k] for k in ("dcount", "base_counted")} for d in docs["parts"].values()] == [
+        {k: d[k] for k in ("dcount", "base_counted")} for d in docs["one"].values()]
+    assert _md5s(tmp_path / "parts") == _md5s(tmp_path / "one")
+
+
 @pytest.mark.parametrize("n", [0, 5, 2_100_003])
 def test_write_sorted_writes_write_tables_file(tmp_path, n):
     """`write_sorted` over a sorted result cut into `q` ranges writes the bytes `pq.write_table` writes for the whole result
