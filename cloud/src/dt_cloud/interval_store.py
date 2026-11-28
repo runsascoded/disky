@@ -1256,9 +1256,8 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
     joining): never the sort's size (`tree_mem.Budget.cut` sizes `procs` to a budget). Peak disk: the run spools (lz4,
     the sort's rows once), plus a merged sort's piece spools (once more) until the parts are written, then the parts
     (≈ `out`) beside `out`."""
-    from concurrent.futures import ProcessPoolExecutor
     from contextlib import nullcontext
-    from multiprocessing import get_context
+    from disk_tree.spawned import spawn_pool
 
     from .parquet_pages import concat
 
@@ -1372,7 +1371,7 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         parts = cut_plan(segs, rg_rows, min(k, max(1, total // part_rows)) if part_rows else k)
         t2 = monotonic()
 
-        with ProcessPoolExecutor(len(parts), mp_context=get_context("spawn"), initializer=tm.worker_init) if len(parts) > 1 else nullcontext() as ex:
+        with spawn_pool(len(parts), tm.worker_init) if len(parts) > 1 else nullcontext() as ex:
             def args(i: int, groups: list) -> tuple:
                 lo, hi = (groups[0][1], groups[-1][1] + groups[-1][2]) if groups else (0, 0)
                 return _trim(pieces, lo, hi), groups, str(work / f"part-{i:04d}.parquet"), schema, size_col, kv, page_rows, rg_rows

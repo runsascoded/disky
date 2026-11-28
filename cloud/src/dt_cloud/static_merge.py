@@ -152,9 +152,9 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, 
     any runs a line every `TICK_S` names them and their seconds so far (gcs's 10-22 L3 carry logged nothing for its last
     ~70 min, through drill and anchors). Returns `{rows, bytes, …, "s": {tier: seconds}}`."""
     import threading
-    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+    from concurrent.futures import FIRST_COMPLETED, wait
     from concurrent.futures.process import BrokenProcessPool
-    from multiprocessing import get_context
+    from disk_tree.spawned import spawn_pool
 
     rec = rec or NULL
     running: dict[str, float] = {}
@@ -204,7 +204,7 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, 
             for a in args:
                 serial(a)
         else:
-            with ProcessPoolExecutor(min(jobs, len(args)), mp_context=get_context("spawn")) as ex:
+            with spawn_pool(min(jobs, len(args))) as ex:
                 futures = {}
                 for a in args:
                     begin(a[0])
@@ -1257,8 +1257,8 @@ def write_shard_cmd(checkpoint, index, jobs, plan, tmp, code) -> None:
     fold VM writes it (`static_drill._write_chunk_file`) and uploaded with its group index rows as
     `written/<kind>/r<i>/{file,index}.parquet`, then its `done.json` (rows, bytes). A file whose `done.json` is there is
     skipped (a retry resumes); then `written/tasks/<plan>-<index>.json`. Refuses to run other code than the fold's."""
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    from multiprocessing import get_context
+    from concurrent.futures import as_completed
+    from disk_tree.spawned import spawn_pool
 
     import pyarrow.parquet as pq
 
@@ -1286,7 +1286,7 @@ def write_shard_cmd(checkpoint, index, jobs, plan, tmp, code) -> None:
     listing = ck.store.listing(ck.key("measured"))
     fetch_files(ck, {k: work / "in" / k for k in need}, listing, "write-shard: sorted ranges", label="write-shard")
     out = work / "out"
-    pool = ProcessPoolExecutor(jobs or task_cpus(), mp_context=get_context("spawn"), initializer=sd._writer_init)
+    pool = spawn_pool(jobs or task_cpus(), sd._writer_init)
     with pool:
         futs = {pool.submit(sd._write_chunk_file, [(work / "in" / k, a, b) for k, a, b in f["spans"]], sr.ROOT_SCHEMA, f["lo"], f["hi"], out,
                             f["name"], "path", ["q", "usr"], rg): u for u, f in files.items()}
@@ -1339,8 +1339,8 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     uploaded as `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds, rows). A task whose
     `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`. Refuses to run other
     code than the fold's (its bytes would differ)."""
-    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
-    from multiprocessing import get_context
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from disk_tree.spawned import spawn_pool
 
     import pyarrow.parquet as pq
 
@@ -1419,7 +1419,7 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     mid = max(1, size(rest[len(rest) // 2])) if rest else 1
     total = mem_bytes(mem)
     queue, running, free = list(rest), {}, threads
-    with _Inline() if slots == 1 else ProcessPoolExecutor(slots, mp_context=get_context("spawn"), initializer=_pool_init) as pool:
+    with _Inline() if slots == 1 else spawn_pool(slots, _pool_init) as pool:
         while queue or running:
             while queue and len(running) < slots and free >= min(ANCHOR_THREADS, threads):
                 k, s = queue.pop(0)

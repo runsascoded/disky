@@ -267,8 +267,7 @@ def census_file(src: str, dst: str, floor_rows: int) -> int:
 def census_shards(sx: Path, names: list[str], out: Path, floor_rows: int, jobs: int = 1) -> dict:
     """Each suffix shard `sx/<name>.parquet`'s census (`census_sorted`) → `out/<name>.parquet` (what `cut_members`
     reads), `jobs` processes, the biggest shards first. Returns the seconds and prefixes."""
-    from concurrent.futures import ProcessPoolExecutor
-    from multiprocessing import get_context
+    from disk_tree.spawned import spawn_pool
 
     from .static_append import _Inline
     from .static_names import _pool_init
@@ -276,7 +275,7 @@ def census_shards(sx: Path, names: list[str], out: Path, floor_rows: int, jobs: 
     t0 = monotonic()
     out.mkdir(parents=True, exist_ok=True)
     order = sorted(names, key=lambda n: -(sx / f"{n}.parquet").stat().st_size)
-    pool = _Inline() if jobs <= 1 else ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_pool_init)
+    pool = _Inline() if jobs <= 1 else spawn_pool(jobs, _pool_init)
     with pool as ex:
         futs = [ex.submit(census_file, str(sx / f"{n}.parquet"), str(out / f"{n}.parquet"), floor_rows) for n in order]
         prefixes = sum(f.result() for f in futs)

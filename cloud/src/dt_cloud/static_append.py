@@ -24,7 +24,7 @@ import json
 import shutil
 from collections import deque
 from collections.abc import Callable, Collection
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from time import monotonic
 
@@ -430,7 +430,7 @@ def merge_shards(run_dirs: list[Path], out: Path, target_rows: int = RUN_SHARD_R
     `target_rows`), each written from the pieces' rows once it closes (each piece deleted once its shards are).
     Byte-identical to `merge_shards_serial`."""
     import tempfile
-    from multiprocessing import get_context
+    from disk_tree.spawned import spawn_pool
 
     jobs = jobs or default_jobs()
     rg_rows, piece_rg = SX_RG, PIECE_RG
@@ -438,7 +438,7 @@ def merge_shards(run_dirs: list[Path], out: Path, target_rows: int = RUN_SHARD_R
     inputs = _input_groups(run_dirs)
     out.mkdir(parents=True, exist_ok=True)
     (out / "sidecar").mkdir(parents=True, exist_ok=True)
-    pool = _Inline() if jobs == 1 else ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_worker_init)
+    pool = _Inline() if jobs == 1 else spawn_pool(jobs, _worker_init)
     with pool as ex:
         if plan is not None:
             keys: list[Key] = [(x["lo"], "") for x in plan["shards"]]

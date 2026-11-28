@@ -630,10 +630,9 @@ def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, ch
         verify_task(ids, 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes,
                     covered=covered)
         return out
-    from concurrent.futures import ProcessPoolExecutor
-    from multiprocessing import get_context
+    from disk_tree.spawned import spawn_pool
 
-    with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as ex:
+    with spawn_pool(jobs) as ex:
         parts = [ex.submit(_verify_part, store.root, prefix, gen, ids, i, jobs, str(tmp / "served"), doc, str(tmp / f"part{i}"), runs, changes, covered)
                  for i in range(jobs)]
         for f in parts:

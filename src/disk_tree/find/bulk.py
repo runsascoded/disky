@@ -37,17 +37,17 @@ import json
 import math
 import sys
 import threading
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
-from multiprocessing import get_context
 from queue import Queue
 from typing import TYPE_CHECKING, Callable, Iterable, Optional, Protocol, Union
 
 import pandas as pd
 
 from disk_tree.listing import SII_CLASS_IDS
+from disk_tree.spawned import spawn_pool
 
 if TYPE_CHECKING:
     import fsspec  # noqa: F401
@@ -541,7 +541,7 @@ def list_bucket_to_parquet(
         err(f"chunk balancing from {weights_from} ({len(weights)} weighted prefixes)")
         stream_items, weights = split_hot_prefixes(stream_prefixes, weights, weights_from, procs * threads)
     chunks = pack_chunks(stream_items, weights, procs)
-    with ProcessPoolExecutor(procs, mp_context=get_context("spawn")) as ex:
+    with spawn_pool(procs) as ex:
         futures = [
             ex.submit(_stream_prefixes_worker, lister, bucket, chunk, out_dir, ns, threads)
             for ns, chunk in enumerate(chunks)

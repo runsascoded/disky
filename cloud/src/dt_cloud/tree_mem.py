@@ -48,8 +48,6 @@ from time import monotonic
 
 import pyarrow as pa
 
-from .spawned import exit_hard
-
 MIB = 1 << 20
 #: The least DuckDB limit a phase runs under: its sorts and folds spill beyond it, but each needs some memory of its own.
 DUCK_MIN = 128 * MIB
@@ -151,8 +149,7 @@ def arrow_returns_freed() -> None:
 
 def worker_init() -> None:
     """A spawned cut worker's initializer: one Arrow thread (the cores are split between the workers), freed memory
-    returned (`arrow_returns_freed`), and its exit past pyarrow's teardown (`spawned.exit_hard`)."""
-    exit_hard()
+    returned (`arrow_returns_freed`)."""
     pa.set_cpu_count(1)
     arrow_returns_freed()
 
@@ -167,10 +164,9 @@ def _spawned_private() -> int:
 def spawned_bytes() -> int:
     """A spawned cut worker's private bytes once its modules are imported (`worker_init`'d, as `write_served`'s pool
     spawns them), measured once per process in a worker of its own."""
-    from concurrent.futures import ProcessPoolExecutor
-    from multiprocessing import get_context
+    from disk_tree.spawned import spawn_pool
 
-    with ProcessPoolExecutor(1, mp_context=get_context("spawn"), initializer=worker_init) as ex:
+    with spawn_pool(1, worker_init) as ex:
         return ex.submit(_spawned_private).result()
 
 

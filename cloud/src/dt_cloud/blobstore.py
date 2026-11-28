@@ -376,11 +376,11 @@ def upload_files(root: str, files: Mapping[str, Path], *, workers: int = STAGE_W
     sizes = {k: Path(p).stat().st_size for k, p in files.items()}
     rate = _Rate(label, len(files), sum(sizes.values()), log)
     if scheme(root) == "gs":
-        import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from disk_tree.spawned import spawn_pool
+        from concurrent.futures import as_completed
 
         bucket, _, base = root.removeprefix("gs://").partition("/")
-        with ProcessPoolExecutor(max(1, workers), mp_context=mp.get_context("spawn")) as ex:
+        with spawn_pool(max(1, workers)) as ex:
             futs = {ex.submit(_gcs_put, bucket, f"{base}/{k}" if base else k, str(p)): k for k, p in sorted(files.items())}
             for f in as_completed(futs):
                 f.result()
@@ -490,8 +490,8 @@ def _stage_gcs(root: str, keys: dict[str, int], part: Callable[[str], Path], lan
                fail: Callable[[str, BaseException], None], rate: _Rate, workers: int) -> None:
     """`stage_files` from `gs://`: every file's slices over a pool of spawned processes; a file whose slices all landed
     is checked (size, then crc32c in a worker) before `land`; any failure `fail`s the file."""
-    import multiprocessing as mp
-    from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+    from disk_tree.spawned import spawn_pool
+    from concurrent.futures import FIRST_COMPLETED, Future, wait
 
     from google.cloud import storage
 
@@ -499,7 +499,7 @@ def _stage_gcs(root: str, keys: dict[str, int], part: Callable[[str], Path], lan
     name = lambda key: f"{base}/{key}" if base else key  # noqa: E731
     listed = {b.name: (int(b.size), b.crc32c) for b in storage.Client().list_blobs(bucket, prefix=f"{base}/" if base else None)}
     left: dict[str, int] = {}
-    with ProcessPoolExecutor(max(1, workers), mp_context=mp.get_context("spawn")) as ex:
+    with spawn_pool(max(1, workers)) as ex:
         pending: dict[Future, tuple[str, str]] = {}
 
         def check(key: str) -> None:

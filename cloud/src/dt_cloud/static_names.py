@@ -401,8 +401,7 @@ class ConPool:
         self.lowered = False
 
     def __enter__(self):
-        from concurrent.futures import ProcessPoolExecutor
-        from multiprocessing import get_context
+        from disk_tree.spawned import spawn_pool
 
         if self.jobs == 1:
             from .static_append import _Inline
@@ -414,7 +413,7 @@ class ConPool:
             self.lowered = True
         except Exception as e:  # noqa: BLE001 — legitimate: a database holding more than its share can't shrink; it keeps its limit
             err(f"{self.label}: memory limit {self.was} kept ({type(e).__name__}: {e})")
-        self.ex = ProcessPoolExecutor(self.jobs, mp_context=get_context("spawn"), initializer=_pool_init)
+        self.ex = spawn_pool(self.jobs, _pool_init)
         return self
 
     def submit(self, fn, *args):

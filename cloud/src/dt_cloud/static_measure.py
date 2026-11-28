@@ -33,7 +33,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import static_drill as sd
-from .spawned import exit_hard
 from .static_names import CODEC, err, q
 
 #: `roots-measure/`'s per-kind subdirectories (`static_local.finish_drill`).
@@ -189,7 +188,6 @@ _BC: tuple | None = None
 
 def _bc_init(root: str, name: str, kind: str) -> None:
     global _BC
-    exit_hard()
     tier = sd.Tier(root, name)
     if (gf := tier.group_file(kind, "roots")) is not None:
         gf.cap_groups = WORKER_GROUPS
@@ -253,8 +251,8 @@ def base_counts_parallel(con, tier: sd.Tier, kind: str, src: str, into: str, n: 
     processes: `src` cut in sorted shares (parquet under `work`), each counted against the tier's own group files, copied to
     the work disk first (`local_tier`). Nothing of `src` is held in Python here: a compaction's crossers ran to 191M (cw,
     2026-11-06), 2.0B (2026-11-27). Logs its progress by share (`heartbeat.Progress`: done, crossers counted, ETA)."""
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    from multiprocessing import get_context
+    from concurrent.futures import as_completed
+    from disk_tree.spawned import spawn_pool
 
     from .heartbeat import Progress, set_stage
 
@@ -269,8 +267,7 @@ def base_counts_parallel(con, tier: sd.Tier, kind: str, src: str, into: str, n: 
     err(f"base counts {kind}: {n:,} floor crossers in {len(shares)} shares on {jobs} processes")
     tier = local_tier(tier, kind, work / "tier")
     prog = Progress(f"base counts {kind}", len(shares), total_rows=n, unit="shares")
-    with ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_bc_init,
-                             initargs=(str(tier.root), tier.name, kind)) as pool:
+    with spawn_pool(jobs, _bc_init, (str(tier.root), tier.name, kind)) as pool:
         for f in as_completed([pool.submit(_bc_part, fs, str(work / f"out-{i:05d}.parquet")) for i, fs in shares]):
             prog.tick(rows=f.result())
     prog.done()

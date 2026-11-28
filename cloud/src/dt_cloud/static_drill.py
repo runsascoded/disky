@@ -2038,8 +2038,7 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
     same bytes (the row-group size is resolved here: a process sees the modules' defaults). `fanout`
     (`static_fanout.WriteFanout`): the roots' files dealt by rows, those dealt away written by its helpers from the
     chunks' checkpoint copies and collected here; the same bytes."""
-    from concurrent.futures import ProcessPoolExecutor
-    from multiprocessing import get_context
+    from disk_tree.spawned import spawn_pool
 
     from .static_append import _Inline
 
@@ -2069,7 +2068,7 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
             here = [i for i in range(len(cuts)) if i not in away]
             got: dict[int, tuple] = {}
             procs = max(1, min(jobs, len(here)))
-            pool = _Inline() if procs == 1 else ProcessPoolExecutor(procs, mp_context=get_context("spawn"), initializer=_writer_init)
+            pool = _Inline() if procs == 1 else spawn_pool(procs, _writer_init)
             with pool:
                 futs = {i: pool.submit(_write_chunk_file, _overlapping(spans, *cuts[i]), schema, *cuts[i], out, names[i], key, dic, rg) for i in here}
                 for i, f in futs.items():

@@ -1354,8 +1354,7 @@ def _finalize_parts(
             # first to kill the straggler tail), each writing a temp; the parent
             # consumes temps in (depth, w) order through emit(), so row-group
             # edges (and bytes) match jobs=1.
-            import multiprocessing as mp
-            from concurrent.futures import ProcessPoolExecutor
+            from disk_tree.spawned import spawn_pool
             tmp_dir = os.path.join(parts_dir, 'finalize-tmp')
             os.makedirs(tmp_dir, exist_ok=True)
             weights = {
@@ -1366,7 +1365,7 @@ def _finalize_parts(
             # run-merge may hold `prime_rows` rows across its run readers, so
             # divide the global budget by the worker count.
             prime_rows = max(1 << 16, _PRIME_ROWS // jobs)
-            with ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context('spawn')) as ex:
+            with spawn_pool(jobs) as ex:
                 futs = {
                     u: ex.submit(
                         _finalize_depth_worker, parts_dir, by_unit[u], batch_rows,
@@ -1530,9 +1529,8 @@ def aggregate_stream(
         return _finalize_and_clean(parts_dir, manifest, out_parquet, jobs=jobs, memory_limit=memory_limit, temp_dir=temp_dir)
     ex = None
     if jobs > 1:
-        import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor
-        ex = ProcessPoolExecutor(max_workers=jobs, mp_context=mp.get_context('spawn'))
+        from disk_tree.spawned import spawn_pool
+        ex = spawn_pool(jobs)
 
     try:
         required = frozenset({'bucket', 'name', 'size_bytes', *pivot_sums})
