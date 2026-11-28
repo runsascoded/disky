@@ -33,6 +33,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import static_drill as sd
+from .spawned import exit_hard
 from .static_names import CODEC, err, q
 
 #: `roots-measure/`'s per-kind subdirectories (`static_local.finish_drill`).
@@ -188,6 +189,7 @@ _BC: tuple | None = None
 
 def _bc_init(root: str, name: str, kind: str) -> None:
     global _BC
+    exit_hard()
     tier = sd.Tier(root, name)
     if (gf := tier.group_file(kind, "roots")) is not None:
         gf.cap_groups = WORKER_GROUPS

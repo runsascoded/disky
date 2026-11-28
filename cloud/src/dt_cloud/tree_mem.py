@@ -48,6 +48,8 @@ from time import monotonic
 
 import pyarrow as pa
 
+from .spawned import exit_hard
+
 MIB = 1 << 20
 #: The least DuckDB limit a phase runs under: its sorts and folds spill beyond it, but each needs some memory of its own.
 DUCK_MIN = 128 * MIB
@@ -149,7 +151,8 @@ def arrow_returns_freed() -> None:
 
 def worker_init() -> None:
     """A spawned cut worker's initializer: one Arrow thread (the cores are split between the workers), freed memory
-    returned (`arrow_returns_freed`)."""
+    returned (`arrow_returns_freed`), and its exit past pyarrow's teardown (`spawned.exit_hard`)."""
+    exit_hard()
     pa.set_cpu_count(1)
     arrow_returns_freed()
 
