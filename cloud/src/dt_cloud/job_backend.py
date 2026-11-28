@@ -5,6 +5,11 @@ is. `Local` runs the same spec's container runnables on this host under a system
 time per tenant (the spec's `deployment` label), with its state on disk so `status` / `logs` / `cancel` work from any
 process and after a restart. The deployment names its backend (`$DISKY_JOB_BACKEND`, `resolve`); unset, it is Batch.
 
+A local job runs as its spec's service account, as on Batch, never as the host: per container run, the supervisor
+mints a short-lived access token for that account (IAM Credentials `generateAccessToken`, under the host's credentials,
+which hold `iam.serviceAccountTokenCreator` on it) and reads the spec's `secretVariables` with that token. Both reach
+the container only through the engine's environment (`-e NAME`, no value in argv); nothing of either is written.
+
 States are Batch's (`QUEUED`, `SCHEDULED`, `RUNNING`, `SUCCEEDED`, `FAILED`, + `CANCELLED`), so a poller written
 against Batch reads either.
 """
@@ -20,6 +25,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Protocol, Sequence
+
+#: The variable a local job's access token is handed over in: the job's own code (`dt_cloud.job_identity`) and the host's
+#: registry credential helper (`deploy/vm-pilot/docker-credential-disky`) read it.
+TOKEN_ENV = "GOOGLE_OAUTH_ACCESS_TOKEN"
+#: An access token's lifetime: IAM Credentials' default maximum (up to 12 h only where the org policy
+#: `iam.allowServiceAccountCredentialLifetimeExtension` lists the account). `$DISKY_LOCAL_TOKEN_LIFETIME_S` at submit.
+TOKEN_LIFETIME_S = 3600
+SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 QUEUED, SCHEDULED, RUNNING, SUCCEEDED, FAILED, CANCELLED = "QUEUED", "SCHEDULED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"
 #: The states a job doesn't leave (Batch's `DELETION_IN_PROGRESS`: a deleted job, which is how a Batch job is cancelled).
@@ -116,10 +129,12 @@ class NoSuchJob(LookupError):
 
 @dataclass(frozen=True)
 class Run:
-    """One container run of a local job: task `task`'s runnable, as `argv`, its container named `name`."""
+    """One container run of a local job: task `task`'s runnable, as `argv`, its container named `name`; `secrets` maps
+    each secret variable to its Secret Manager version (a name, never a value; resolved by the supervisor)."""
     task: int
     name: str
     argv: list[str]
+    secrets: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -129,6 +144,7 @@ class Plan:
     runs: list[Run]
     dirs: list[Path]
     task_timeout_s: float | None
+    service_account: str = ""
 
 
 def _duration_s(v: str | None) -> float | None:
@@ -136,13 +152,33 @@ def _duration_s(v: str | None) -> float | None:
     return float(v.removesuffix("s")) if v else None
 
 
-def _refuse_env(env: Mapping, where: str, job_id: str) -> dict[str, str]:
-    """An `environment` block's plain variables; secret ones refused (the local backend resolves no secrets yet)."""
-    for k in ("secretVariables", "encryptedVariables"):
-        if env.get(k):
-            raise Unsupported(f"local job {job_id}: {where}.environment.{k} ({', '.join(sorted(env[k]))}): the local "
-                              "backend doesn't resolve secrets yet; run this job on Batch")
-    return dict(env.get("variables") or {})
+def _env(env: Mapping, where: str, job_id: str) -> tuple[dict[str, str], dict[str, str]]:
+    """An `environment` block's plain variables and its secret ones (`{VAR: projects/…/secrets/…/versions/…}`);
+    KMS-encrypted ones refused."""
+    if env.get("encryptedVariables"):
+        raise Unsupported(f"local job {job_id}: {where}.environment.encryptedVariables "
+                          f"({', '.join(sorted(env['encryptedVariables']))}): not supported locally; use secretVariables")
+    secrets = dict(env.get("secretVariables") or {})
+    if bad := sorted(k for k, ref in secrets.items() if not str(ref).startswith("projects/")):
+        raise Unsupported(f"local job {job_id}: {where}.environment.secretVariables ({', '.join(bad)}): not a "
+                          "projects/…/secrets/…/versions/… name")
+    return dict(env.get("variables") or {}), secrets
+
+
+def service_account(spec: Mapping, job_id: str) -> str:
+    """The spec's `allocationPolicy.serviceAccount.email`: who a local job runs as. Required: without it a job would run
+    as the host, whose account isn't any tenant's."""
+    email = (((spec.get("allocationPolicy") or {}).get("serviceAccount") or {}).get("email") or "").strip()
+    if not email:
+        raise Unsupported(f"local job {job_id}: no allocationPolicy.serviceAccount.email: a local job runs as its spec's "
+                          "service account, never as the host's")
+    return email
+
+
+def _sa_project(email: str) -> str | None:
+    """`job@<project>.iam.gserviceaccount.com`'s project; None for another form."""
+    host = email.partition("@")[2]
+    return host.removesuffix(".iam.gserviceaccount.com") if host.endswith(".iam.gserviceaccount.com") else None
 
 
 def container_runs(spec: Mapping, job_id: str, *, engine: str, slice_: str, disks: Path) -> Plan:
@@ -152,21 +188,25 @@ def container_runs(spec: Mapping, job_id: str, *, engine: str, slice_: str, disk
       slice), each runnable a `--rm` container named `disky-<job>-<task>-<runnable>`, with `$BATCH_TASK_INDEX` /
       `$BATCH_TASK_COUNT` as Batch sets them.
     - `imageUri`, `entrypoint` (`--entrypoint`), `commands` (after the image), the task's and the runnable's
-      `environment.variables` (`-e`, sorted; the runnable's win).
+      `environment.variables` (`-e K=V`, sorted; the runnable's win); its `secretVariables` and the access token
+      (`$GOOGLE_OAUTH_ACCESS_TOKEN`) as `-e K` alone, the engine taking each value from its own environment (the
+      supervisor's, `Local._runs`); `$GOOGLE_CLOUD_PROJECT` the service account's project unless the spec sets it.
+    - The service account (`allocationPolicy.serviceAccount.email`) is who the job runs as: required.
     - A task volume on a disk (`deviceName`: a local SSD, a new disk) is a host dir, `disks/<deviceName>`; a container
       volume `HOST:CTR[:mode]` whose `HOST` is under a task volume's `mountPath` is mounted from that dir.
-    - Refused (`Unsupported`): a gcsfuse (`gcs`) or NFS volume, a container volume outside every task volume, secret
-      variables, a runnable that isn't a container (a script, a barrier), `background` / `ignoreExitStatus` /
-      `alwaysRun`, a container's registry credentials or raw `options`, more than one task group.
-    - Not applied: `computeResource` and `allocationPolicy` (the slice is the budget), `maxRetryCount` (no spot here),
-      the service account (a job runs as this host's credentials), `logsPolicy` (output goes to the job's `log`)."""
+    - Refused (`Unsupported`): no service account, a gcsfuse (`gcs`) or NFS volume, a container volume outside every task
+      volume, KMS-encrypted variables, a runnable that isn't a container (a script, a barrier), `background` /
+      `ignoreExitStatus` / `alwaysRun`, a container's registry credentials or raw `options`, more than one task group.
+    - Not applied: `computeResource` and the rest of `allocationPolicy` (the slice is the budget), `maxRetryCount` (no
+      spot here), `logsPolicy` (output goes to the job's `log`)."""
+    sa = service_account(spec, job_id)
     groups = spec.get("taskGroups") or []
     if len(groups) != 1:
         raise Unsupported(f"local job {job_id}: one task group, not {len(groups)}")
     group = groups[0]
     task = group.get("taskSpec") or {}
     count = int(group.get("taskCount", 1))
-    task_env = _refuse_env(task.get("environment") or {}, "taskSpec", job_id)
+    task_env, task_secrets = _env(task.get("environment") or {}, "taskSpec", job_id)
     mounts: dict[str, Path] = {}
     for v in task.get("volumes") or []:
         if v.get("gcs"):
@@ -194,20 +234,24 @@ def container_runs(spec: Mapping, job_id: str, *, engine: str, slice_: str, disk
                 raise Unsupported(f"local job {job_id}: runnable {r}: {', '.join(bad)} not supported locally")
             if bad := [k for k in ("username", "password", "options") if c.get(k)]:
                 raise Unsupported(f"local job {job_id}: runnable {r}: container {', '.join(bad)} not supported locally")
-            env = {**task_env, **_refuse_env(runnable.get("environment") or {}, f"runnables[{r}]", job_id),
-                   "BATCH_TASK_INDEX": str(t), "BATCH_TASK_COUNT": str(count)}
+            run_env, run_secrets = _env(runnable.get("environment") or {}, f"runnables[{r}]", job_id)
+            secrets = {**task_secrets, **run_secrets}
+            env = {k: v for k, v in {**task_env, **run_env}.items() if k not in secrets}
+            if (project := _sa_project(sa)) and "GOOGLE_CLOUD_PROJECT" not in env:
+                env["GOOGLE_CLOUD_PROJECT"] = project
+            env.update(BATCH_TASK_INDEX=str(t), BATCH_TASK_COUNT=str(count))
             name = f"disky-{job_id}-{t}-{r}"
             argv = [engine, "run", "--rm", "--name", name, f"--cgroup-parent={slice_}"]
-            for k in sorted(env):
-                argv += ["-e", f"{k}={env[k]}"]
+            for k in sorted({*env, *secrets, TOKEN_ENV}):
+                argv += ["-e", f"{k}={env[k]}" if k in env else k]
             for vol in c.get("volumes") or []:
                 src, _, rest = vol.partition(":")
                 argv += ["-v", f"{host_path(src)}:{rest}"]
             if c.get("entrypoint"):
                 argv += ["--entrypoint", c["entrypoint"]]
             argv += [c["imageUri"], *(c.get("commands") or [])]
-            runs.append(Run(t, name, argv))
-    return Plan(runs, sorted(set(mounts.values())), _duration_s(task.get("maxRunDuration")))
+            runs.append(Run(t, name, argv, secrets))
+    return Plan(runs, sorted(set(mounts.values())), _duration_s(task.get("maxRunDuration")), sa)
 
 
 class Host(Protocol):
@@ -217,8 +261,9 @@ class Host(Protocol):
         """Start `argv` detached (it outlives the caller), its output to `log`."""
         ...
 
-    def run(self, argv: list[str], log: Path, timeout: float | None) -> int | None:
-        """Run `argv` to its end, output appended to `log`; its exit code, or None when `timeout` ran out (it is killed)."""
+    def run(self, argv: list[str], log: Path, timeout: float | None, env: Mapping[str, str] | None = None) -> int | None:
+        """Run `argv` to its end, output appended to `log`, `env` added to its environment (only); its exit code, or
+        None when `timeout` ran out (it is killed)."""
         ...
 
     def alive(self, pid: int) -> bool: ...
@@ -233,9 +278,10 @@ class LocalHost:
         with open(log, "ab") as out:
             subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
 
-    def run(self, argv: list[str], log: Path, timeout: float | None) -> int | None:
+    def run(self, argv: list[str], log: Path, timeout: float | None, env: Mapping[str, str] | None = None) -> int | None:
         with open(log, "ab") as out:
-            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                 env={**os.environ, **env} if env else None)
             try:
                 return p.wait(timeout)
             except subprocess.TimeoutExpired:
@@ -255,6 +301,45 @@ class LocalHost:
     def boot_id(self) -> str:
         p = Path("/proc/sys/kernel/random/boot_id")
         return p.read_text().strip() if p.exists() else ""
+
+
+class Identity(Protocol):
+    """Who a local job runs as (a fake in tests)."""
+
+    def access_token(self, service_account: str, lifetime_s: int) -> str:
+        """A short-lived access token for `service_account`, minted under the host's own credentials."""
+        ...
+
+    def secret(self, ref: str, token: str) -> str:
+        """Secret Manager version `ref`'s payload, read with `token` (the job's identity, not the host's)."""
+        ...
+
+
+class GcpIdentity:
+    """IAM Credentials' `generateAccessToken` under this host's credentials (on the VM pilot's box, its account, holding
+    `iam.serviceAccountTokenCreator` on each tenant's job account and nothing of theirs), and Secret Manager's REST
+    `:access` with the minted token. Payloads as Batch injects them (verbatim)."""
+
+    def access_token(self, service_account: str, lifetime_s: int) -> str:
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession
+
+        creds, _ = google.auth.default(scopes=[SCOPE])
+        r = AuthorizedSession(creds).post(
+            f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{service_account}:generateAccessToken",
+            json={"scope": [SCOPE], "lifetime": f"{lifetime_s}s"}, timeout=60)
+        r.raise_for_status()
+        return r.json()["accessToken"]
+
+    def secret(self, ref: str, token: str) -> str:
+        from base64 import b64decode
+
+        import requests
+
+        r = requests.get(f"https://secretmanager.googleapis.com/v1/{ref}:access",
+                         headers={"Authorization": f"Bearer {token}"}, timeout=60)
+        r.raise_for_status()
+        return b64decode(r.json()["payload"]["data"]).decode()
 
 
 #: How long a submitted job's supervisor has to start and say so before the job counts as lost.
@@ -287,11 +372,15 @@ class Local:
     A submit writes those and spawns the job's supervisor (`python -m dt_cloud.job_backend supervise ROOT ID`), which
     waits its turn (the tenant's oldest queued job, none of the tenant's running: one at a time per `deployment`),
     runs the job's containers in order, and records the end. A job whose supervisor is gone (a reboot, a kill) while
-    queued or running is `FAILED`, "supervisor lost", the next time anyone asks."""
+    queued or running is `FAILED`, "supervisor lost", the next time anyone asks.
+
+    Each container run gets a fresh access token for the spec's service account and that run's secret values
+    (`identity`), in the engine's environment only: `job.json` holds the secrets' names, never a value or a token."""
     what = "local job"
 
     def __init__(self, root: Path | str, *, work: Path | str | None = None, engine: str = "docker",
                  slice_: str = "scan.slice", spawn: str = "systemd-run", host: Host | None = None,
+                 identity: Identity | None = None, token_lifetime_s: int = TOKEN_LIFETIME_S,
                  sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.time,
                  poll_s: float = POLL_S):
         if spawn not in SPAWNS:
@@ -299,19 +388,22 @@ class Local:
         self.root, self.work = Path(root), Path(work) if work else None
         self.engine, self.slice, self.spawn = engine, slice_, spawn
         self.host: Host = host or LocalHost()
+        self.identity: Identity = identity or GcpIdentity()
+        self.token_lifetime_s = token_lifetime_s
         self.sleep, self.clock, self.poll_s = sleep, clock, poll_s
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Local":
         """`$DISKY_LOCAL_JOBS` (the state root, required), `$DISKY_LOCAL_WORK` (the disks' host dirs; default under each
         job's dir), `$DISKY_LOCAL_ENGINE` (`docker`), `$DISKY_LOCAL_SLICE` (`scan.slice`), `$DISKY_LOCAL_SPAWN`
-        (`systemd-run`)."""
+        (`systemd-run`), `$DISKY_LOCAL_TOKEN_LIFETIME_S` (3600)."""
         e = os.environ if environ is None else environ
         root = (e.get("DISKY_LOCAL_JOBS") or "").strip()
         if not root:
             raise SystemExit("DISKY_LOCAL_JOBS is unset: export the dir the local job backend keeps its jobs' state in")
         return cls(root, work=e.get("DISKY_LOCAL_WORK") or None, engine=e.get("DISKY_LOCAL_ENGINE") or "docker",
-                   slice_=e.get("DISKY_LOCAL_SLICE") or "scan.slice", spawn=e.get("DISKY_LOCAL_SPAWN") or "systemd-run")
+                   slice_=e.get("DISKY_LOCAL_SLICE") or "scan.slice", spawn=e.get("DISKY_LOCAL_SPAWN") or "systemd-run",
+                   token_lifetime_s=int(e.get("DISKY_LOCAL_TOKEN_LIFETIME_S") or TOKEN_LIFETIME_S))
 
     # ── paths and state ──
 
@@ -383,8 +475,9 @@ class Local:
         # last: a job is listed (`_job`, `_tenant_jobs`) only once its state is whole
         _write_json(d / "job.json", {
             "tenant": spec["labels"]["deployment"], "seq": time.time_ns(), "engine": self.engine,
-            "runs": [{"task": r.task, "name": r.name, "argv": r.argv} for r in plan.runs],
+            "runs": [{"task": r.task, "name": r.name, "argv": r.argv, "secrets": dict(r.secrets)} for r in plan.runs],
             "dirs": [str(p) for p in plan.dirs], "task_timeout_s": plan.task_timeout_s,
+            "service_account": plan.service_account, "token_lifetime_s": self.token_lifetime_s,
         })
         self.host.spawn(self.supervisor_argv(job_id), d / "supervisor.log")
         return job_id
@@ -481,7 +574,8 @@ class Local:
             if run["task"] != task:
                 task, deadline = run["task"], None if limit is None else self.clock() + limit
             (d / "current").write_text(run["name"])
-            rc = self.host.run(run["argv"], d / "log", None if deadline is None else max(0.0, deadline - self.clock()))
+            rc = self.host.run(run["argv"], d / "log", None if deadline is None else max(0.0, deadline - self.clock()),
+                               env=self._identity_env(job, run))
             if rc is None:
                 self.host.run([job["engine"], "stop", "-t", "30", run["name"]], d / "control.log", STOP_TIMEOUT_S)
                 return FAILED, f"task {task}: maxRunDuration {limit:g}s exceeded"
@@ -489,6 +583,12 @@ class Local:
             if rc != 0:
                 return FAILED, f"task {task}: {run['name']} exited {rc}"
         return SUCCEEDED, "exit 0"
+
+    def _identity_env(self, job: Mapping, run: Mapping) -> dict[str, str]:
+        """A run's environment additions: a fresh access token for the job's service account, and each of its secret
+        variables read with that token (never with the host's credentials)."""
+        token = self.identity.access_token(job["service_account"], int(job.get("token_lifetime_s") or TOKEN_LIFETIME_S))
+        return {TOKEN_ENV: token, **{k: self.identity.secret(ref, token) for k, ref in (run.get("secrets") or {}).items()}}
 
 
 # ── Selection ──────────────────────────────────────────────────────────────
