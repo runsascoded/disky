@@ -35,8 +35,6 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterator, Sequence
 
-from disk_tree.spawned import spawn_pool
-
 if TYPE_CHECKING:
     import pandas as pd
     import pyarrow as pa
@@ -499,6 +497,8 @@ def merge_path_index(
     if n_procs == 1:
         done = {v: merge_sort(*a) for v, a in jobs.items()}
     else:
+        from disk_tree.spawned import spawn_pool
+
         with spawn_pool(n_procs) as ex:
             futs = {v: ex.submit(merge_sort, *a) for v, a in jobs.items()}
             done = {v: f.result() for v, f in futs.items()}

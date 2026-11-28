@@ -920,7 +920,7 @@ def test_jobs_gt_1_from_unimportable_main_explains_itself(tmp_path: Path, monkey
         def shutdown(self, *a, **kw):
             pass
 
-    monkeypatch.setattr('concurrent.futures.ProcessPoolExecutor', DeadPool)
+    monkeypatch.setattr('disk_tree.spawned.spawn_pool', DeadPool)
     with pytest.raises(RuntimeError) as exc:
         mod.aggregate_stream(
             (listing,), bucket='b1', scheme='gcs',

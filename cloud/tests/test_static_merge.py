@@ -471,7 +471,7 @@ def test_a_tier_killed_in_the_pool_reruns_alone(chain, tmp_path, monkeypatch):
         calls.append((args[0], False))
         return real(*args)
 
-    monkeypatch.setattr(cf, "ProcessPoolExecutor", Pool)
+    monkeypatch.setattr("disk_tree.spawned.spawn_pool", Pool)
     monkeypatch.setattr(sm, "merge_tier", alone)
     logs: list[str] = []
     rec = Rec()

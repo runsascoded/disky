@@ -45,7 +45,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from click import IntRange, argument, command, option
-from disk_tree.spawned import spawn_pool
 
 from .image_sha import expect_sha_options
 from .static_names import OPEN
@@ -513,6 +512,8 @@ def layout_sim_cmd(bands, cache, cost, files, run_gap, procs, level, out, pages,
     if procs == 1:
         got = [sim.simulate(q) for q in uniq]
     else:
+        from disk_tree.spawned import spawn_pool
+
         with spawn_pool(procs, _init, (sim,)) as ex:
             got = list(ex.map(_simulate, uniq, chunksize=4))
     err(f"simulated {len(uniq)} in {time.monotonic() - t0:.0f}s")
