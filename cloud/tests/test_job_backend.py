@@ -2,6 +2,7 @@
 against a fake host (no container engine in CI); `GcpBatch` against stubs of the seams it wraps."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -13,13 +14,15 @@ from dt_cloud import job_backend as jb
 from dt_cloud.job_backend import CANCELLED, FAILED, QUEUED, RUNNING, SUCCEEDED, JobStatus, Plan, Run
 
 LABELS = {"app": "disky", "deployment": "t1", "component": "c"}
+SA = "job@p.iam.gserviceaccount.com"
 
 
 def spec(deployment: str = "t1", count: int = 1, **task) -> dict:
     labels = {**LABELS, "deployment": deployment}
     return {
         "labels": labels,
-        "allocationPolicy": {"labels": labels, "instances": [{"policy": {"machineType": "n2-highmem-8"}}]},
+        "allocationPolicy": {"labels": labels, "instances": [{"policy": {"machineType": "n2-highmem-8"}}],
+                             "serviceAccount": {"email": SA}},
         "taskGroups": [{"taskCount": count, "taskSpec": {
             "runnables": [{"container": {"imageUri": "img", "entrypoint": "bash", "commands": ["-c", "true"]}}],
             **task,
@@ -35,6 +38,25 @@ class Clock:
         return self.t
 
 
+class FakeIdentity:
+    """Mints `tok-<n>` per request (recording the account and lifetime) and answers `secrets[ref]` only to a token it
+    minted (recording which)."""
+
+    def __init__(self, secrets: dict[str, str] | None = None):
+        self.secrets = secrets or {}
+        self.minted: list[tuple[str, int]] = []
+        self.read: list[tuple[str, str]] = []
+
+    def access_token(self, service_account: str, lifetime_s: int) -> str:
+        self.minted.append((service_account, lifetime_s))
+        return f"tok-{len(self.minted)}"
+
+    def secret(self, ref: str, token: str) -> str:
+        assert token.startswith("tok-")
+        self.read.append((ref, token))
+        return self.secrets[ref]
+
+
 class FakeHost:
     """Records what `Local` asks of the host. Each container run takes the next of `rcs` (default 0; None: timed out)
     and calls `during(argv)` first; `stop` runs answer 0."""
@@ -43,6 +65,7 @@ class FakeHost:
         self.rcs = list(rcs or [])
         self.spawned: list[list[str]] = []
         self.ran: list[tuple[list[str], float | None]] = []
+        self.envs: list[dict[str, str] | None] = []
         self.during = lambda argv: None
         self.on_spawn = lambda argv: None
         self.dead: set[int] = set()
@@ -52,8 +75,9 @@ class FakeHost:
         self.spawned.append(argv)
         self.on_spawn(argv)
 
-    def run(self, argv: list[str], log: Path, timeout: float | None) -> int | None:
+    def run(self, argv: list[str], log: Path, timeout: float | None, env: dict[str, str] | None = None) -> int | None:
         self.ran.append((argv, timeout))
+        self.envs.append(env)
         if argv[1] == "stop":
             return 0
         self.during(argv)
@@ -69,9 +93,9 @@ class FakeHost:
         return self.boot
 
 
-def local(tmp_path: Path, host: FakeHost, clock: Clock | None = None, **kw) -> jb.Local:
+def local(tmp_path: Path, host: FakeHost, clock: Clock | None = None, identity: FakeIdentity | None = None, **kw) -> jb.Local:
     return jb.Local(tmp_path / "jobs", work=tmp_path / "work", host=host, clock=clock or Clock(), sleep=lambda s: None,
-                    spawn="direct", **kw)
+                    spawn="direct", identity=identity or FakeIdentity(), **kw)
 
 
 # ── the spec → command translation ─────────────────────────────────────────
@@ -97,6 +121,7 @@ def test_container_runs_translates_a_batch_spec_to_engine_runs():
         return Run(t, f"disky-j1-{t}-0", [
             "podman", "run", "--rm", "--name", f"disky-j1-{t}-0", "--cgroup-parent=scan.slice",
             "-e", "A=1", "-e", "B=runnable", "-e", "BATCH_TASK_COUNT=2", "-e", f"BATCH_TASK_INDEX={t}",
+            "-e", "GOOGLE_CLOUD_PROJECT=p", "-e", "GOOGLE_OAUTH_ACCESS_TOKEN",
             "-v", "/w/j1/stage:/stage:rw", "-v", "/w/j1/stage/sub:/sub",
             "--entrypoint", "bash", "img@sha256:ab", "-c", "run it",
         ])
@@ -104,10 +129,11 @@ def test_container_runs_translates_a_batch_spec_to_engine_runs():
     def second(t: int) -> Run:
         return Run(t, f"disky-j1-{t}-1", [
             "podman", "run", "--rm", "--name", f"disky-j1-{t}-1", "--cgroup-parent=scan.slice",
-            "-e", "A=1", "-e", "B=task", "-e", "BATCH_TASK_COUNT=2", "-e", f"BATCH_TASK_INDEX={t}", "img2", "x",
+            "-e", "A=1", "-e", "B=task", "-e", "BATCH_TASK_COUNT=2", "-e", f"BATCH_TASK_INDEX={t}",
+            "-e", "GOOGLE_CLOUD_PROJECT=p", "-e", "GOOGLE_OAUTH_ACCESS_TOKEN", "img2", "x",
         ])
 
-    assert plan == Plan([first(0), second(0), first(1), second(1)], [Path("/w/j1/stage")], 60.0)
+    assert plan == Plan([first(0), second(0), first(1), second(1)], [Path("/w/j1/stage")], 60.0, SA)
 
 
 GCS_VOLUME = {"gcs": {"remotePath": "b"}, "mountPath": "/mnt/disks/gcs/b", "mountOptions": ["--implicit-dirs"]}
@@ -118,12 +144,13 @@ STAGE = {"deviceName": "stage", "mountPath": "/mnt/disks/stage"}
     (spec(volumes=[GCS_VOLUME, STAGE]),
      "local job j1: gcsfuse volume 'b' at /mnt/disks/gcs/b: the local backend mounts no buckets yet; read it through the "
      "API, or run this job on Batch"),
-    (spec(environment={"variables": {"A": "1"}, "secretVariables": {"R2_KEY": "projects/p/secrets/k/versions/latest"}}),
-     "local job j1: taskSpec.environment.secretVariables (R2_KEY): the local backend doesn't resolve secrets yet; run this "
-     "job on Batch"),
+    ({**spec(), "allocationPolicy": {"labels": LABELS}},
+     "local job j1: no allocationPolicy.serviceAccount.email: a local job runs as its spec's service account, never as "
+     "the host's"),
+    (spec(environment={"secretVariables": {"R2_KEY": "k"}}),
+     "local job j1: taskSpec.environment.secretVariables (R2_KEY): not a projects/…/secrets/…/versions/… name"),
     (spec(runnables=[{"container": {"imageUri": "i"}, "environment": {"encryptedVariables": {"X": "e"}}}]),
-     "local job j1: runnables[0].environment.encryptedVariables (X): the local backend doesn't resolve secrets yet; run "
-     "this job on Batch"),
+     "local job j1: runnables[0].environment.encryptedVariables (X): not supported locally; use secretVariables"),
     (spec(volumes=[STAGE], runnables=[{"container": {"imageUri": "i", "volumes": ["/var/run/x:/x"]}}]),
      "local job j1: container volume host path /var/run/x: not under a task volume (/mnt/disks/stage)"),
     (spec(runnables=[{"script": {"text": "echo"}}]), "local job j1: runnable 0 isn't a container (script)"),
@@ -175,6 +202,55 @@ def test_supervise_runs_each_task_and_records_the_end(tmp_path, rcs, final):
     assert jobs.logs("j1", limit=1) == [f"{ran[-1]} out"]
 
 
+R2_KEY = "projects/p/secrets/r2-key/versions/latest"
+SLACK = "projects/p/secrets/slack/versions/3"
+
+
+def test_a_job_runs_as_its_service_account_and_its_secrets_resolve_through_it(tmp_path):
+    """Each run: a fresh token minted for the spec's account, its secret variables read with that token; both reach the
+    engine's environment only (`-e NAME` in argv), and no file under the jobs or work dirs holds either."""
+    identity = FakeIdentity({R2_KEY: "r2-secret-value", SLACK: "slack-secret-value"})
+    host = FakeHost()
+    jobs = local(tmp_path, host, identity=identity, token_lifetime_s=1800)
+    task = {"environment": {"variables": {"A": "1"}, "secretVariables": {"R2_KEY": R2_KEY}},
+            "runnables": [{"container": {"imageUri": "img", "commands": ["x"]},
+                           "environment": {"secretVariables": {"SLACK": SLACK}}}],
+            "volumes": [STAGE]}
+    jobs.submit(spec(count=2, **task), "j1")
+    assert jobs.supervise("j1") == JobStatus(SUCCEEDED, "exit 0")
+    assert identity.minted == [(SA, 1800), (SA, 1800)]
+    assert identity.read == [(R2_KEY, "tok-1"), (SLACK, "tok-1"), (R2_KEY, "tok-2"), (SLACK, "tok-2")]
+    assert host.envs == [
+        {"GOOGLE_OAUTH_ACCESS_TOKEN": f"tok-{n}", "R2_KEY": "r2-secret-value", "SLACK": "slack-secret-value"} for n in (1, 2)]
+    assert [argv for argv, _ in host.ran][0] == [
+        "docker", "run", "--rm", "--name", "disky-j1-0-0", "--cgroup-parent=scan.slice",
+        "-e", "A=1", "-e", "BATCH_TASK_COUNT=2", "-e", "BATCH_TASK_INDEX=0", "-e", "GOOGLE_CLOUD_PROJECT=p",
+        "-e", "GOOGLE_OAUTH_ACCESS_TOKEN", "-e", "R2_KEY", "-e", "SLACK", "img", "x"]
+    files = sorted(f for f in tmp_path.rglob("*") if f.is_file())
+    assert [str(f.relative_to(tmp_path / "jobs")) for f in files] == [
+        ".locks/t1.lock", "j1/current", "j1/exit", "j1/job.json", "j1/log", "j1/spec.json", "j1/status.json", "j1/supervisor.json"]
+    # A secondary check over every byte written: neither a token nor a secret value.
+    assert [(str(f), v) for f in files for v in ("tok-1", "tok-2", "r2-secret-value", "slack-secret-value")
+            if v.encode() in f.read_bytes()] == []
+    job = json.loads((tmp_path / "jobs/j1/job.json").read_text())
+    assert (job["service_account"], job["token_lifetime_s"], [r["secrets"] for r in job["runs"]]) == (
+        SA, 1800, [{"R2_KEY": R2_KEY, "SLACK": SLACK}] * 2)
+
+
+def test_a_token_that_cannot_be_minted_fails_the_job_before_its_container(tmp_path):
+    class Refused(FakeIdentity):
+        def access_token(self, service_account: str, lifetime_s: int) -> str:
+            raise PermissionError(f"403 on {service_account}")
+
+    host = FakeHost()
+    jobs = local(tmp_path, host, identity=Refused())
+    jobs.submit(spec(), "j1")
+    with pytest.raises(PermissionError):
+        jobs.supervise("j1")
+    assert (jobs.status("j1"), host.ran) == (
+        JobStatus(FAILED, "supervisor failed: PermissionError: 403 on job@p.iam.gserviceaccount.com"), [])
+
+
 def test_one_job_at_a_time_per_deployment(tmp_path):
     """A tenant's second job waits (QUEUED) while its first runs, and starts in submit order; another tenant's runs
     beside it."""
@@ -220,7 +296,8 @@ def test_cancel_a_running_job_stops_its_container_and_runs_nothing_more(tmp_path
     assert jobs.supervise("j1") == JobStatus(CANCELLED, "cancelled: task 0: disky-j1-0-0 exited 137")
     assert [argv for argv, _ in host.ran] == [
         ["docker", "run", "--rm", "--name", "disky-j1-0-0", "--cgroup-parent=scan.slice",
-         "-e", "BATCH_TASK_COUNT=2", "-e", "BATCH_TASK_INDEX=0", "--entrypoint", "bash", "img", "-c", "true"],
+         "-e", "BATCH_TASK_COUNT=2", "-e", "BATCH_TASK_INDEX=0", "-e", "GOOGLE_CLOUD_PROJECT=p",
+         "-e", "GOOGLE_OAUTH_ACCESS_TOKEN", "--entrypoint", "bash", "img", "-c", "true"],
         ["docker", "stop", "-t", "30", "disky-j1-0-0"],
     ]
     jobs.cancel("j1")  # ended: left as it is
