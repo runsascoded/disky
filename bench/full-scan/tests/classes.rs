@@ -214,8 +214,10 @@ fn vmd_maps_classes_through_the_pack() {
     let d = scratch("vmd");
     let hf = generation(&d.join("hf"), &["private_bytes", "git_bytes"]);
     let none = generation(&d.join("none"), &[]);
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site/functions/_lib/fixtures/iv/interval-store/g1");
-    let packs: Vec<(&str, PathBuf, Option<ClassCols>)> = vec![("hf", hf, Some(hf_classes())), ("none", none, None), ("g1", fixture, None)];
+    // gcs's class columns (`c2`..`c4`), which the loader names by itself; not the site's fixture, whose class columns
+    // are the checkout's deployment's.
+    let gcs = generation(&d.join("gcs"), &["c2", "c3", "c4"]);
+    let packs: Vec<(&str, PathBuf, Option<ClassCols>)> = vec![("hf", hf, Some(hf_classes())), ("none", none, None), ("g1", gcs, None)];
     let mut tenants = Vec::new();
     for (name, gen, named) in &packs {
         let out = d.join(format!("{name}.fsb"));
