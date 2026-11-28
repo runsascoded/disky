@@ -349,7 +349,11 @@ pub fn write_index(idx: &Index, path: &Path) -> Result<u64> {
     add_dict(&mut w, "dict_", &idx.dict);
     let cx = ComplexCols::of(&idx.complex);
     cx.add(&mut w);
-    w.write(path, "full", json!({"scans": idx.scans, "owners": idx.owners, "stats": idx.stats}))
+    let mut meta = json!({"scans": idx.scans, "owners": idx.owners, "stats": idx.stats});
+    if let Some(c) = crate::classes::to_meta(&idx.classes) {
+        meta["classes"] = c;
+    }
+    w.write(path, "full", meta)
 }
 
 /// The full index over a mapped pack (nothing read until a query touches it).
@@ -359,6 +363,7 @@ pub fn read_index(p: &Pack) -> Result<Index> {
     }
     Ok(Index {
         scans: serde_json::from_value(p.meta["scans"].clone())?,
+        classes: crate::classes::from_meta(p.meta.get("classes"))?,
         owners: serde_json::from_value(p.meta["owners"].clone())?,
         stats: serde_json::from_value::<LoadStats>(p.meta["stats"].clone())?,
         name: p.col("name")?,

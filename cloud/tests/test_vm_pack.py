@@ -61,6 +61,31 @@ def test_build_mirrors_the_newest_manifest_and_publishes(tmp_path, fsb):
     assert V.build(str(root), tmp_path / "w", fsb) == {**doc, "skipped": True}
 
 
+@pytest.mark.parametrize("cols, arg", [
+    ({2: "nearline_bytes", 3: "coldline_bytes", 4: "archive_bytes"}, "2=nearline_bytes,3=coldline_bytes,4=archive_bytes"),
+    ({6: "git_bytes", 5: "private_bytes"}, "5=private_bytes,6=git_bytes"),
+    ({2: "c2", 3: "c3", 4: "c4"}, "2=c2,3=c3,4=c4"),
+    ({}, ""),
+], ids=["gcs", "hf", "default", "none"])
+def test_build_names_the_stores_class_columns(tmp_path, monkeypatch, cols, arg):
+    """`fsb pack-slim -C`: the deployment's `interval_store.CLASS_COLS`, by class id (specs/vm-mode.md §6.1)."""
+    from dt_cloud import interval_store as ist
+    monkeypatch.setattr(ist, "CLASS_COLS", cols)
+    p = tmp_path / "fsb"
+    p.write_text("""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+Path(sys.argv[4]).write_text("pack")
+Path(sys.argv[4] + ".argv").write_text(json.dumps(sys.argv[1:]))
+print(json.dumps({"bytes": 1, "scans": 3}))
+""")
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    root = store(tmp_path / "s", {"2026-11-13T1734.json": []})
+    V.build(str(root), tmp_path / "w", str(p))
+    w = tmp_path / "w"
+    assert json.loads((w / "pack.fsb.argv").read_text()) == ["pack-slim", str(w / "gen" / GEN), "-o", str(w / "pack.fsb"), "-C", arg]
+
+
 def test_build_prunes_beyond_keep(tmp_path, fsb):
     root = store(tmp_path / "s", {"2026-11-12T0702.json": []})
     m = root / "interval-store" / GEN / "manifests"

@@ -144,7 +144,7 @@ pub fn compile(ix: &SlimIndex, q: &Query, parts: usize) -> Result<SCompiled> {
         dec,
         owners: q.owners.as_ref().map(|sel| compile_owners(&ix.owners, sel)),
         own_u8: q.owners.as_ref().map(|sel| compile_owners(&ix.owners, sel).iter().map(|&b| b as u8).collect()),
-        classes: q.classes.as_ref().map(|v| compile_classes(v)).transpose()?,
+        classes: q.classes.as_ref().map(|v| compile_classes(&ix.classes, v)).transpose()?,
         staged,
     })
 }

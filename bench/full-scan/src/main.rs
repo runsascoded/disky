@@ -1,11 +1,14 @@
 //! `fsb`: load an interval-store generation into RAM and answer views by one pass (specs/full-scan-serving-bench.md).
 //!
 //! ```text
-//! SRC below is a generation dir (loaded from the store), or a pack file (`fsb pack` / `fsb slim`), mapped.
+//! SRC below is a generation dir (loaded from the store), or a pack file (`fsb pack` / `fsb slim`), mapped. Loading a
+//! store takes `-C K=COLUMN,…`, the store's class columns by class id (`5=private_bytes,6=git_bytes`; empty: none);
+//! without it each class column (those between `wb` and `us`) must be `c<K>` (`classes.rs`).
 //!
-//! fsb load GEN                                         load, print stats and bytes per column (JSON)
-//! fsb pack GEN -o FILE                                 load, write the full index as a pack file
-//! fsb pack-slim GEN -o FILE                            load, write the slim index as a pack file (no full pack)
+//! fsb load GEN [-C …]                                  load, print stats and bytes per column (JSON)
+//! fsb pack GEN -o FILE [-C …]                          load, write the full index as a pack file
+//! fsb pack-slim GEN -o FILE [-C …]                     load, write the slim index as a pack file (no full pack); the
+//!                                                      pack records each class slot's class (`classes`)
 //! fsb shard PACK -n N -o DIR                           a slim pack cut into N physical shard packs
 //! fsb slim SRC -o FILE                                 the slim index (object versions + directory structure) of
 //!                                                      SRC's full index, written as a pack file
@@ -28,6 +31,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use full_scan::classes::{self, ClassCols};
 use full_scan::load::load;
 use full_scan::pack::{self, Pack};
 use full_scan::scan::Timing;
@@ -76,10 +80,11 @@ fn read_queries(p: &str) -> Result<Vec<Query>> {
     Ok(out)
 }
 
-fn load_gen(dir: &str) -> Result<full_scan::index::Index> {
+/// `cs`: the store's class columns (`-C`), else read off its base sort.
+fn load_gen(dir: &str, cs: Option<&[(u8, String)]>) -> Result<full_scan::index::Index> {
     let g = store::open(&PathBuf::from(dir))?;
     eprintln!("load: {} scans, {} files (manifest {:?})", g.scans.len(), g.files.len(), g.manifest);
-    let idx = load(&g)?;
+    let idx = load(&g, cs)?;
     log_full(&idx);
     Ok(idx)
 }
@@ -87,12 +92,13 @@ fn load_gen(dir: &str) -> Result<full_scan::index::Index> {
 fn log_full(idx: &full_scan::index::Index) {
     let cb = idx.column_bytes();
     eprintln!(
-        "index: {} rows ({} file versions, {} dirs), {} names, {} owners, {} resident ({:.1} B/row)",
+        "index: {} rows ({} file versions, {} dirs), {} names, {} owners, classes {:?}, {} resident ({:.1} B/row)",
         commas(idx.stats.rows),
         commas(idx.stats.file_rows),
         commas(idx.stats.dir_rows),
         commas(idx.stats.names),
         idx.stats.owners,
+        idx.classes,
         commas(cb.total),
         cb.per_row,
     );
@@ -121,14 +127,14 @@ impl Engine {
     }
 }
 
-/// SRC: a generation dir (loaded), or a pack file: mapped (`prefault` threads fault it all in first), or with `mem`
-/// threads read into huge-page-backed memory.
-fn open_src(src: &str, prefault: Option<usize>, mem: Option<usize>) -> Result<(Engine, serde_json::Value)> {
+/// SRC: a generation dir (loaded, `cs` its class columns), or a pack file: mapped (`prefault` threads fault it all in
+/// first), or with `mem` threads read into huge-page-backed memory.
+fn open_src(src: &str, cs: Option<&[(u8, String)]>, prefault: Option<usize>, mem: Option<usize>) -> Result<(Engine, serde_json::Value)> {
     let path = PathBuf::from(src);
     let p0 = pack::proc();
     let t0 = Instant::now();
     if path.is_dir() {
-        let idx = load_gen(src)?;
+        let idx = load_gen(src, cs)?;
         let s = t0.elapsed().as_secs_f64();
         return Ok((Engine::Full(idx), json!({"src": "store", "load_s": s, "proc": pack::proc()})));
     }
@@ -171,13 +177,15 @@ fn main() -> Result<()> {
     let a = args();
     let cmd = a.pos.first().map(|s| s.as_str()).unwrap_or("");
     let threads = |d: usize| a.opts.get("t").map(|t| t.parse().unwrap()).unwrap_or(d);
+    let cs: Option<ClassCols> = a.opts.get("C").map(|s| classes::parse(s)).transpose()?;
+    let cs = cs.as_deref();
     match cmd {
         "load" => {
-            let idx = load_gen(&a.pos[1])?;
+            let idx = load_gen(&a.pos[1], cs)?;
             println!("{}", serde_json::to_string_pretty(&json!({"stats": idx.stats, "columns": idx.column_bytes()}))?);
         }
         "pack" => {
-            let idx = load_gen(&a.pos[1])?;
+            let idx = load_gen(&a.pos[1], cs)?;
             let t = Instant::now();
             let n = pack::write_index(&idx, &PathBuf::from(a.opts.get("o").ok_or("-o FILE")?))?;
             println!("{}", json!({"bytes": n, "write_s": t.elapsed().as_secs_f64(), "load": idx.stats, "proc": pack::proc()}));
@@ -190,7 +198,7 @@ fn main() -> Result<()> {
             let g = store::open(&dir)?;
             let gen = dir.canonicalize()?.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let pins = json!({"gen": gen, "manifest": g.manifest.clone().unwrap_or_default()});
-            let idx = load_gen(&a.pos[1])?;
+            let idx = load_gen(&a.pos[1], cs)?;
             let load_s = t0.elapsed().as_secs_f64();
             let t = Instant::now();
             let mut ix = SlimIndex::from_index(&idx)?;
@@ -200,7 +208,7 @@ fn main() -> Result<()> {
             drop(idx);
             let t = Instant::now();
             let n = ix.write(&PathBuf::from(a.opts.get("o").ok_or("-o FILE")?))?;
-            println!("{}", json!({"bytes": n, "load_s": load_s, "build_s": build_s, "write_s": t.elapsed().as_secs_f64(), "load": load, "stats": ix.stats, "scans": ix.scans.len(), "proc": pack::proc()}));
+            println!("{}", json!({"bytes": n, "load_s": load_s, "build_s": build_s, "write_s": t.elapsed().as_secs_f64(), "load": load, "stats": ix.stats, "scans": ix.scans.len(), "classes": ix.classes, "proc": pack::proc()}));
         }
         "shard" => {
             // Physical shards (specs/vm-mode.md §3.1): a slim pack cut into `-n` row ranges, each a slim pack of its own.
@@ -221,7 +229,7 @@ fn main() -> Result<()> {
             }
         }
         "slim" => {
-            let (e, _) = open_src(&a.pos[1], None, None)?;
+            let (e, _) = open_src(&a.pos[1], cs, None, None)?;
             let Engine::Full(idx) = e else { return err("slim: SRC must be a store or a full pack") };
             let t = Instant::now();
             let ix = SlimIndex::from_index(&idx)?;
@@ -232,7 +240,7 @@ fn main() -> Result<()> {
             println!("{}", json!({"bytes": n, "build_s": build_s, "write_s": t.elapsed().as_secs_f64(), "stats": ix.stats, "columns": ix.column_bytes(), "proc": pack::proc()}));
         }
         "plan" => {
-            let (e, _) = open_src(&a.pos[1], None, None)?;
+            let (e, _) = open_src(&a.pos[1], cs, None, None)?;
             let Engine::Full(idx) = e else { return err("plan: needs the full index") };
             let p = pool(threads(num_cpus()))?;
             let (qs, meta) = if a.opts.contains_key("c") {
@@ -249,7 +257,7 @@ fn main() -> Result<()> {
             eprintln!("plan: {} queries; {}", qs.len(), meta);
         }
         "run" => {
-            let (e, _) = open_src(&a.pos[1], None, None)?;
+            let (e, _) = open_src(&a.pos[1], cs, None, None)?;
             let qs = read_queries(&a.pos[2])?;
             let p = pool(threads(num_cpus()))?;
             let mut f = File::create(a.opts.get("o").ok_or("-o ANSWERS")?)?;
@@ -262,7 +270,7 @@ fn main() -> Result<()> {
         "bench" => {
             let prefault = a.opts.get("p").map(|x| x.parse().unwrap());
             let mem = a.opts.get("m").map(|x| x.parse().unwrap());
-            let (e, open) = open_src(&a.pos[1], prefault, mem)?;
+            let (e, open) = open_src(&a.pos[1], cs, prefault, mem)?;
             // No query file yet: plan one from this load (one load per store, not two).
             if !std::path::Path::new(&a.pos[2]).exists() {
                 let Engine::Full(idx) = &e else { return err("bench: planning needs the full index") };

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -20,30 +20,23 @@ use parquet::arrow::ProjectionMask;
 use parquet::file::statistics::Statistics;
 use rayon::prelude::*;
 
+use crate::classes;
 use crate::dict::{cmp_slash, Dict};
 use crate::index::{Complex, Index, LoadStats, CK, CLS_SHIFT, COMPLEX, CONT, FILE};
 use crate::store::{Generation, OPEN};
 use crate::util::{err, h128, ints, IdMap, Result, Shared, Strs};
 
-const COLS: [&str; 11] = ["depth", "path", "vf", "vt", "kind", "size", "c2", "c3", "c4", "us", "n_files"];
-/// Class columns as a deployment names them (gcs: storage classes 2–4 are nearline, coldline, archive).
-fn aliases(c: &str) -> &'static [&'static str] {
-    match c {
-        "c2" => &["nearline_bytes"],
-        "c3" => &["coldline_bytes"],
-        "c4" => &["archive_bytes"],
-        _ => &[],
-    }
-}
+/// The columns read besides the store's class columns (`classes.rs`).
+const COLS: [&str; 8] = ["depth", "path", "vf", "vt", "kind", "size", "us", "n_files"];
 const NO_PARENT: u32 = u32::MAX;
 
 struct Input {
     path: PathBuf,
     meta: ArrowReaderMetadata,
-    /// Projection indices of `COLS` in the file's root columns.
+    /// Projection indices of `COLS` and `cls` in the file's root columns.
     proj: Vec<usize>,
-    /// The file's name for each of `COLS`.
-    names: Vec<String>,
+    /// The file's column for each class column (slots 1.., `classes::columns`).
+    cls: Vec<String>,
     /// `(row group, depth min, depth max)`.
     groups: Vec<(usize, u8, u8)>,
 }
@@ -130,17 +123,27 @@ fn stat_range(s: Option<&Statistics>) -> Option<(u8, u8)> {
     }
 }
 
-fn open_input(path: PathBuf) -> Result<Input> {
+/// A file's columns, in order.
+fn file_columns(path: &Path) -> Result<Vec<String>> {
+    let meta = ArrowReaderMetadata::load(&File::open(path)?, ArrowReaderOptions::new())?;
+    Ok(meta.schema().fields().iter().map(|f| f.name().clone()).collect())
+}
+
+/// A file's class columns (between `wb` and `us`).
+fn class_region(path: &Path, names: &[String]) -> Result<Vec<String>> {
+    classes::region(names).map_err(|e| format!("{}: {e}", path.display()).into())
+}
+
+/// `cs`: the store's class columns (`classes::resolve`).
+fn open_input(path: PathBuf, cs: &[(u8, String)]) -> Result<Input> {
     let f = File::open(&path)?;
     let meta = ArrowReaderMetadata::load(&f, ArrowReaderOptions::new())?;
     let schema = meta.schema().clone();
+    let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+    let cls = classes::columns(cs, &class_region(&path, &names)?).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut proj = Vec::new();
-    let mut names = Vec::new();
-    for c in COLS {
-        let found = std::iter::once(c).chain(aliases(c).iter().copied()).find(|n| schema.index_of(n).is_ok());
-        let n = found.ok_or_else(|| format!("{}: no column `{c}`", path.display()))?;
-        proj.push(schema.index_of(n)?);
-        names.push(n.to_string());
+    for c in COLS.iter().copied().chain(cls.iter().map(|c| c.as_str())) {
+        proj.push(schema.index_of(c).map_err(|_| format!("{}: no column `{c}`", path.display()))?);
     }
     let md = meta.metadata().clone();
     let leaf = md.file_metadata().schema_descr().columns().iter().position(|c| c.name() == "depth").ok_or("no depth leaf")?;
@@ -150,7 +153,7 @@ fn open_input(path: PathBuf) -> Result<Input> {
             (g, lo, hi)
         })
         .collect();
-    Ok(Input { path, meta, proj, names, groups })
+    Ok(Input { path, meta, proj, cls, groups })
 }
 
 /// Owner slices of a file version (`interval_store.us_sql_from_raw`'s `us`): `''` → unnamed; a name → that owner; JSON
@@ -176,7 +179,8 @@ fn owner_slices(us: &str, size: u64, owners: &Owners) -> Result<Vec<(u16, u64)>>
     Ok(out)
 }
 
-/// Class slices: `c2..c4` where positive, class 1 the rest when positive; none at all → class 1 with nothing.
+/// Class slices by slot (`classes.rs`): slot `k + 1` holds class column `c[k]` where positive, slot 0 (class 1) the
+/// rest when positive; none at all → slot 0 with nothing. A store with fewer than 3 class columns passes 0 for the rest.
 fn class_slices(size: u64, c: [i64; 3]) -> (u8, [u64; 4]) {
     let mut cls = [0u64; 4];
     let mut mask = 0u8;
@@ -217,15 +221,13 @@ fn read_level(
     let (mut last_parent, mut last_parent_id): (String, u32) = (String::new(), NO_PARENT);
     for batch in reader {
         let batch: RecordBatch = batch?;
-        let col = |name: &str| {
-            let n = &inp.names[COLS.iter().position(|c| *c == name).unwrap()];
-            batch.column(batch.schema().index_of(n).unwrap()).clone()
-        };
+        let col = |name: &str| batch.column(batch.schema().index_of(name).unwrap()).clone();
         let (depth, path, kind, us) = (col("depth"), col("path"), col("kind"), col("us"));
         let depth = ints(&depth)?;
         let (path, kind, us) = (Strs::of(&path)?, Strs::of(&kind)?, Strs::of(&us)?);
         let (vf, vt, size) = (ints(&col("vf"))?, ints(&col("vt"))?, ints(&col("size"))?);
-        let (c2, c3, c4) = (ints(&col("c2"))?, ints(&col("c3"))?, ints(&col("c4"))?);
+        // Class column `k`'s values, by slot `k + 1`.
+        let cv: Vec<Vec<i64>> = inp.cls.iter().map(|c| ints(&col(c.as_str()))).collect::<Result<_>>()?;
         let n_files = ints(&col("n_files"))?;
         let ord = |t: i64| -> Result<u16> {
             ords.get(&t).copied().ok_or_else(|| format!("{}: stamp {t} is no scan's", inp.path.display()).into())
@@ -275,7 +277,11 @@ fn read_level(
                 let sz = size[i].max(0) as u64;
                 r.size = sz;
                 let os = owner_slices(us.get(i), sz, owners)?;
-                let (mask, cls) = class_slices(sz, [c2[i], c3[i], c4[i]]);
+                let mut c = [0i64; 3];
+                for (k, v) in cv.iter().enumerate() {
+                    c[k] = v[i];
+                }
+                let (mask, cls) = class_slices(sz, c);
                 let simple_owner = os.len() == 1 && os[0].1 == sz;
                 let simple_cls = mask.count_ones() == 1 && cls[mask.trailing_zeros() as usize] == sz;
                 if simple_owner && simple_cls {
@@ -383,7 +389,9 @@ pub fn rss_peak_gb() -> f64 {
         .unwrap_or(0.0)
 }
 
-pub fn load(gen: &Generation) -> Result<Index> {
+/// `named`: the store's class columns (`fsb -C`, `classes::parse`); `None` reads them off the base's `path` sort, each
+/// `c<K>`.
+pub fn load(gen: &Generation, named: Option<&[(u8, String)]>) -> Result<Index> {
     let t0 = Instant::now();
     let mut stats = LoadStats { files: gen.files.len(), ..Default::default() };
     let lap = |name: &str, t: &mut Instant, stats: &mut LoadStats| {
@@ -394,7 +402,9 @@ pub fn load(gen: &Generation) -> Result<Index> {
     let n_scans = gen.scans.len() as u16;
     let mut ords: HashMap<i64, u16> = gen.scans.iter().enumerate().map(|(i, s)| (s.ts, i as u16)).collect();
     ords.insert(OPEN, n_scans);
-    let inputs: Vec<Input> = gen.files.iter().map(|p| open_input(p.clone())).collect::<Result<_>>()?;
+    let base = gen.files.first().ok_or("a generation without a `path` sort")?;
+    let cs = classes::resolve(named, &class_region(base, &file_columns(base)?)?).map_err(|e| format!("{}: {e}", base.display()))?;
+    let inputs: Vec<Input> = gen.files.iter().map(|p| open_input(p.clone(), &cs)).collect::<Result<_>>()?;
     let names = Interner::new();
     let owners = Owners(Mutex::new(HashMap::from([(String::new(), 0u16)])));
 
@@ -722,6 +732,7 @@ pub fn load(gen: &Generation) -> Result<Index> {
         dir_size: dir_size.into(),
         dir_files: dir_files.into(),
         scans: gen.scans.clone(),
+        classes: classes::slots(&cs),
         name: c_name.into(),
         depth: c_depth.into(),
         end: c_end.into(),

@@ -11,7 +11,8 @@ use crate::store::ScanInfo;
 pub const FILE: u8 = 1;
 /// Another version of the previous row's path.
 pub const CONT: u8 = 2;
-/// Bits 2–3: the class (0..3 = classes 1..4) of a simple file.
+/// Bits 2–3: the class slot (0..3) of a simple file: slot 0 is class 1, the others the store's class columns
+/// (`Index::classes`, `classes.rs`).
 pub const CLS_SHIFT: u8 = 2;
 /// The file's owner or class slices aren't one whole slice each: see `Index::complex`.
 pub const COMPLEX: u8 = 16;
@@ -24,7 +25,7 @@ pub const CK: usize = 4096;
 pub struct Complex {
     /// `(owner id, bytes)`, owner 0 = no owner named.
     pub owners: Vec<(u16, u64)>,
-    /// Which classes (bit k−1 for class k) hold a slice, and each class's bytes.
+    /// Which class slots (bit k for slot k) hold a slice, and each slot's bytes.
     pub cls_mask: u8,
     pub cls: [u64; 4],
 }
@@ -54,6 +55,8 @@ pub struct LoadStats {
 
 pub struct Index {
     pub scans: Vec<ScanInfo>,
+    /// Each class slot's class id (`classes.rs`): slot 0 is class 1 (the rest of `size`), then the store's class columns.
+    pub classes: Vec<u8>,
     pub name: Col<u32>,
     pub depth: Col<u8>,
     /// The last row of the path's subtree (inclusive), on every row of the path.

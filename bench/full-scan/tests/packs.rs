@@ -1,8 +1,11 @@
 //! The repo's interval-store fixtures (`site/functions/_lib/fixtures/iv/interval-store/g*`) as slim packs, the way
 //! `fsb pack-slim` writes them (load, `SlimIndex::from_index`, write), each pinned by a digest of its bytes
-//! (`tests/golden/slim-packs.json`; the header's one timing, `stats.build_s`, left out). Each fixture is packed as
-//! committed (class columns `c2`..`c4`) and as a copy under gcs's names (`nearline_bytes`, `coldline_bytes`,
-//! `archive_bytes`): both give the same bytes.
+//! (`tests/golden/slim-packs.json`; the header's one timing, `stats.build_s`, left out). The digests are the loader's
+//! from before class columns came from the store (`classes.rs`; it knew `c2`..`c4` and gcs's names for them), taken in
+//! CI on the commit that added this test. Each fixture as committed (class columns `c2`..`c4`, read off the store or
+//! named by `-C`) and as a copy under gcs's names with gcs's `-C` (`2=nearline_bytes,3=coldline_bytes,4=archive_bytes`,
+//! what `dt-cloud vm-pack build` passes there) gives exactly those bytes: gcs's slots, their order and its packs are
+//! unchanged.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -11,6 +14,7 @@ use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Field, Schema};
+use full_scan::classes;
 use full_scan::load::load;
 use full_scan::slim::SlimIndex;
 use full_scan::store;
@@ -20,6 +24,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const GCS_NAMES: [(&str, &str); 3] = [("c2", "nearline_bytes"), ("c3", "coldline_bytes"), ("c4", "archive_bytes")];
+/// gcs's `-C` (its `interval_store.CLASS_COLS`).
+const GCS: &str = "2=nearline_bytes,3=coldline_bytes,4=archive_bytes";
 
 fn fixtures() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site/functions/_lib/fixtures/iv/interval-store");
@@ -91,9 +97,10 @@ fn digest(pack: &Path) -> String {
     hex::encode(d.finalize())
 }
 
-/// `gen`'s slim pack, written to `out`: its digest.
-fn slim_pack(gen: &Path, out: &Path) -> String {
-    let idx = load(&store::open(gen).unwrap()).unwrap();
+/// `gen`'s slim pack (`-C`: `named`), written to `out`: its digest.
+fn slim_pack(gen: &Path, named: Option<&str>, out: &Path) -> String {
+    let cs = named.map(|s| classes::parse(s).unwrap());
+    let idx = load(&store::open(gen).unwrap(), cs.as_deref()).unwrap();
     SlimIndex::from_index(&idx).unwrap().write(out).unwrap();
     digest(out)
 }
@@ -104,10 +111,11 @@ fn fixture_slim_packs() {
     let mut got: BTreeMap<String, String> = BTreeMap::new();
     for g in fixtures() {
         let n = g.file_name().unwrap().to_string_lossy().into_owned();
-        let plain = slim_pack(&g, &tmp.join(format!("{n}.fsb")));
+        let plain = slim_pack(&g, None, &tmp.join(format!("{n}.fsb")));
+        assert_eq!(slim_pack(&g, Some("2=c2,3=c3,4=c4"), &tmp.join(format!("{n}-named.fsb"))), plain, "{n}: its class columns named");
         let gcs = tmp.join(format!("{n}-gcs"));
         renamed_copy(&g, &gcs, &GCS_NAMES);
-        assert_eq!(slim_pack(&gcs, &tmp.join(format!("{n}-gcs.fsb"))), plain, "{n}: under gcs's class column names");
+        assert_eq!(slim_pack(&gcs, Some(GCS), &tmp.join(format!("{n}-gcs.fsb"))), plain, "{n}: under gcs's class column names");
         got.insert(n, plain);
     }
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/slim-packs.json");
@@ -116,4 +124,20 @@ fn fixture_slim_packs() {
         Err(_) => panic!("{} missing; this tree's digests:\n{}", golden.display(), serde_json::to_string_pretty(&got).unwrap()),
     };
     assert_eq!(got, want);
+}
+
+/// A store in gcs's names without its `-C`: the columns have no class ids, and the load says so (it never drops them).
+#[test]
+fn gcs_names_need_their_classes_named() {
+    let tmp = scratch("gcs-unnamed");
+    let fx = fixtures();
+    renamed_copy(&fx[0], &tmp.join("g"), &GCS_NAMES);
+    let e = load(&store::open(&tmp.join("g")).unwrap(), None).err().unwrap().to_string();
+    assert_eq!(
+        e,
+        format!(
+            "{}: class column `nearline_bytes` has no class id: name the store's class columns (`-C K=COLUMN,…`)",
+            tmp.join("g/served/path.parquet").display()
+        )
+    );
 }

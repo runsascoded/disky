@@ -127,7 +127,7 @@ impl Loaded {
             Some(p) => vec![p.clone()],
             None => t.packs.clone(),
         };
-        let mut parts = Vec::new();
+        let mut parts: Vec<SlimIndex> = Vec::new();
         let mut bytes = 0;
         let mut pins: Option<Pins> = None;
         for f in &files {
@@ -141,6 +141,9 @@ impl Loaded {
             match &pins {
                 Some(x) if x != &pi => return err(format!("tenant {}: its packs hold different generations", t.name)),
                 _ => pins = Some(pi),
+            }
+            if parts.first().is_some_and(|p| p.classes != ix.classes) {
+                return err(format!("tenant {}: its packs hold different classes", t.name));
             }
             parts.push(ix);
         }
@@ -158,6 +161,11 @@ impl Loaded {
 
     fn scans(&self) -> Vec<String> {
         self.parts[0].scans.iter().map(|s| s.id.clone()).collect()
+    }
+
+    /// Each class slot's class (`classes.rs`): the classes a request may name.
+    fn classes(&self) -> &[u8] {
+        &self.parts[0].classes
     }
 }
 
@@ -477,7 +485,7 @@ impl Server {
             (Some(_), false) => "hot",
             (None, false) => "error",
         };
-        let cur = s.current.as_ref().map(|l| json!({"pins": l.pins, "scans": l.scans().len(), "newest": l.scans().last(), "loaded_at": l.loaded_at, "load_s": l.load_s, "pack_bytes": l.bytes, "shards": l.shards}));
+        let cur = s.current.as_ref().map(|l| json!({"pins": l.pins, "scans": l.scans().len(), "newest": l.scans().last(), "classes": l.classes(), "loaded_at": l.loaded_at, "load_s": l.load_s, "pack_bytes": l.bytes, "shards": l.shards}));
         reply(200, json!({"tenant": tenant, "state": state, "current": cur, "error": s.error}))
     }
 

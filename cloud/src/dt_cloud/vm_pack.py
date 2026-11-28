@@ -90,6 +90,19 @@ def fsb_path(given: str | None) -> str:
     return p
 
 
+def class_cols() -> str:
+    """`fsb pack-slim -C`: the store's class columns by class id, `K=COLUMN,…` (empty: none; class 1 is the rest of
+    `size`). The deployment's `interval_store.CLASS_COLS`, the one definition its store was written by, so the pack's
+    class slots are its own (gcs: `2=nearline_bytes,3=coldline_bytes,4=archive_bytes`; hf: `5=private_bytes,6=git_bytes`)."""
+    from . import interval_store as ist
+    return ",".join(f"{k}={c}" for k, c in sorted(ist.CLASS_COLS.items()))
+
+
+def pack_cmd(fsb: str, gen_dir: Path, out: Path) -> list[str]:
+    """The `fsb pack-slim` command for a mirrored generation."""
+    return [fsb, "pack-slim", str(gen_dir), "-o", str(out), "-C", class_cols()]
+
+
 def published(store: Store, gen: str, manifest: str | None) -> dict | None:
     """`vm-pack/CURRENT.json` when it already names `gen` and `manifest` (the pack is written), else None."""
     if store.exists(POINTER):
@@ -117,7 +130,7 @@ def build(root: str, work: Path, fsb: str, *, keep: int = 2, force: bool = False
     mirror_s = time.monotonic() - t0
     out = work / "pack.fsb"
     t1 = time.monotonic()
-    r = subprocess.run([fsb, "pack-slim", str(dest), "-o", str(out)], stdout=subprocess.PIPE, text=True, check=True)
+    r = subprocess.run(pack_cmd(fsb, dest, out), stdout=subprocess.PIPE, text=True, check=True)
     info = json.loads(r.stdout.strip().splitlines()[-1])
     pack_s = time.monotonic() - t1
     key = pack_key(gen, manifest)

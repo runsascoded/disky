@@ -8,7 +8,7 @@ log() { echo "[$(date +%T)] $*" >&2; }
 cargo build -q --release
 d=$w/gcs2; mkdir -p "$d"
 log gcs2 bench
-/usr/bin/time -f "%e s, %M KB" ./target/release/fsb bench "$gen" "$w/gcs/queries.jsonl" -t "1,$(nproc)" -r 5 -l gcs \
+/usr/bin/time -f "%e s, %M KB" ./target/release/fsb bench "$gen" "$w/gcs/queries.jsonl" -C 2=nearline_bytes,3=coldline_bytes,4=archive_bytes -t "1,$(nproc)" -r 5 -l gcs \
   -o "$d/results.jsonl" -a "$d/answers.jsonl" 2> "$d/bench.log"
 tail -1 "$d/bench.log" >&2
 python3 -c 'import json,sys; a=[json.loads(l) for l in open(sys.argv[1])]; b=[json.loads(l) for l in open(sys.argv[2])]; print(json.dumps({"answers": len(a), "equal_to_oracle_checked_run": a == b}))' \

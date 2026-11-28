@@ -20,7 +20,7 @@ t1=$(t); phase setup "$t0" "$t1"
 gen=$(src/fetch-gen "$STORE" "$work/store" | tail -1)
 t2=$(t); phase copy "$t1" "$t2"
 gcloud storage cp "$OUT/inputs/queries.jsonl" "$OUT/inputs/answers.jsonl" .
-src/target/release/fsb bench "$gen" queries.jsonl -t "1,$(nproc)" -r 5 -l "gcs-batch-${BATCH_JOB_ID:-local}" \
+src/target/release/fsb bench "$gen" queries.jsonl -C 2=nearline_bytes,3=coldline_bytes,4=archive_bytes -t "1,$(nproc)" -r 5 -l "gcs-batch-${BATCH_JOB_ID:-local}" \
   -o results.jsonl -a answers.batch.jsonl 2> bench.log
 t3=$(t); phase bench "$t2" "$t3"
 python3 - <<'PY'
