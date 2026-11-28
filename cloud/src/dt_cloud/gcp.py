@@ -7,6 +7,7 @@ login`` credentials both work.
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from json import dumps
@@ -129,16 +130,29 @@ def batch_job_by_uid(uid: str, project: str | None = None, region: str | None = 
         params["pageToken"] = token
 
 
+#: A deployment's own log view of its Batch task logs (`projects/P/locations/L/buckets/B/views/V`,
+#: specs/per-deployment-task-logs.md): task-log reads go through it (`task_log_resource`), and `label_batch_spec` hands it
+#: on to every job, so a job reads its helpers' logs with a grant on that view alone.
+TASK_LOG_VIEW_ENV = "DT_TASK_LOG_VIEW"
+
+
+def task_log_resource(project: str | None = None) -> str:
+    """Where task logs are read: `$DT_TASK_LOG_VIEW`, else the project (every deployment's, as before)."""
+    return os.environ.get(TASK_LOG_VIEW_ENV) or f"projects/{project or gcp_project()}"
+
+
 def log_entries(
     filter_: str,
     project: str | None = None,
     limit: int = 50,
     asc: bool = False,
+    resource: str | None = None,
 ) -> list[dict]:
-    project = project or gcp_project()
+    """Entries matching `filter_` in `resource` (a log view's or bucket's name; default the project), newest first
+    unless `asc`."""
     entries: list[dict] = []
     body = {
-        "resourceNames": [f"projects/{project}"],
+        "resourceNames": [resource or f"projects/{project or gcp_project()}"],
         "filter": filter_,
         "orderBy": "timestamp asc" if asc else "timestamp desc",
         "pageSize": min(limit, 1000),

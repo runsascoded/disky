@@ -283,6 +283,7 @@ def test_gcp_batch_wraps_the_existing_seams(monkeypatch):
     monkeypatch.setattr(gcp, "task_log_filter", lambda uid: f"uid={uid}")
     entries = [{"textPayload": "two\n"}, {"jsonPayload": {"message": "one"}}]
     monkeypatch.setattr(gcp, "log_entries", lambda *a, **kw: calls.append(("logs", a, kw)) or entries)
+    monkeypatch.delenv(gcp.TASK_LOG_VIEW_ENV, raising=False)
     b = jb.GcpBatch("us-east1", "p")
     assert b.submit({"s": 1}, "j1", buckets=["bk"], exists_ok=True, retry_for=300) == "j1"
     assert b.status("j1") == JobStatus("RUNNING", "PENDING=1 RUNNING=2")
@@ -292,7 +293,7 @@ def test_gcp_batch_wraps_the_existing_seams(monkeypatch):
         ("submit", ({"s": 1}, "j1", "us-east1", "p"), {"buckets": ["bk"], "cross_region": None, "exists_ok": True, "retry_for": 300}),
         ("get", ("j1",), {"project": "p", "region": "us-east1"}),
         ("get", ("j1",), {"project": "p", "region": "us-east1"}),
-        ("logs", ("uid=u1",), {"project": "p", "limit": 2, "asc": False}),
+        ("logs", ("uid=u1",), {"project": "p", "limit": 2, "asc": False, "resource": "projects/p"}),
         ("cancel", ("j1",), {"region": "us-east1", "project": "p"}),
     ]
 

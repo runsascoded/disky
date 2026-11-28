@@ -101,7 +101,7 @@ def sync_progress(job_name: str, interval: int = 0, sql_output: str | None = Non
     A two-minute overlap accommodates delayed ingestion; the D1 PK deduplicates.
     Legacy byte counters were rounded in task logs, and are labelled approximate.
     """
-    from .gcp import batch_job, log_entries, task_log_filter
+    from .gcp import batch_job, log_entries, task_log_filter, task_log_resource
 
     if interval and interval < 30:
         raise ValueError("progress sync interval must be zero or at least 30 seconds")
@@ -121,7 +121,7 @@ def sync_progress(job_name: str, interval: int = 0, sql_output: str | None = Non
         if latest is not None:
             since = datetime.fromtimestamp(latest - 120, timezone.utc).isoformat()
             filter_ += f' timestamp >= "{since}"'
-        entries = retry_read(lambda: log_entries(filter_, limit=20_000, asc=True))
+        entries = retry_read(lambda: log_entries(filter_, limit=20_000, asc=True, resource=task_log_resource()))
         samples = [row for entry in entries if (row := log_sample(entry)) is not None]
         if sql_output:
             Path(sql_output).write_text(";\n".join(sample_statements(run_id, samples)) + ";\n")

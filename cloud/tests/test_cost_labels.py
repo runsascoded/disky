@@ -168,6 +168,31 @@ def test_grandchildren_inherit_without_scan_context():
     assert grandchild["taskGroups"] == [{"taskSpec": {"environment": {"variables": env}}}]
 
 
+def test_grandchildren_inherit_the_task_log_view():
+    """The deployment's task-log view (`$DT_TASK_LOG_VIEW`, specs/per-deployment-task-logs.md) goes to each generation's
+    env with `$DISKY_LABELS`, so a job reads its helpers' logs through it; unset, no variable."""
+    view = "projects/p/locations/global/buckets/cw-task-logs/views/cw"
+    env = {"DISKY_LABELS": "app=disky,deployment=cw", "DT_TASK_LOG_VIEW": view}
+    child = label_batch_spec({"taskGroups": [{}]}, "static-names", env)
+    grandchild = label_batch_spec({"taskGroups": [{}]}, "drill", child["taskGroups"][0]["taskSpec"]["environment"]["variables"])
+    assert [g["taskGroups"][0]["taskSpec"]["environment"]["variables"] for g in (child, grandchild)] == [env, env]
+    bare = label_batch_spec({"taskGroups": [{}]}, "drill", {"DISKY_LABELS": "app=disky,deployment=cw", "DT_TASK_LOG_VIEW": ""})
+    assert bare["taskGroups"][0]["taskSpec"]["environment"]["variables"] == {"DISKY_LABELS": "app=disky,deployment=cw"}
+
+
+def test_task_logs_are_read_through_the_view_when_set(monkeypatch):
+    from dt_cloud import gcp
+
+    posted = []
+    monkeypatch.setattr(gcp, "_post", lambda url, body: posted.append(body["resourceNames"]) or {"entries": []})
+    monkeypatch.delenv("DT_TASK_LOG_VIEW", raising=False)
+    gcp.log_entries("f", resource=gcp.task_log_resource("p"))
+    monkeypatch.setenv("DT_TASK_LOG_VIEW", "projects/p/locations/global/buckets/cw-task-logs/views/cw")
+    gcp.log_entries("f", resource=gcp.task_log_resource("p"))
+    gcp.log_entries("f", project="p")  # not a task-log read (the agent's): the project
+    assert posted == [["projects/p"], ["projects/p/locations/global/buckets/cw-task-logs/views/cw"], ["projects/p"]]
+
+
 def test_label_batch_spec_merges_job_and_allocation():
     spec = {"labels": {"purpose": "static-names", "app": "old"}, "allocationPolicy": {"labels": {"x": "1"}, "serviceAccount": {"email": "sa"}}}
     out = label_batch_spec(spec, "drill", {"DISKY_LABELS": "app=disky,deployment=gcs"})

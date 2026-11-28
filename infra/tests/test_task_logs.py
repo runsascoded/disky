@@ -99,3 +99,34 @@ def test_task_log_bucket_keeps_batch_task_logs_beside_default():
 def test_task_log_bucket_retention_bounds(days: int):
     with pytest.raises(ValueError, match="^retention_days must be 1–3650$"):
         TaskLogBucket("tl", project="p", location="global", bucket_id="b", retention_days=days)
+
+
+@pulumi.runtime.test
+def test_a_deployments_bucket_and_view_take_only_its_labelled_task_logs():
+    mocks = Mocks()
+    pulumi.runtime.set_mocks(mocks, project="test", stack="test", preview=False)
+    logs = TaskLogBucket("cw-logs", project="p", location="global", bucket_id="cw-task-logs", retention_days=365, deployment="cw")
+    view = TaskLogView("cw-view", project="p", location="global", bucket="cw-task-logs", view_id="cw", deployment="cw",
+                       reader="serviceAccount:job@p.iam.gserviceaccount.com")
+    only_cw = 'log_id("batch_task_logs") AND labels.deployment = "cw"'
+
+    def check(_):
+        assert (mocks.resources["cw-logs-sink"][1]["filter"], mocks.resources["cw-logs-sink"][1]["description"]) == (
+            only_cw, "Batch task logs of cw → cw-task-logs")
+        assert mocks.resources["cw-logs-bucket"][1]["retentionDays"] == 365
+        assert mocks.resources["cw-view-view"][1]["filter"] == only_cw
+        assert view.path == "projects/p/locations/global/buckets/cw-task-logs/views/cw"
+
+    return pulumi.Output.all(logs.sink.id, view.view.id).apply(check)
+
+
+@pytest.mark.parametrize("kw", [{}, {"job_uid_prefix": "sn-", "deployment": "cw"}])
+def test_a_view_filters_by_exactly_one_of_prefix_and_deployment(kw: dict):
+    with pytest.raises(ValueError, match="^exactly one of job_uid_prefix and deployment$"):
+        TaskLogView("v", project="p", location="global", bucket="b", view_id="v", reader="r", **kw)
+
+
+@pytest.mark.parametrize("dep", ["", 'cw" OR true', "CW"])
+def test_a_deployment_filter_takes_only_a_label_value(dep: str):
+    with pytest.raises(ValueError, match="^deployment must be a label value"):
+        TaskLogBucket("tl", project="p", location="global", bucket_id="b", retention_days=30, deployment=dep)

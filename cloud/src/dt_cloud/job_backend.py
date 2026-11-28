@@ -90,7 +90,8 @@ class GcpBatch:
         from . import gcp
 
         uid = gcp.batch_job(job_id, project=self.project, region=self.region)["uid"]
-        entries = gcp.log_entries(gcp.task_log_filter(uid), project=self.project, limit=limit, asc=False)
+        entries = gcp.log_entries(gcp.task_log_filter(uid), project=self.project, limit=limit, asc=False,
+                                  resource=gcp.task_log_resource(self.project))
         return [(e.get("textPayload") or e.get("jsonPayload", {}).get("message", "")).rstrip() for e in reversed(entries)]
 
     def cancel(self, job_id: str) -> None:

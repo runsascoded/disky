@@ -141,7 +141,8 @@ def label_batch_spec(
     for group in out.get("taskGroups", []):
         variables = group.setdefault("taskSpec", {}).setdefault("environment", {}).setdefault("variables", {})
         variables[ENV] = env[ENV]
-        for var in (RUN_ENV, SCAN_ENV):
+        # the deployment's task-log view (`gcp.TASK_LOG_VIEW_ENV`), so a job reads its helpers' logs as its submitter does
+        for var in (RUN_ENV, SCAN_ENV, "DT_TASK_LOG_VIEW"):
             if env.get(var):
                 variables[var] = env[var]
     if "scan_run" in labels or "scan_id" in labels:

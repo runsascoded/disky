@@ -3079,12 +3079,12 @@ def job_status(limit: int, name: str | None) -> None:
 @argument("name", required=False)
 def job_logs(asc: bool, grep: str | None, key_markers: bool, limit: int, name: str | None) -> None:
     """Container stdout for a Batch job (batch_task_logs; agent noise excluded)."""
-    from .gcp import log_entries, task_log_filter
+    from .gcp import log_entries, task_log_filter, task_log_resource
 
     j = _resolve_job(name or "latest")
     if key_markers:
         grep = r"\[rss\]|stage |WARN|SNAPSHOT-JOB-DONE|Deployment complete|reusing|objects listed|Error|Killed|Traceback"
-    for e in log_entries(task_log_filter(j["uid"], grep), limit=limit, asc=asc):
+    for e in log_entries(task_log_filter(j["uid"], grep), limit=limit, asc=asc, resource=task_log_resource()):
         message = e.get("textPayload") or e.get("jsonPayload", {}).get("message", "")
         print(f"{e.get('timestamp', '')[:19]} {message.rstrip()}")
 

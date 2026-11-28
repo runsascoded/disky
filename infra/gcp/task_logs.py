@@ -1,4 +1,7 @@
-"""Read-only Batch task logs, isolated from a project's other log streams."""
+"""Read-only Batch task logs, isolated from a project's other log streams.
+
+Every Batch task log entry carries its job's labels (`labels.deployment`, …), so a deployment's logs are told apart by
+its label (specs/per-deployment-task-logs.md): its own bucket, sink and view, in its own stack."""
 
 from json import dumps
 from re import fullmatch
@@ -8,8 +11,16 @@ import pulumi_gcp as gcp
 from pulumi import ComponentResource, ResourceOptions
 
 
+def deployment_filter(deployment: str) -> str:
+    """The task logs of one deployment's jobs: its label, which `batch.submit_job` requires on every job."""
+    if not fullmatch(r"[a-z0-9][a-z0-9_-]*", deployment):
+        raise ValueError(f"deployment must be a label value, not {deployment!r}")
+    return f'log_id("batch_task_logs") AND labels.deployment = {dumps(deployment)}'
+
+
 class TaskLogView(ComponentResource):
-    """An additive reader grant on a deployment-filtered view, not the project."""
+    """An additive reader grant on a deployment-filtered view, not the project: by its `deployment` label, or (older)
+    by a job-name prefix."""
 
     def __init__(
         self,
@@ -19,11 +30,14 @@ class TaskLogView(ComponentResource):
         location: str,
         bucket: str,
         view_id: str,
-        job_uid_prefix: str,
         reader: pulumi.Input[str],
+        job_uid_prefix: str | None = None,
+        deployment: str | None = None,
         opts: ResourceOptions | None = None,
     ):
-        if not fullmatch(r"[a-zA-Z0-9_-]+", job_uid_prefix):
+        if (job_uid_prefix is None) == (deployment is None):
+            raise ValueError("exactly one of job_uid_prefix and deployment")
+        if job_uid_prefix is not None and not fullmatch(r"[a-zA-Z0-9_-]+", job_uid_prefix):
             raise ValueError("job_uid_prefix must be a nonempty literal job-name prefix")
         super().__init__("disky:gcp:TaskLogView", name, None, opts)
         parent = f"projects/{project}"
@@ -35,7 +49,8 @@ class TaskLogView(ComponentResource):
             bucket=bucket,
             name=view_id,
             description="Deployment Batch task logs only; no agent, audit, or unrelated job logs",
-            filter=f'log_id("batch_task_logs") AND labels.job_uid =~ {dumps("^" + job_uid_prefix)}',
+            filter=deployment_filter(deployment) if deployment is not None else
+            f'log_id("batch_task_logs") AND labels.job_uid =~ {dumps("^" + job_uid_prefix)}',
             opts=ResourceOptions(parent=self),
         )
         self.reader = gcp.logging.LogViewIamMember(
@@ -52,7 +67,8 @@ class TaskLogView(ComponentResource):
 
 
 class TaskLogBucket(ComponentResource):
-    """A log bucket keeping a project's Batch task logs for `retention_days`, fed by a sink.
+    """A log bucket keeping a project's Batch task logs for `retention_days`, fed by a sink: one deployment's (its
+    `deployment` label), or with None every deployment's in the project (the shared bucket this replaces).
 
     A copy beside `_Default` (whose 30 days, views and Logs Explorer links stay as they are): a project-scoped Logs
     Explorer query reads both buckets, so a run's task logs stay findable for the longer window. A sink into a log
@@ -67,6 +83,7 @@ class TaskLogBucket(ComponentResource):
         location: str,
         bucket_id: str,
         retention_days: int,
+        deployment: str | None = None,
         opts: ResourceOptions | None = None,
     ):
         if not 1 <= retention_days <= 3650:
@@ -86,8 +103,8 @@ class TaskLogBucket(ComponentResource):
             project=project,
             name=bucket_id,
             destination=f"logging.googleapis.com/projects/{project}/locations/{location}/buckets/{bucket_id}",
-            filter='log_id("batch_task_logs")',
-            description=f"Batch task logs → {bucket_id}",
+            filter=deployment_filter(deployment) if deployment is not None else 'log_id("batch_task_logs")',
+            description=f"Batch task logs{f' of {deployment}' if deployment else ''} → {bucket_id}",
             unique_writer_identity=True,
             opts=ResourceOptions(parent=self, depends_on=[self.bucket]),
         )

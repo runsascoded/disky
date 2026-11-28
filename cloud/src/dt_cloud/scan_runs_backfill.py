@@ -317,7 +317,7 @@ def _head(rx: str) -> str:
 
 
 def fetch_logs(profile: Profile, project: str, now: int, limit: int = 200_000) -> list[dict]:
-    from .gcp import log_entries
+    from .gcp import log_entries, task_log_resource
 
     since = dt.datetime.fromtimestamp(now, dt.timezone.utc) - dt.timedelta(days=profile.log_days)
-    return log_entries(log_filter(profile, since), project, limit=limit, asc=True)
+    return log_entries(log_filter(profile, since), project, limit=limit, asc=True, resource=task_log_resource(project))
