@@ -471,7 +471,15 @@ def test_a_tier_killed_in_the_pool_reruns_alone(chain, tmp_path, monkeypatch):
         calls.append((args[0], False))
         return real(*args)
 
-    monkeypatch.setattr("disk_tree.spawned.spawn_pool", Pool)
+    from disk_tree import spawned
+
+    spawn_pool = spawned.spawn_pool
+
+    def pool(workers, initializer=None, initargs=()):
+        """`build_merged_run`'s pool (no initializer) is the fake; a tier's own pools (`static_append`'s) are real."""
+        return Pool() if initializer is None else spawn_pool(workers, initializer, initargs)
+
+    monkeypatch.setattr(spawned, "spawn_pool", pool)
     monkeypatch.setattr(sm, "merge_tier", alone)
     logs: list[str] = []
     rec = Rec()
