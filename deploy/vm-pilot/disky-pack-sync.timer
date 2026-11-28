@@ -1,0 +1,11 @@
+# The pack sync every 10 minutes: a scan's `vm-pack` step publishes a new pack; the box serves it within a sync.
+[Unit]
+Description=disky VM pilot: pack sync, every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

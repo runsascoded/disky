@@ -1,0 +1,16 @@
+# The Ops Agent on the VM pilot's box: the journal (every unit's output: vmd, the tunnel, the pack sync, the local job
+# backend's `disky-job-*` supervisors, this bootstrap) to Cloud Logging. No metrics: the box's account holds
+# `logging.logWriter` only.
+logging:
+  receivers:
+    journald:
+      type: systemd_journald
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: [journald]
+metrics:
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: []

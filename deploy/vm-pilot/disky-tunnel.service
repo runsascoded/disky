@@ -1,0 +1,22 @@
+# The VM pilot's Cloudflare Tunnel connector (infra/cf/shared: its one route, the stack's hostname → vmd on
+# localhost:7340). Outbound only. Its token comes from Secret Manager into this process's environment at start
+# (`tunnel.secrets`: `TUNNEL_TOKEN=<secret>`), which `cloudflared tunnel run` reads; never argv or disk.
+[Unit]
+Description=disky VM pilot: Cloudflare Tunnel (cloudflared) to vmd
+Wants=network-online.target
+After=network-online.target vmd.service
+
+[Service]
+Slice=serve.slice
+DynamicUser=yes
+RuntimeDirectory=disky-tunnel
+Environment=CLOUDSDK_CONFIG=%t/disky-tunnel/gcloud
+ExecStart=/usr/local/lib/disky/with-secrets -f /etc/disky/tunnel.secrets -- /usr/bin/cloudflared --no-autoupdate tunnel run
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
