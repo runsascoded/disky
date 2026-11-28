@@ -563,8 +563,8 @@ def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, keep, measure
     stays (readers pin `STATIC_GEN`; `store-gc -k`). With `-S`, holds the compaction lease (`static-names/compacting.lease.json`)
     throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. With `-S`, the fold is also
     checkpointed there part by part (`static_compact.compact_checkpoint`): a resubmitted job resumes it; cleared once the new
-    generation is published (or superseded). `-N`: a candidate (no lease, no pointer; `promote` points at it). Prints a
-    JSON summary."""
+    generation is published (or superseded). `-N`: a candidate (no pointer; `promote`, or `static-names runs adopt`, points
+    at it), its lease marked `candidate`: appends go on, another compaction is still refused. Prints a JSON summary."""
     from .blobstore import Store
     from .static_compact import clear_checkpoints, compactor
 
@@ -577,7 +577,7 @@ def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, keep, measure
         doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout, prebuilt=prebuilt, anchor_fanout=afan, keep=keep,
                                                                    fold_fanout=ffan), gen,
                                 Path(mount), Path(tmp),
-                                lease=ar.gcs_compaction_lease_file(scratch, PREFIX) if promote else None, policy=policy, force=force,
+                                lease=ar.gcs_compaction_lease_file(scratch, PREFIX), policy=policy, force=force,
                                 r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
                                 promote=promote, rec=from_env("compact"))
     except ar.Busy as e:

@@ -4056,7 +4056,7 @@ from .static_append import cli as _static_append  # noqa: E402
 from .static_catalog import cli as _static_catalog  # noqa: E402
 from .static_drill import cli as _static_drill  # noqa: E402
 from .static_runner import add_cmd as _static_runs_add, check_priors_cmd as _static_runs_check_priors, lag_cmd as _static_runs_lag, merge_cmd as _static_runs_merge  # noqa: E402
-from .static_runner import r2_cmd as _static_runs_r2  # noqa: E402
+from .static_runner import adopt_cmd as _static_runs_adopt, r2_cmd as _static_runs_r2  # noqa: E402
 from .static_merge import carry_cmd as _static_runs_carry  # noqa: E402
 from .static_names import cli as _static_names  # noqa: E402
 from .static_roots import cli as _static_roots  # noqa: E402
@@ -4067,6 +4067,7 @@ _static_names.add_command(_static_catalog)
 _static_append.add_command(_static_drill)
 _static_append.add_command(_static_runs_add)
 _static_append.add_command(_static_runs_merge)
+_static_append.add_command(_static_runs_adopt)
 _static_append.add_command(_static_runs_lag)
 _static_append.add_command(_static_runs_check_priors)
 _static_append.add_command(_static_runs_r2)

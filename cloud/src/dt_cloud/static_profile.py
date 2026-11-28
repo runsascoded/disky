@@ -100,6 +100,10 @@ class Profile:
     #: `{"geometric": 1}` or `"none"`; specs/static-compaction.md): when set, it replaces `compact_level`, which is
     #: shorthand for `{"level": L}`. `policy` is the one in force.
     compact: Policy | None = None
+    #: A due compaction writes a candidate (`compact -N`; `runs add -N`): appends go on into the generation while it folds,
+    #: then `runs merge` (the deferred compaction's coordinator) catches the candidate up and promotes it
+    #: (`append_runner.Runner.adopt`, specs/candidate-compaction.md). Off: the fold holds appends off until it publishes.
+    compact_candidate: bool = False
     #: Which copy the builder reads a generation's base and runs from in a merge and a compaction (`append_runner.READ_FROM`):
     #: `gcs` (the data bucket, in place) or `r2` (the R2 copy, mirrored locally; it must hold the builder's inputs).
     read_from: str = "gcs"
@@ -188,7 +192,8 @@ ENV = {
     "machines": "STATIC_NAMES_MACHINES", "ssd_gbs": "STATIC_NAMES_SSDS",
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "pipeline_depth": "STATIC_NAMES_PIPELINE_DEPTH", "measure_tasks": "STATIC_NAMES_MEASURE_TASKS", "anchor_tasks": "STATIC_NAMES_ANCHOR_TASKS", "fold_tasks": "STATIC_NAMES_FOLD_TASKS", "keep": "STATIC_NAMES_KEEP", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
-    "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
+    "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT",
+    "compact_candidate": "STATIC_NAMES_COMPACT_CANDIDATE", "read_from": "STATIC_NAMES_READ_FROM",
     "compact_jobs": "STATIC_NAMES_COMPACT_JOBS", "fold_jobs": "STATIC_NAMES_FOLD_JOBS", "record_secrets": "STATIC_NAMES_RECORD_SECRETS",
     "owner_carry": "STATIC_NAMES_OWNER_CARRY", "events_topic": "STATIC_NAMES_EVENTS_TOPIC",
 }
@@ -239,7 +244,7 @@ def _parse(name: str, raw: str):
         return parse_policy(ENV[name], raw)
     if name in ("ssd_gb", "append_tasks", "pipeline_depth", "measure_tasks", "anchor_tasks", "fold_tasks", "compact_jobs", "fold_jobs", "keep"):
         return int(raw)
-    if name in ("spot", "drill", "anchors", "owner_carry"):
+    if name in ("spot", "drill", "anchors", "owner_carry", "compact_candidate"):
         return raw.strip() not in ("0", "false", "")
     return raw.strip()
 

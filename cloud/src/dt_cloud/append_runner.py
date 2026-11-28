@@ -47,7 +47,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -598,12 +598,19 @@ class LocalLeaseFile:
 
 
 class GcsLeaseFile:
-    """`LeaseFile` on a GCS object, by generation preconditions."""
+    """`LeaseFile` on a GCS object, by generation preconditions. The storage client is made at first use (a job that
+    never takes the lease needs no credentials for it)."""
 
     def __init__(self, bucket: str, key: str, client=None):
-        from google.cloud import storage
+        self.bucket, self.key, self.client, self._blob = bucket, key, client, None
 
-        self.blob = (client or storage.Client()).bucket(bucket).blob(key)
+    @property
+    def blob(self):
+        if self._blob is None:
+            from google.cloud import storage
+
+            self._blob = (self.client or storage.Client()).bucket(self.bucket).blob(self.key)
+        return self._blob
 
     def create(self, text: str) -> bool:
         from google.api_core.exceptions import PreconditionFailed
@@ -913,26 +920,50 @@ COMPACT_LEASE = "compacting.lease.json"
 #: job that never starts holds appends off this long.
 COMPACT_START_S = 3600
 
+# ── Adopting a candidate (specs/candidate-compaction.md): catch it up, then promote it ──
+#
+# A candidate's fold (`compact -N`) lets appends go on into its source; `Runner.adopt` then appends those scans to the
+# candidate under the candidate's own coordinator lease (`coordinator_prefix`), and promotes it under the source's (the
+# one every scan's append holds), so no append to the source runs between the last check and the pointer move.
 
-def compaction_holds(file: LeaseFile, gen: str, now: datetime) -> dict | None:
-    """The compaction lease's record, when a live one (within its `ttl_s`) is compacting generation `gen`; else None."""
+#: Catch-up rounds before `adopt` gives up for this run (each: the scans the source gained since, then the promote try).
+ADOPT_ROUNDS = 8
+#: How long `adopt` waits in all for the source's coordinator lease (a scan's append holds it for an hour or more).
+ADOPT_WAIT_S = 12 * 3600
+#: How often `adopt` retries the source's coordinator lease while a scan's append holds it.
+ADOPT_POLL_S = 300
+
+
+def compaction_holds(file: LeaseFile, gen: str, now: datetime, *, appends: bool = False) -> dict | None:
+    """The compaction lease's record, when a live one (within its `ttl_s`) is compacting generation `gen`; else None.
+    `appends`: only a compaction that holds appends off, not a candidate's (`candidate` in its record: its fold doesn't
+    supersede on an append, `adopt` catches it up)."""
     if (cur := file.read()) is None:
         return None
     held = cur[0]
-    return held if held.get("gen") == gen and not lease_stale(held, now, COORD_TTL_S) else None
+    if held.get("gen") != gen or lease_stale(held, now, COORD_TTL_S):
+        return None
+    return None if appends and held.get("candidate") else held
 
 
 @contextmanager
 def compaction_lease(file: LeaseFile, gen: str, *, holder: str | None = None, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                     ttl_s: int = COORD_TTL_S, heartbeat_s: float = HEARTBEAT_S, log: Callable[[str], None] = err) -> Iterator[CoordinatorLease]:
+                     ttl_s: int = COORD_TTL_S, heartbeat_s: float = HEARTBEAT_S, candidate: bool = False,
+                     log: Callable[[str], None] = err) -> Iterator[CoordinatorLease]:
     """Hold the compaction lease on `file` for generation `gen` (`holder`: `$DT_JOB_NAME`, else host:pid), adopting the
     record its submitter wrote for it, renewed every `heartbeat_s` (a failed renewal retried at the next); raises `Busy`
-    when another live compaction holds it. Released on the way out."""
-    lease = CoordinatorLease(file, holder=holder or default_holder(), now=now, ttl_s=ttl_s, extra={"gen": gen}, adopt=True,
+    when another live compaction holds it. Released on the way out. `candidate`: the record says so (`candidate: true`):
+    another compaction is still refused, appends aren't held off (`compaction_holds(appends=True)`)."""
+    lease = CoordinatorLease(file, holder=holder or default_holder(), now=now, ttl_s=ttl_s, extra=compaction_extra(gen, candidate), adopt=True,
                              tolerate_errors=True, what="compaction lease", log=log)
     lease.take()
     with heartbeat(lease, heartbeat_s):
         yield lease
+
+
+def compaction_extra(gen: str, candidate: bool = False) -> dict:
+    """The compaction lease record's own fields: the generation compacted, and `candidate: true` for a candidate's fold."""
+    return {"gen": gen, **({"candidate": True} if candidate else {})}
 
 
 def gcs_compaction_lease_file(scratch: str | None, prefix: str, client=None) -> LeaseFile | None:
@@ -1908,7 +1939,8 @@ class Runner:
     #: scan's step submits a coordinator of its own rather than wait out an hours-long fold inside the scan).
     defer_compaction: bool = False
     deferred: str | None = None
-    #: The compaction stage writes a candidate (`compact -N`): no compaction lease taken, nothing pointed at it.
+    #: The compaction stage writes a candidate (`compact -N`): nothing pointed at it, its compaction lease marked
+    #: `candidate` (appends go on); `adopt` catches it up and promotes it.
     candidate: bool = False
     #: The submitter's env: what its merge and compaction jobs record their runs with (`record_env`).
     environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
@@ -1997,7 +2029,7 @@ class Runner:
     def wait_compaction(self) -> None:
         """`Busy` while a live compaction holds the generation (`compaction_holds`): a scan appended to it would supersede
         the compaction; once it wrote its successor, the next run appends there (`follow`)."""
-        if self.compacting is not None and (held := compaction_holds(self.compacting(), self.p.gen, self.now())):
+        if self.compacting is not None and (held := compaction_holds(self.compacting(), self.p.gen, self.now(), appends=True)):
             raise Compacting(self.p.gen, held["holder"], held.get("since") or held["at"], held=held)
 
     def one(self, d: str) -> None:
@@ -2171,16 +2203,20 @@ class Runner:
         (`follow`). Non-fatal, as the merge stage: a rerun resumes (the job follows a finished compaction's successor).
 
         Before submitting, the compaction lease (`compacting`) is written for the `compact` job (its `holder`, which the
-        job adopts): appends to the generation wait from then on, whether or not this run stays to watch the job. None is
-        submitted while another live compaction holds it."""
+        job adopts): appends to the generation wait from then on, whether or not this run stays to watch the job (a
+        candidate's record says `candidate`: appends go on). None is submitted while another live compaction holds it, nor
+        while the generation's candidate is whole (`whole_candidate`: `adopt` it; folding again would replace it)."""
+        if (cand := self.whole_candidate()) is not None:
+            self.log(f"compact: {cand} is a whole candidate of {self.p.gen}: not folding again (`adopt` catches it up and promotes it)")
+            return
         jobs = [(name, upkeep(spec, "fold")) for name, spec in self.compact_jobs(scan)]
         if jobs:
             # the first job folds and publishes: its run is recorded (`compact-r2`, the R2 account's, isn't)
             jobs[0] = (jobs[0][0], self.record_env(*jobs[0]))
-            if self.compacting is not None and not self.dry_run and not self.candidate:
-                lease = CoordinatorLease(self.compacting(), holder=jobs[0][0], now=self.now, ttl_s=COMPACT_START_S, extra={"gen": self.p.gen},
-                                         what="compaction lease", log=self.log, region=self.p.region,
-                                         ended=self.job_ended or job_ended(self.p.project), fallback_region=self.p.region)
+            if self.compacting is not None and not self.dry_run:
+                lease = CoordinatorLease(self.compacting(), holder=jobs[0][0], now=self.now, ttl_s=COMPACT_START_S,
+                                         extra=compaction_extra(self.p.gen, self.candidate), what="compaction lease", log=self.log,
+                                         region=self.p.region, ended=self.job_ended or job_ended(self.p.project), fallback_region=self.p.region)
                 try:
                     lease.take()
                 except Busy as e:
@@ -2195,7 +2231,106 @@ class Runner:
                 self.stage(f"compact: {self.compaction}" if i == 0 else f"compact: {spec['labels']['stage']}", one)
         except StillRunning as e:
             self.log(f"compact: {e}; it publishes the new generation (GCS, then R2) when done, "
-                     + ("a candidate: `promote` points prod at it" if self.candidate else "and the next run appends to it"))
+                     + ("a candidate: `adopt` catches it up and promotes it" if self.candidate else "and the next run appends to it"))
+
+    def whole_candidate(self) -> str | None:
+        """The generation's candidate when its fold finished (`next_gen`: `candidate.json` naming this generation, and
+        `compaction.json`) and nothing points at it yet (no `successor.json` here); else None."""
+        new = next_gen(self.p.gen)
+        at = f"{self.store_prefix}/{new}"
+        if self.exists(f"{self.root}/{SUCCESSOR}") or not (self.exists(f"{at}/{CANDIDATE}") and self.exists(f"{at}/{COMPACTION}")):
+            return None
+        return new if self.read_json(f"{at}/{CANDIDATE}").get("from") == self.p.gen else None
+
+    def gen_scans(self, gen: str) -> list[str]:
+        """The scans generation `gen` holds: its base's, then its newest manifest's runs' (`have`'s, for any generation)."""
+        root = f"{self.store_prefix}/{gen}"
+        keys = manifest_keys([k.removeprefix(f"{root}/") for k in self.list_keys(f"{root}/manifests/")])
+        runs = self.read_json(f"{root}/{keys[-1]}")["runs"] if keys else []
+        return scans_of(self.read_json(f"{root}/scans.json"), runs)
+
+    def lacking(self, old: str, new: str) -> list[str]:
+        """The scans generation `old` holds and `new` doesn't, oldest first."""
+        have = set(self.gen_scans(new))
+        return [s for s in self.gen_scans(old) if s not in have]
+
+    def promote_jobs(self, scan: str, old: str, new: str) -> list[tuple[str, dict]]:
+        """The Batch jobs, in order, that point prod at candidate `new` (`promote_gen`: `old`'s `successor.json`, the store's
+        pointer, then the R2 copy's), `scan` its newest."""
+        raise NotImplementedError
+
+    def catch_up(self, new: str, through: str) -> list[str]:
+        """Append to candidate `new` every published scan through `through` it lacks (`run(through, catch_up=True)`), under
+        its own coordinator lease (`coordinator_prefix`), its compaction deferred (a candidate is never folded). Returns
+        the scans appended."""
+        saved = self.cfg, self.defer_compaction, self.compact_now, self.compaction, self.deferred, self.copied
+        self.cfg, self.defer_compaction, self.compact_now, self.copied = self.with_gen(new), True, False, set()
+        try:
+            self.log(f"adopt: catching {new} up through {through}")
+            return self.run(through, catch_up=True)
+        finally:
+            self.cfg, self.defer_compaction, self.compact_now, self.compaction, self.deferred, self.copied = saved
+
+    def adopt(self, *, rounds: int = ADOPT_ROUNDS, wait_s: float = ADOPT_WAIT_S, poll_s: float = ADOPT_POLL_S,
+              sleep: Callable[[float], None] = time.sleep) -> dict | None:
+        """The generation's whole candidate (`whole_candidate`), caught up and promoted (specs/candidate-compaction.md):
+        each round appends the scans the generation gained since (`catch_up`), then takes the generation's coordinator
+        lease (the one its appends hold: retried every `poll_s` while one runs, `wait_s` in all) and, when nothing landed
+        meanwhile, runs `promote_jobs` to their end under it; when something did, the lease is let go and the next round
+        catches that up. Returns `{from, gen, rounds, appended, promoted}`, `promoted` false once `rounds` or `wait_s` ran
+        out, or when another coordinator holds the candidate's lease (it is adopting it); a later `adopt` resumes. None
+        when there's no whole candidate."""
+        self.follow()
+        old = self.p.gen
+        if (new := self.whole_candidate()) is None:
+            self.log(f"adopt: {old} has no whole candidate")
+            return None
+        appended: list[str] = []
+        waited = 0.0
+
+        def done(i: int, promoted: bool) -> dict:
+            return {"from": old, "gen": new, "rounds": i, "appended": appended, "promoted": promoted}
+
+        def hold(stack: ExitStack) -> Callable[[], None] | None:
+            nonlocal waited
+            while True:
+                try:
+                    return stack.enter_context(self.coordination()) if self.coordination is not None else (lambda: None)
+                except Busy as e:
+                    if waited + poll_s > wait_s:
+                        self.log(f"adopt: {e}; waited {waited / 3600:.1f} h for {old}'s coordinator lease: giving up for now")
+                        return None
+                    self.log(f"adopt: {e}; retrying in {poll_s:.0f}s")
+                    sleep(poll_s)
+                    waited += poll_s
+
+        for i in range(1, rounds + 1):
+            if lack := self.lacking(old, new):
+                try:
+                    appended += self.catch_up(new, lack[-1])
+                except Busy as e:
+                    self.log(f"adopt: {e}: another coordinator is catching {new} up")
+                    return done(i, False)
+            if self.dry_run:
+                self.log(f"adopt: would promote {new} under {old}'s coordinator lease")
+                return done(i, False)
+            with ExitStack() as stack:
+                if (check := hold(stack)) is None:
+                    return done(i, False)
+                if lack := self.lacking(old, new):
+                    self.log(f"adopt: {old} gained {len(lack)} scan{'s' * (len(lack) != 1)} meanwhile ({lack[0]} … {lack[-1]}): catching up again")
+                    continue
+                self.check_lease = check
+                try:
+                    for name, spec in self.promote_jobs(self.gen_scans(new)[-1], old, new):
+                        self.stage(f"promote {new}: {spec['labels']['stage']}", lambda name=name, spec=spec: self.run_job(name, spec, wait=None))
+                finally:
+                    self.check_lease = None
+            self.cfg = self.with_gen(new)
+            self.log(f"adopt: {new} promoted after {i} round{'s' * (i != 1)} ({len(appended)} scans caught up)")
+            return done(i, True)
+        self.log(f"adopt: {old} kept gaining scans through {rounds} rounds: {new} not promoted yet")
+        return done(rounds, False)
 
     def carries(self, fatal: bool = False) -> None:
         """The merge stage, once after the scans: the newest manifest's due carries (`plan_carries`), when any, as one Batch
@@ -2785,11 +2920,12 @@ def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, le
                    **kw) -> dict:
     """`compact_generation` (`kw` its options) holding the compaction lease (`lease`, `compaction_lease`) on the
     generation, followed to its newest successor, from before it is read until the job ends: appends to it wait meanwhile
-    (`Runner.wait_compaction`). Raises `Busy` while another live compaction holds the lease."""
+    (`Runner.wait_compaction`), but for a candidate's (`promote` off: its record says `candidate`, and only another
+    compaction is refused). Raises `Busy` while another live compaction holds the lease."""
     if lease is None:
         return compact_generation(store, c, gen, mount, work, log=log, **kw)
     gen = resolve_gen(store, c.prefix, gen, log)
-    with compaction_lease(lease, gen, log=log):
+    with compaction_lease(lease, gen, candidate=not kw.get("promote", True), log=log):
         return compact_generation(store, c, gen, mount, work, log=log, **kw)
 
 
@@ -2913,7 +3049,7 @@ def compact_options(fn):
         option("-K", "--compact-now", "force", is_flag=True, help="Compact whatever the policy says (when the generation has runs)"),
         option("-m", "--mount", required=True, help="Local mount of the data bucket (the fold reads the generation from it)"),
         option("-M", "--mem", default="100GB", help="The interval store's fold: its whole process tree's memory (`tree_mem`); the static store's: DuckDB's limit"),
-        option("-N", "--no-promote", "promote", is_flag=True, default=True, flag_value=False, help="A candidate: the new generation published (and copied to R2 with -r) but nothing pointed at it, the compaction lease not held (appends go on); `promote` points prod at it"),
+        option("-N", "--no-promote", "promote", is_flag=True, default=True, flag_value=False, help="A candidate: the new generation published (and copied to R2 with -r) but nothing pointed at it; the compaction lease marked `candidate` (appends go on, another compaction waits); `promote` points prod at it"),
         option("-p", "--threads", default=16, type=int, help="DuckDB threads"),
         option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy (`r2_publish_gen`: the new generation, its pointer last): the job has the R2 env"),
         option("-T", "--tmp", default="/stage/tmp", help="Work dir (the new generation is written here, then uploaded)"),

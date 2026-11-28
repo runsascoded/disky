@@ -44,7 +44,7 @@ from datetime import datetime
 from functools import partial
 from math import ceil
 
-from click import argument, command, option
+from click import IntRange, argument, command, option
 
 from . import append_runner as ar
 from .append_runner import (  # noqa: F401 — the shared names, as this module has always offered them
@@ -170,6 +170,14 @@ class Runner(ar.Runner):
 
             out = [(n, with_events(s, self.cfg.events_topic, ar.ALERT, None)) for n, s in out]
         return out
+
+    def promote_jobs(self, scan: str, old: str, new: str) -> list[tuple[str, dict]]:
+        """`static_merge promote -r` as one job when the stages' account holds the R2 credentials (`merge_r2`); else
+        `promote` (GCS) as the stages' account, then `compact-r2 -g OLD` as the R2 account (the chain's pointers, last)."""
+        if self.merge_r2():
+            return [self.job("promote", scan, 1, "static_merge", ["promote", "-r", new], r2=True, mount=False)]
+        return [self.job("promote", scan, 1, "static_merge", ["promote", new], mount=False),
+                self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", old], r2=True, mount=False)]
 
     def with_gen(self, gen: str) -> Profile:
         return replace(self.cfg, gen=gen)
@@ -490,6 +498,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
         coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(cfg.scratch, ar.coordinator_prefix(Store(f"gs://{cfg.bucket}"), PREFIX, runner.cfg.gen),
                                                                            client),
         compacting=None if dry_run or not cfg.scratch else lambda: ar.gcs_compaction_lease_file(cfg.scratch, PREFIX, client),
+        candidate=cfg.compact_candidate,
     )
     return runner
 
@@ -501,7 +510,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
 @option("-K", "--compact-now", is_flag=True, help="After the merge stage, compact into a new generation whatever the policy says (when the generation has runs)")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `runs merge`)")
 @option("-n", "--dry-run", is_flag=True, help="Report each stage's state and what would run; submit and write nothing")
-@option("-N", "--candidate", is_flag=True, help="The compaction (due, or -K) writes a candidate: published, nothing pointed at it, appends not held off (`static_merge promote` points prod at it)")
+@option("-N", "--candidate", is_flag=True, help="The compaction (due, or -K) writes a candidate: published, nothing pointed at it, appends not held off (`runs adopt` catches it up and promotes it; the profile's `compact_candidate` sets this)")
 @option("-t", "--verify-terms", help="Also run `runs verify` with this terms file (a gs:// URL)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @argument("scan_id")
@@ -516,7 +525,7 @@ def add_cmd(catch_up: bool, defer_compaction: bool, gen: str | None, compact_now
     runner = gcs_runner(cfg, dry_run=dry_run, verify_terms=verify_terms, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now
     runner.defer_compaction = defer_compaction
-    runner.candidate = candidate
+    runner.candidate = candidate or cfg.compact_candidate
     done = exit_on(f"static-names runs add {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m),
                    facts={"region": cfg.region, "project": cfg.project})
     print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction,
@@ -653,15 +662,37 @@ def r2_cmd(gen: str | None, manifest: str | None, dry_run: bool) -> None:
 def merge_cmd(gen: str | None, dry_run: bool, wait: float | None) -> None:
     """The newest manifest's due carries, on their own: first every listed run's missing drill / anchors (the profile's;
     `Runner.backfill`, then the R2 job for the newest manifest), then the merge job (`static_merge carry`), then R2 for the
-    revision it publishes (`runs add`'s merge stage, alone: for a schedule of its own, or to catch up). Exit 1 when either
+    revision it publishes (`runs add`'s merge stage, alone: for a schedule of its own, or to catch up), then a due
+    compaction. Under the profile's `compact_candidate` that compaction is a candidate, and once it is whole (this run's,
+    waited on, or an earlier one's) it is caught up and promoted (`Runner.adopt`; `adopt` in the JSON). Exit 1 when any
     fails (the store stays as it was: servable)."""
     cfg = ready(profile(), gen)
     runner = gcs_runner(cfg, dry_run=dry_run, merge_wait=wait)
     runner.compact_wait = wait
+    adopted: list[dict | None] = [None]
 
     def merge() -> None:
         if runner.backfill():
             runner.r2_newest()
         runner.carries(fatal=True)
+        if runner.candidate:
+            adopted[0] = runner.adopt()
     exit_on("static-names runs merge", merge, lambda m: err(m))
-    print(json.dumps({"gen": cfg.gen, "manifest": (runner.manifests() or [None])[-1], "dry_run": dry_run}))
+    print(json.dumps({"gen": cfg.gen, "manifest": (runner.manifests() or [None])[-1], "dry_run": dry_run, "adopt": adopted[0]}))
+
+
+@command("adopt")
+@option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN; followed to its newest successor)")
+@option("-n", "--dry-run", is_flag=True, help="Report the scans the candidate lacks and what would run; submit and write nothing")
+@option("-r", "--rounds", default=ar.ADOPT_ROUNDS, type=IntRange(min=1), help="Catch-up rounds before giving up for this run")
+def adopt_cmd(gen: str | None, dry_run: bool, rounds: int) -> None:
+    """The generation's whole candidate (`static_merge compact -N`, the profile's `compact_candidate`) caught up and
+    promoted (`append_runner.Runner.adopt`, specs/candidate-compaction.md): every scan the generation gained since the
+    fold appended to the candidate under the candidate's own coordinator lease, then `static_merge promote` under the
+    generation's (no scan's append runs meanwhile; one that landed is caught up first). Prints `{from, gen, rounds,
+    appended, promoted}` (`promoted` false: rounds or the wait ran out, or another coordinator is adopting it), or null
+    when there's no whole candidate."""
+    cfg = ready(profile(), gen)
+    runner = gcs_runner(cfg, dry_run=dry_run)
+    doc = exit_on("static-names runs adopt", lambda: runner.adopt(rounds=rounds), lambda m: err(m))
+    print(json.dumps(doc))
