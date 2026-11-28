@@ -4,7 +4,8 @@
 //! **Object versions** (`n_o` rows; a path's versions together, by `vf`):
 //! - validity + size, read for every row a pass sums: `vf`, `vt` (u16 scan ordinals), `size` (u64);
 //! - `name` (u32 dictionary id): only a search reads it (and hydration, for the ≤ M emitted object nodes);
-//! - `owner` (u16), `cls` (u8: class bits 2–3, `COMPLEX` bit 4, as the full index's flags): only owner / class filters;
+//! - `owner` (u16), `cls` (u8: the class slot in bits 2–3, `COMPLEX` bit 4, as the full index's flags; `classes` names
+//!   each slot's class, `classes.rs`): only owner / class filters;
 //! - `cont`: one bit per row, "another version of the previous row's path": read only where object paths are nodes
 //!   (depths in the view's window).
 //!
@@ -32,6 +33,8 @@ pub const CKD: usize = 4096;
 
 pub struct SlimIndex {
     pub scans: Vec<ScanInfo>,
+    /// Each class slot's class id (`classes.rs`; the pack's `classes`, `DEFAULT` when it doesn't record them).
+    pub classes: Vec<u8>,
     pub owners: Vec<String>,
     pub dict: Dict,
     pub vf: Col<u16>,
@@ -333,6 +336,7 @@ impl SlimIndex {
         let stats = json!({"rows": o, "dirs": nd, "dirs_with_own_versions": dself.len(), "dirs_dropped": idx.stats.dir_rows as usize - nd, "build_s": secs});
         Ok(SlimIndex {
             scans: idx.scans.clone(),
+            classes: idx.classes.clone(),
             owners: idx.owners.clone(),
             dict: Dict {
                 lower: idx.dict.lower.to_vec().into(),
@@ -391,6 +395,10 @@ impl SlimIndex {
         let cx = ComplexCols::of(&self.complex);
         cx.add(&mut w);
         let mut meta = json!({"scans": self.scans, "owners": self.owners, "stats": self.stats});
+        // Only when not `classes::DEFAULT`, which a pack without the key means (every pack written before the key was).
+        if let Some(c) = crate::classes::to_meta(&self.classes) {
+            meta["classes"] = c;
+        }
         if let Some(e) = &self.edge {
             w.add("edge_open", &e.open);
             meta["edge"] = json!({"shard": e.shard, "of": e.of, "lo": e.lo, "hi": e.hi, "first_cont": e.first_cont, "last_cont": e.last_cont});
@@ -404,6 +412,7 @@ impl SlimIndex {
         }
         Ok(SlimIndex {
             scans: serde_json::from_value(p.meta["scans"].clone())?,
+            classes: crate::classes::from_meta(p.meta.get("classes"))?,
             owners: serde_json::from_value(p.meta["owners"].clone())?,
             stats: p.meta["stats"].clone(),
             dict: p.dict("dict_")?,
@@ -552,6 +561,7 @@ impl SlimIndex {
         let stats = json!({"rows": n, "dirs": nd, "shard": shard, "of": of, "lo": lo, "hi": hi, "names": ids.len(), "open_dirs": open.len()});
         Ok(SlimIndex {
             scans: self.scans.clone(),
+            classes: self.classes.clone(),
             owners: self.owners.clone(),
             dict,
             vf: self.vf[lo..hi].to_vec().into(),

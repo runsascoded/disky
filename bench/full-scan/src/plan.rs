@@ -104,7 +104,8 @@ pub fn plan(idx: &Index, pool: &rayon::ThreadPool) -> Result<(Vec<Query>, serde_
     }
     let mut owners: Vec<(u64, String)> = own.iter().filter(|(&o, _)| o != 0).map(|(&o, &b)| (b, idx.owners[o as usize].clone())).collect();
     owners.sort_by(|a, b| b.cmp(a));
-    let cls_pick: Vec<u8> = (1..4u8).filter(|&k| cls[k as usize] > 0).map(|k| k + 1).collect();
+    // The store's class columns (slots 1..) holding bytes, by class id.
+    let cls_pick: Vec<u8> = (1..idx.classes.len()).filter(|&k| cls[k] > 0).map(|k| idx.classes[k]).collect();
 
     // Rare terms: names of 8+ characters (files' or folders'), sampled by hash, whose search matches 1–1,000 live files.
     let _ = &name_files;
@@ -402,7 +403,8 @@ pub fn exhaustive(idx: &Index) -> Vec<Query> {
             x.owners = Some(owners[k % owners.len()].clone());
             variants.push(x);
             let mut x = base.clone();
-            x.classes = Some(vec![1 + (k % 4) as u8, 1 + ((k + 2) % 4) as u8]);
+            let cs = &idx.classes;
+            x.classes = Some(vec![cs[k % cs.len()], cs[(k + 2) % cs.len()]]);
             variants.push(x);
             let mut x = base.clone();
             x.staged = Some(staged.clone());

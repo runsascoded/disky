@@ -10,7 +10,9 @@
 //! - **Owners**: a file's slices are its `us` (`''` → no owner; a name → that owner, all bytes; JSON → each entry, plus
 //!   the unnamed rest when positive). `{"in": [...]}` sums the named owners' slices (`""` = no owner), `{"not_in": …}`
 //!   the others'; a file counts when it holds a selected slice.
-//! - **Classes**: slices `c2..c4` where positive, class 1 the rest when positive (a file with neither: class 1, 0 B).
+//! - **Classes**: each of the store's class columns where positive (`c2..c4` by default; `classes.rs`), class 1 the
+//!   rest when positive (a file with neither: class 1, 0 B). A query names classes by id; one the store doesn't hold is
+//!   an error.
 //! - Owners and classes together: per file, the class filter gates the owner sum when the file is in one class, else
 //!   the owner filter gates the class sum when it has one owner; a file with several of both is an error.
 //! - **Staged**: only files at or under one of the prefixes.
@@ -104,7 +106,7 @@ pub struct Compiled {
     pub min_ppm: u64,
     pub search: Option<Search>,
     pub owners: Option<Vec<bool>>,
-    /// Bit k−1 for class k.
+    /// Bit k for class slot k (`classes.rs`).
     pub classes: Option<u8>,
     /// Merged `[first, last]` row spans of the staged prefixes.
     pub staged: Option<Vec<(u32, u32)>>,
@@ -237,16 +239,10 @@ pub fn compile_owners(owners: &[String], sel: &OwnerSel) -> Vec<bool> {
     owners.iter().map(|o| names.contains(o) == keep).collect()
 }
 
-/// Bit k−1 for class k.
-pub fn compile_classes(v: &[u8]) -> Result<u8> {
-    let mut m = 0u8;
-    for &k in v {
-        if !(1..=4).contains(&k) {
-            return err(format!("class {k}: classes are 1..4"));
-        }
-        m |= 1 << (k - 1);
-    }
-    Ok(m)
+/// A query's classes as the index's slot bits (`classes.rs`): bit k for slot k; a class the store doesn't hold is an
+/// error.
+pub fn compile_classes(slots: &[u8], v: &[u8]) -> Result<u8> {
+    crate::classes::mask(slots, v)
 }
 
 pub fn compile(idx: &Index, q: &Query, parts: usize) -> Result<Compiled> {
@@ -267,7 +263,7 @@ pub fn compile(idx: &Index, q: &Query, parts: usize) -> Result<Compiled> {
     };
     let search = q.q.as_ref().map(|e| compile_search(&idx.dict, e, parts)).transpose()?;
     let owners = q.owners.as_ref().map(|sel| compile_owners(&idx.owners, sel));
-    let classes = q.classes.as_ref().map(|v| compile_classes(v)).transpose()?;
+    let classes = q.classes.as_ref().map(|v| compile_classes(&idx.classes, v)).transpose()?;
     let staged = q.staged.as_ref().map(|ps| {
         let mut iv: Vec<(u32, u32)> = ps.iter().filter_map(|p| idx.find(p)).map(|g| (g as u32, idx.end[g])).collect();
         iv.sort_unstable();

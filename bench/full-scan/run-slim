@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The slim-index measurements (specs/full-scan-serving-bench.md § Slim index, cold start, small RAM) on a bench node.
-#   run-slim pack GEN DIR                 the full pack (`DIR/full.fsb`) from the store, then the slim one (`DIR/slim.fsb`)
+#   run-slim pack GEN DIR                 the full pack (`DIR/full.fsb`) from the store, then the slim one (`DIR/slim.fsb`);
+#                                         `$CLASSES`: the store's class columns (`fsb -C`), unless they are `c2`..`c4`
 #   run-slim cold DIR LABEL Q             time to the first answer (Q: a one-query file), per pack, from the page cache
 #                                         and with caches dropped (prefaulted, lazily mapped, read into memory)
 #   run-slim threads DIR Q REF            the slim pack at 2, 4, 8, 16 threads, each pinned to that many vCPUs as whole
@@ -20,7 +21,7 @@ case $cmd in
   pack)
     gen=$1 dir=$2
     mkdir -p "$dir"
-    log pack; /usr/bin/time -f "%e s, %M KB" $fsb pack "$gen" -o "$dir/full.fsb" > "$out/pack.json" 2> "$out/pack.log"
+    log pack; /usr/bin/time -f "%e s, %M KB" $fsb pack "$gen" -o "$dir/full.fsb" ${CLASSES:+-C "$CLASSES"} > "$out/pack.json" 2> "$out/pack.log"
     tail -1 "$out/pack.log" >&2
     log slim; /usr/bin/time -f "%e s, %M KB" $fsb slim "$dir/full.fsb" -o "$dir/slim.fsb" > "$out/slim.json" 2> "$out/slim.log"
     tail -1 "$out/slim.log" >&2

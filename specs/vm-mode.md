@@ -1,6 +1,6 @@
 # VM mode, phase 1: an exact in-memory query server beside the Worker
 
-Status: phase 1 built, tested and measured on `w/vm-mode`, 2026-11-14 (§ 11); Ryan's decisions of 2026-11-14 on § 10 items 1, 2, 4 and 6 implemented (the cell rule's default, `(other)`, the writer's own Batch job, `fsb` behind a build arg); not wired to any site, and no deployment's profile or image config turns the step on yet. Ryan's go: "#28: yes go" (2026-11-13), including a standing VM (one shared n2-highmem-16, ~$230–770/month, 24/7 for a few months, then re-evaluated). Builds on [full-scan-serving-bench.md] (the engine and its measurements) and [serverless-tiers.md] §5 (the hand-off contract), §6 (phasing) and §7 (Ryan's decisions), which bind this work. Nothing here changes a deployment: no live site wiring, no serving VM, no D1, secret or Pulumi apply.
+Status: phase 1 built, tested and measured on `w/vm-mode`, 2026-11-14 (§ 11); Ryan's decisions of 2026-11-14 on § 10 items 1, 2, 4 and 6 implemented (the cell rule's default, `(other)`, the writer's own Batch job, `fsb` behind a build arg); not wired to any site, and no deployment's profile or image config turns the step on yet. Ryan's go: "#28: yes go" (2026-11-13), including a standing VM (one shared n2-highmem-16, ~$230–770/month, 24/7 for a few months, then re-evaluated). Builds on [full-scan-serving-bench.md] (the engine and its measurements) and [serverless-tiers.md] §5 (the hand-off contract), §6 (phasing) and §7 (Ryan's decisions), which bind this work. Nothing here changes a deployment: no live site wiring, no serving VM, no D1, secret or Pulumi apply. Class columns come from the deployment's `CLASS_COLS` and are recorded in the pack (§ 6.1; 2026-11-28, after hf's first `vm-pack` step failed on `no column 'c2'`).
 
 ## 0. Summary
 
@@ -34,7 +34,7 @@ A view is the bench's query ([full-scan-serving-bench.md] "Query"; `src/query.rs
 - **Scans:** `scan` (a view), or `from` and `to` (a diff). Scan ids, never timestamps; the pack's scans are its generation's.
 - **Folder** `path` (`""` = the deployment's root).
 - **Search** `q`: the Worker's parsed `QueryAst` (`site/functions/_lib/queryAst.ts`), never the raw text (§ 4.4).
-- **Owners** `{"in": [...]}` / `{"not_in": [...]}` (`""` = no owner); **classes** `[1..4]`; **staged** prefixes (the overlay's regions inside D, resolved by the Worker at the overlay head, [serverless-tiers.md] §5.1).
+- **Owners** `{"in": [...]}` / `{"not_in": [...]}` (`""` = no owner); **classes** by the deployment's class ids, those its pack holds (§ 6.1: gcs 1–4, hf 1, 5, 6); **staged** prefixes (the overlay's regions inside D, resolved by the Worker at the overlay head, [serverless-tiers.md] §5.1).
 - **Owners are the store's attribution** (each object version's folded `us` slices, [interval-store.md] §2.2), as the bench's oracle defines them. The live ledger (D1 `owner_prefixes` / `actions`, which the Worker folds into owner pools and lenses at query time) isn't applied in phase 1: an owner-scoped answer is exact for the store's attribution, and differs from the Worker's wherever a live claim repaints a path. The wiring phase sends the claims inside D as regions (`owner_regions: [{prefix, owner}]`, newest action winning, as `ledger.ts` folds them), which the pass applies per row like staged prefixes.
 - **Cell rule** `cell`: `share_log2`, `atten_log2`, `depth` (below).
 
@@ -97,7 +97,7 @@ The boundary is what a fan-out over big serverless functions would use ([serverl
 | `POST /v1/view` | the Worker | one view or diff, answered whole (shards merged) |
 | `POST /v1/shard` | a merging caller | one shard's partial answer (`shard`: its index; `floor`) |
 | `POST /v1/merge` | a merging caller | shards' partial answers (`answers`, from any machines) merged and cut: the view's answer (no pack needed) |
-| `GET /v1/status` | the Worker, the waker, ops | per tenant: `state`, `gen`, `manifest`, `scans`, `loaded_at`, `pack_bytes`, `shards` |
+| `GET /v1/status` | the Worker, the waker, ops | per tenant: `state`, `gen`, `manifest`, `scans`, `classes` (the class ids a request may name, § 6.1), `loaded_at`, `pack_bytes`, `shards` |
 | `GET /healthz` | the load balancer | `ok` (unsigned, no tenant data) |
 
 Every `/v1/*` call is signed (§ 4.3) for one tenant (`x-disky-tenant`); `status` lists only that tenant.
@@ -141,7 +141,7 @@ Response `200`:
 A diff's nodes and total carry `bytes_to` / `objects_to` beside `bytes` / `objects` (the `from` side). `tree.name` is the folder's last segment, `""` at the root (the Worker substitutes its `ROOT_LABEL`).
 
 Errors (JSON `{"error": code, "message": …}`):
-- `400 bad-request`: malformed, an unknown scan, a class outside 1–4, more than 16 search atoms.
+- `400 bad-request`: malformed, an unknown scan, a class the pack doesn't hold (`class 2: this store's classes are 1, 5, 6`; § 6.1), more than 16 search atoms.
 - `401 bad-signature` / `401 stale`: § 4.3.
 - `404 unknown-tenant`.
 - `409 pins`: the tenant's loaded pins differ from the request's; the body carries the loaded ones (`have`), so the Worker can answer 202 and wait for the reload ([serverless-tiers.md] §5.2).
@@ -187,16 +187,22 @@ The search language is the site's, and which backend answers never changes what 
 
 ## 6. The pack writer
 
-### 6.1 `fsb pack-slim GEN -o FILE`
+### 6.1 `fsb pack-slim GEN -o FILE [-C K=COLUMN,…]`
 
 The store → slim pack in one process: the loader (§ As built in [full-scan-serving-bench.md]), then the slim index, written without the full pack (saves the full pack's 237 s write and its 48 GB). The loader's peak is unchanged (117 GB for gcs, § 11.3), so gcs's writer runs on a 128 GB machine; cw's, at ~1/8 of gcs's versions, should peak near 15 GB (an estimate: not run); the small deployments on anything.
+
+**Class columns and slots** (`src/classes.rs`). An object version's bytes split into storage classes: each of the store's class columns holds one class's bytes, and class 1 is the rest of `size`. The store doesn't record which class a column holds (its `scans.json` and served sorts carry the names only), so the deployment names them:
+- **Which columns:** a `path` sort's class columns are those between `wb` and `us` (where every interval-store version table holds them, `interval_store.CLASS_COLS`). `-C K=COLUMN,…` gives each one's class id; `dt-cloud vm-pack build` passes the deployment's `interval_store.CLASS_COLS`, the one definition its store was written by. Without `-C` each must be named `c<K>`. In a file, class K's column is its named column, else `c<K>` (a generation written before the deployment renamed them).
+- **Per deployment** (each branch's `CLASS_COLS`): gcs `-C 2=nearline_bytes,3=coldline_bytes,4=archive_bytes`; cw and r2 `-C 2=c2,3=c3,4=c4` (S3 tiers, the cloud default; the r2 demo the same); hf `-C 5=private_bytes,6=git_bytes` (`disk_tree.listing.HF_CLASS_IDS`: public 1, private 5, unbilled git 6). An empty `-C` means none.
+- **Slots:** the index keeps a version's class in one of 4 slots (2 bits of its flags; a split version's slices per slot): slot 0 is class 1, slots 1–3 the class columns by ascending id. So at most 3 class columns: more is an error naming them, as is a class column `-C` doesn't name (never a silent drop). A store with none packs everything as class 1.
+- **Recorded in the pack:** the header's `meta.classes` lists each slot's class (hf `[1, 5, 6]`, none `[1]`), and is left out when it is `[1, 2, 3, 4]`, which a pack without it means: gcs's, cw's and r2's packs are byte for byte what they were (the nine fixtures' packs, as committed and under gcs's names with gcs's `-C`, equal digests taken from the writer before slots were recorded: `tests/packs.rs`). `vmd` maps a request's class ids onto slots through it (`classes::mask`), answers `400` for a class the pack doesn't hold, and lists them in `/v1/status` (`classes`).
 
 ### 6.2 `dt-cloud vm-pack build -o STORE [-w WORK] [--fsb PATH]`
 
 1. Read `<STORE>/interval-store/CURRENT.json` and the generation's newest manifest (as `fetch-gen` / the site's `newestManifest` choose it).
 2. Skip when `<STORE>/vm-pack/CURRENT.json` already names this generation and manifest (idempotent: a rerun or a later scan's catch-up does nothing twice).
 3. Mirror what `fsb` reads (`scans.json`, the manifest, the base's and each listed run's `served/path.parquet`) into `WORK`, through `blobstore.Store` (gs://, s3://, r2://, a dir).
-4. Run `fsb pack-slim`, then upload `vm-pack/<gen>/<manifest stem>.fsb` and, last, `vm-pack/CURRENT.json` = `{gen, manifest, key, bytes, sha256, scans, written}`. Before the pointer, the store's newest is read again: when another manifest (or generation) landed while this one was packed (two scans' jobs overlapping), the pack stays written but the pointer and pruning are left to the newer job (`"superseded": true`), so a late job never moves the pointer back. (A read-then-write, not a compare-and-swap: two jobs finishing within the same second could still race; the next scan's job repairs it.)
+4. Run `fsb pack-slim -C <the deployment's CLASS_COLS>` (§ 6.1), then upload `vm-pack/<gen>/<manifest stem>.fsb` and, last, `vm-pack/CURRENT.json` = `{gen, manifest, key, bytes, sha256, scans, written}`. Before the pointer, the store's newest is read again: when another manifest (or generation) landed while this one was packed (two scans' jobs overlapping), the pack stays written but the pointer and pruning are left to the newer job (`"superseded": true`), so a late job never moves the pointer back. (A read-then-write, not a compare-and-swap: two jobs finishing within the same second could still race; the next scan's job repairs it.)
 5. Keep the previous pack (the VM may still serve it); `--keep N` (default 2) deletes older ones under `vm-pack/`.
 
 `fsb` comes from `--fsb`, `$FSB`, or `PATH`; the job image carries it when built with `FSB=build` (§ 6.4).
@@ -263,7 +269,7 @@ The slim pack holds sizes, validity, names, owners and classes only. A VM answer
 
 ### 8.2 Fixtures (CI-sized)
 
-For all nine interval-store fixture generations, the exhaustive query mix with cell-rule twins (`fsb plan -c`) through `vmd`'s HTTP API at N = 1 and N = 4 logical shards and N = 3 and 7 physical shard packs, every answer equal across layouts and to the oracle's; every 5th also merged across HTTP from the 7 shards' `/v1/shard` answers (`bench/full-scan/check-vmd`). Not yet in CI: it needs Rust and DuckDB on a runner (a job like the site's, ~10 minutes); today it runs on a bench node.
+For all nine interval-store fixture generations, the exhaustive query mix with cell-rule twins (`fsb plan -c`) through `vmd`'s HTTP API at N = 1 and N = 4 logical shards and N = 3 and 7 physical shard packs, every answer equal across layouts and to the oracle's; every 5th also merged across HTTP from the 7 shards' `/v1/shard` answers (`bench/full-scan/check-vmd`). Not yet in CI: it needs DuckDB beside Rust on a runner; today it runs on a bench node. CI's `full-scan` job (`.github/workflows/ci.yml`, the Dockerfile's Rust 1.91) runs `cargo test` (the unit tests; `tests/packs.rs`, every fixture's slim pack against its pinned digest; `tests/classes.rs`, an hf-shaped store and one without class columns through the loader, both passes, the pack and `vmd`) and the release build of `fsb` and `vmd`.
 
 ### 8.3 Real data
 
@@ -293,7 +299,7 @@ For all nine interval-store fixture generations, the exhaustive query mix with c
 ### 11.1 Where the code is
 
 The engine and the server are `bench/full-scan/` (the crate graduates to its own directory when the site is wired):
-- `src/cell.rs` the cell rule; `src/shard.rs` / `src/merge.rs` the two layers; `src/slim_scan.rs` the pass (`shard_pass`, `run_sharded`); `src/slim.rs` the slim index (+ `slice`: physical shards; `dever`: § 11.4); `src/serve.rs` + `src/bin/vmd.rs` the server.
+- `src/cell.rs` the cell rule; `src/classes.rs` the class columns and slots (§ 6.1); `src/shard.rs` / `src/merge.rs` the two layers; `src/slim_scan.rs` the pass (`shard_pass`, `run_sharded`); `src/slim.rs` the slim index (+ `slice`: physical shards; `dever`: § 11.4); `src/serve.rs` + `src/bin/vmd.rs` the server.
 - `fsb pack-slim`, `fsb shard`, `fsb plan -c` (the exhaustive mix plus cell-rule twins).
 - `check-vmd` (+ `oracle/vmd_check.py`), `run-vmd` + `vmd_bench.py` + `vmd_summary.py` (the measurements), `vmd_client.py` (the signed client), `worker_parity.py` (§ 11.3).
 - `cloud/src/dt_cloud/vm_pack.py` (`dt-cloud vm-pack build|submit|current`: `job_id`, `job_spec`, `submit`), the `vm-pack` step (`scan_steps.py`, `options.vm-pack.batch`), tests `cloud/tests/test_vm_pack.py` + `test_scan_steps.py`.

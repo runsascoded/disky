@@ -2,6 +2,7 @@
 //! view (scan or diff, folder, search, owner, class, staged) answered by one bounded pass.
 
 pub mod cell;
+pub mod classes;
 pub mod col;
 pub mod dict;
 pub mod index;
