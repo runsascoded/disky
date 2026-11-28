@@ -310,6 +310,36 @@ jobs:
       - name: Site tests
         run: cd site && timeout 900 pnpm vitest run --testTimeout=20000
 
+  # VM mode's pack writer and server (`bench/full-scan`: `fsb`, `vmd`). Nothing else compiles the crate before a
+  # deployment's image build does (`job/Dockerfile` `FSB=build`), or the VM pilot's box at boot. The toolchain is the
+  # Dockerfile's (`rust:1.91-slim-bookworm`: the newest 1.91.x), the release build its own (no debug info, `--locked`).
+  full-scan:
+    if: github.event_name != 'workflow_dispatch'
+    name: bench/full-scan (cargo test, fsb + vmd release build)
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.91"
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    defaults:
+      run:
+        working-directory: bench/full-scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal && rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench/full-scan
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: Release build (fsb, vmd)
+        run: cargo build --release --locked --bin fsb --bin vmd
+
   fleet:
     if: github.event_name != 'workflow_dispatch'
     name: Fleet app typecheck, build + tests
