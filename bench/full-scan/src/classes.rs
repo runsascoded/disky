@@ -110,7 +110,10 @@ pub fn columns(cs: &[(u8, String)], region: &[String]) -> Result<Vec<String>> {
             .iter()
             .position(|x| x == c)
             .or_else(|| region.iter().position(|x| *x == canon))
-            .ok_or_else(|| format!("no column for class {k} (`{c}` or `{canon}`) among its class columns {region:?}"))?;
+            .ok_or_else(|| {
+                let names = if *c == canon { format!("`{c}`") } else { format!("`{c}` or `{canon}`") };
+                format!("no column for class {k} ({names}) among its class columns {region:?}")
+            })?;
         if used[i] {
             return err(format!("column `{}` claimed by two classes ({})", region[i], named(cs)));
         }
@@ -216,6 +219,11 @@ mod tests {
         let hf = cols(&[(5, "private_bytes"), (6, "git_bytes")]);
         assert_eq!(columns(&hf, &names(&["private_bytes", "git_bytes"])).unwrap(), names(&["private_bytes", "git_bytes"]));
         assert_eq!(msg(columns(&hf, &names(&["private_bytes"]))), "no column for class 6 (`git_bytes` or `c6`) among its class columns [\"private_bytes\"]");
+        // cloud's default `-C` on hf's store (a shared box's checkout).
+        assert_eq!(
+            msg(columns(&cols(&[(2, "c2"), (3, "c3"), (4, "c4")]), &names(&["private_bytes", "git_bytes"]))),
+            "no column for class 2 (`c2`) among its class columns [\"private_bytes\", \"git_bytes\"]"
+        );
         assert_eq!(
             msg(columns(&hf, &names(&["private_bytes", "git_bytes", "public_bytes"]))),
             "class columns [\"public_bytes\"] are no class's (classes: 5=private_bytes, 6=git_bytes): name each (`-C K=COLUMN,…`)"

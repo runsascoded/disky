@@ -179,6 +179,8 @@ sudo systemd-run --wait --pipe --slice=scan.slice /usr/local/lib/disky/with-secr
   dt-cloud vm-pack build -o r2://oa-r2-usage-index -w /var/lib/disky/work/vm-pack
 ```
 
+The box's checkout is `cloud`'s, so `vm-pack build` names the store's class columns from `cloud`'s `interval_store.CLASS_COLS` (`c2`..`c4`: r2's too). hf's store names its own: build hf's first pack with `-C 5=private_bytes,6=git_bytes` (specs/vm-mode.md §6.1; without it the pack is refused, `no column for class 2`).
+
 ### Teardown
 
 1. GCP first (it stops the tunnel's connector): the account and the three secret containers are `protect`ed (the components' convention), so `pulumi state unprotect --all -s shared`, then `pulumi destroy -s shared` in `infra/gcp/shared`. The tenants' job accounts are untouched (only this stack's token-creator members on them go).
