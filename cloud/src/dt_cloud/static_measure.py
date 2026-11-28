@@ -377,15 +377,18 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
 
     def batches():
         prog = Progress(f"measure {kind}", len(ranges), unit="q ranges")
+        joining = f"measure {kind}: joining {len(ranges)} q ranges"
+        set_stage(joining)
         for i, (lo, hi) in enumerate(ranges):
             if i in verify:
                 cut = con.execute(part(i, lo, hi)).to_arrow_table()
-                set_stage(f"measure {kind}: range {i} checked uncut")
+                set_stage(f"measure {kind}: checking range {i} against the uncut join")
                 t1 = monotonic()
                 whole = con.execute(part(i, lo, hi, uncut=True)).to_arrow_table()
                 if not cut.equals(whole):
                     raise RuntimeError(f"measure {kind}: range {i} [{lo}, {hi}) cut ({cut.num_rows:,} rows) differs from uncut ({whole.num_rows:,})")
                 err(f"measure {kind}: range {i} [{lo}, {hi}): cut = uncut, {cut.num_rows:,} rows (uncut in {fmt_secs(monotonic() - t1)})")
+                set_stage(joining)
                 yield from cut.to_batches(ARROW_BATCH_ROWS)
             else:
                 yield from con.execute(part(i, lo, hi)).to_arrow_reader(ARROW_BATCH_ROWS)
