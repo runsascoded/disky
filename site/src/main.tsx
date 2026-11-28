@@ -12,6 +12,7 @@ import { withoutOg, withoutSso } from './sharePreview'
 import { migrateSection } from './homeSections'
 import { bootSessionLog } from './sessionLogBoot'
 import { forwardPs } from './pathStoreParam'
+import { forwardBe } from './backend'
 import { describeUrlParams } from './urlParams'
 import { QUERY_DEFAULTS } from './queryDefaults'
 import { watchApiShape } from './apiShape'
@@ -37,6 +38,9 @@ if (migrated != null) history.replaceState(history.state, '', `${location.pathna
 
 // `?ps=…`: every `/api/` request reads the path store the page names (`pathStoreParam.ts`).
 forwardPs(window)
+// VM mode's session pin (`backend.ts`): a `vm` pin rides in the page's URL and on its `/api/` requests, and the map
+// answers say which backend gave them (the top bar's badge).
+forwardBe(window)
 // The URL params' descriptions, for the "URL params" dialog (`urlParams.ts`).
 describeUrlParams()
 

@@ -40,6 +40,7 @@ import { UserCard, ghHandle, shortName } from './UserChip'
 import { useUnits } from './units'
 import { Tooltip } from './Tooltip'
 import { useScrollSpyPref } from './prefs'
+import { BackendBadge } from './BackendBadge'
 
 /** The deployment's mark (`MARK`, `scripts/marks/`): the favicon, and the header's logo beside the title — a store's own
  *  `mark` instead while its routes are open, as the tab icon does (`marks.ts`). */
@@ -134,6 +135,7 @@ export function SiteNav({ children, menu, crumbs }: {
         <NavMenu extra={menu} />
         {mark && <Link to="/" className="tb-mark" aria-label="home"><img src={`/icons/${mark}.svg`} alt="" width={24} height={24} /></Link>}
         {crumbs ? <div className="tb-crumbs" ref={crumbsRef}>{crumbs}</div> : <div className="tb-mid">{children}</div>}
+        <BackendBadge />
         <UserMenu />
         <SiteDialogs />
       </div>

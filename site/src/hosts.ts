@@ -42,8 +42,8 @@ const needs = (peer: Peer, root: string): boolean =>
     : true
 /** Query params naming this deployment's own things: a scan (`d`; the legacy `date`/`from`), an owner (`o`), an
  * assigner (`by`), an object (`open`), a bucket, a user page's drill (`p`), a staged run (`run`), a sign-in's
- * return path (`next`). */
-const LOCAL_PARAMS = ['bucket', 'by', 'd', 'date', 'from', 'next', 'o', 'open', 'p', 'run']
+ * return path (`next`), the session's backend pin (`be`: a peer's VM mode, if any, is its own tenant). */
+const LOCAL_PARAMS = ['be', 'bucket', 'by', 'd', 'date', 'from', 'next', 'o', 'open', 'p', 'run']
 
 /** The page a peer serves for this one, on the peer's dev host from this deployment's dev host, else its prod.
  * A page keeps its route up to the first id of this deployment's (a scan run, a deletion run, a session), and its
