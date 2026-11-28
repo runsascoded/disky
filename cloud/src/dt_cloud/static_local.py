@@ -662,8 +662,11 @@ def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, s
         t = step("drill/write/measure", t)
     else:
         tiers, base_meas = incremental
-        sme.incremental_measure(con, tiers, base_meas, str(gen_dir / "catalog" / "members.parquet"), meas, floor=floor)
-        t = step("drill/measure/incremental", t)
+        mdoc = sme.incremental_measure(con, tiers, base_meas, str(gen_dir / "catalog" / "members.parquet"), meas, floor=floor)
+        # what the measurement's cost goes with, in the step's line (and the run's phase note, kept): per kind the runs'
+        # counts, the floor crossers counted from the base, and the `q` ranges joined
+        t = step("drill/measure/incremental", t, **{f"{k}_{name}": mdoc[k][key] for k in mdoc
+                                                    for name, key in (("run_counts", "dcount"), ("crossers", "base_counted"), ("ranges", "ranges"))})
         for kind, into in (("long", "lrup"), ("short", "srup")):
             sme.incremental_rollups(con, tiers, kind, meas, into, R=R, aliases=aliases)
         t = step("drill/rollup/incremental", t, rup=count(con, "lrup") + count(con, "srup"))

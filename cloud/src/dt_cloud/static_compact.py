@@ -1183,6 +1183,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     work.mkdir(parents=True, exist_ok=True)
     disk = sl.DiskPeak(work)
     steps: dict[str, float] = {}
+    step_counts: dict[str, dict[str, int]] = {}  # each sub-step's row counts, kept in its phase's note beside its seconds
     noted: set[str] = set()  # parts and sub-steps an ended phase's note carried
 
     def done(part: str, t: float, next_phase: str | None = None) -> float:
@@ -1199,12 +1200,18 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
         return monotonic()
 
     def phase_note() -> str:
-        """The running phase's note: its parts' and the drill's sub-steps' seconds (those an ended phase didn't carry)."""
+        """The running phase's note: its parts' and the drill's sub-steps' seconds, with a sub-step's row counts (those an
+        ended phase didn't carry): what the run's record keeps of the fold, after its logs are gone."""
+        def counted(k: str) -> str:
+            c = step_counts.get(k)
+            return f" ({', '.join(f'{n} {v:,}' for n, v in c.items())})" if c else ""
         return "; ".join([*(f"{p} {s}s (disk {peaks[p]['disk_gb']} GiB, RSS {peaks[p]['rss_gb']} GiB)" for p, s in times.items() if p not in noted),
-                          *(f"{k} {v}s" for k, v in steps.items() if k not in noted)])
+                          *(f"{k} {v}s{counted(k)}" for k, v in steps.items() if k not in noted)])
 
     def step(name: str, t: float, **counts: int) -> float:
         steps[name] = round(monotonic() - t, 1)
+        if counts:
+            step_counts[name] = dict(counts)
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         log(f"compact {gen} → {new_gen}: {name} in {steps[name]}s (work disk peak {disk.take_step()} GiB, RSS peak {sl.rss_peak_gb()} GiB{n})")
         hb.after(name)

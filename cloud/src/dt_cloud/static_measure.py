@@ -401,6 +401,7 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
             shutil.rmtree(split, ignore_errors=True)
     doc = {k: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for k, t in (("headers", "im_h"), ("dcount", "im_d"), ("base", "im_b"))}
     doc["rows"] = written
+    doc["ranges"] = len(ranges)
     doc["base_counted"] = n
     doc["base_count_s"] = round(base_s, 1)
     for t in ("im_h", "im_d", "im_b", "im_c", "im_bx", "im_out", "im_mt", *(f"im_a{i}" for i in range(len(tiers)))):
