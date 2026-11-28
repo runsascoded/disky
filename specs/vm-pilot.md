@@ -77,11 +77,12 @@ A spec stays a Batch job's JSON (what every submitter builds today), so each bac
 
 Through `JobBackend`:
 - `append_runner.BatchRunner`, i.e. every `Runner.run_job`: the interval store's `run` (`interval_append`), the static-names runner (`static_runner`) and its merge helpers (`static_merge`), with the `StillRunning` / `wait` polling and transient-error retries unchanged. Their specs mount gcsfuse buckets, which `local` now mounts (above); none has run locally yet.
+- `dt-cloud scan box submit` ("A scan on the box", below): a deployment's whole scan head as one local job.
 - `vm_pack.submit` and `access_jobs.submit` (submit only, not waited on). `vm-pack`'s spec runs locally as is unless it names `secrets` (a non-GCS store's credentials).
 
 Still on raw Batch (known gaps):
 - `scan_tasks` (`scan-run task`): it clones its worker's spec from its own controller's Batch job (`$BATCH_JOB_UID`) and checks an existing worker against Batch's stored job; it only exists inside a Batch controller.
-- Nextflow's `google-batch` executor (`scan_head`), the Fray backend (`scan_backend_fray`).
+- Nextflow's `google-batch` executor (`scan_head`), the Fray backend (`scan_backend_fray`). A scan on the box doesn't use either: its head runs Nextflow's local executor inside a local job of its own.
 - `batch_events.submit` (a compaction submitted from Batch's own state-change events).
 - The shell's `dt-cloud batch submit`, `job submit-listing` (the listing fan-out, `wait_jobs`), `job submit-reviewed`; `job status|logs|watch|metrics` and `batch-cancel` (`cancel_labelled`) read Batch only.
 - The site's REST submits (`_lib/sweepDispatch.ts`, `_lib/cwBatch.ts`) and `BatchCron` bodies (Cloud Scheduler posts them).
@@ -177,6 +178,61 @@ The `vmd` key is the tenant's: `oa-r2`'s is Secret Manager's `vm-pilot-vmd-key-o
 hf likewise (tenant `hf`, secret `vm-pilot-vmd-key-hf`, project `oa-hf-usage`, dev.hf.oa.dev): its pack holds classes 1, 5 and 6, and a `cl=` scope reaches `vmd` with hf's own ids. Prod, for either, later: the same two vars in `[vars]` and `wrangler pages secret put VM_KEY --project-name <project>` without `--env`; `VM_SHARE` only after a bake.
 
 Not built (open): `VM_SHARE` as an `/admin` setting (a D1 row the middleware reads) rather than a var; the status object copied to the store (step 4's first form; the Worker reads `/v1/status` itself, cached per isolate); `vmd` answering search with match lists, owner scopes with the live ledger's regions (§2.1), a Δ cell rule for `dm=delta`, series and the name summary; per-node `mtime` / owners in the pack (§7.2).
+## A scan on the box (Order step 1)
+
+Built 2026-11-28 (`[cloud]`), not yet run: [`cloud/src/dt_cloud/scan_box.py`] (`dt-cloud scan box submit|report`), on the local backend's gcsfuse volumes, existing disks, per-job metadata server and usage sampling ("`Local`" above); `bootstrap.sh` installs gcsfuse.
+
+### The gap, and the way through it
+
+A deployment's scan is a Nextflow head whose tasks go to Batch through nf-google, past `JobBackend`. Two ways onto the box:
+- **(a) the head on the box, under Nextflow's local executor: chosen.** The head is one local job (the deployment's pinned image, `dt-cloud scan head` over its own profile rewritten for the box), and every task is a process of the local executor inside that container. The whole scan is then in `scan.slice`, every process authenticates through the job's metadata server, and nothing gets a Docker socket: Nextflow's Docker integration run from a container would need the host's socket, root on the box and, through its metadata server, every tenant's account; run on the host instead, it would need a JVM and Nextflow there and a per-task token mechanism of its own. Tasks run one at a time (`queue_size: 1`), so the head container's cgroup samples while a task runs are that task's (plus the head's constant share), beside the trace's own per-task peak RSS.
+- **(b) the head on Batch, its tasks on the box: worse.** nf-google posts each task as a Batch job itself; routing them to the box needs an executor of our own, and the head stays a billed Batch VM watching the box.
+
+### What `submit` does
+
+`dt-cloud scan box submit -a ACCOUNT -i IMAGE PROFILE` (PROFILE: the deployment's profile's path in the image):
+1. Pulls IMAGE as ACCOUNT (a minted token for the registry helper) and reads PROFILE from it (`docker run --network none --entrypoint cat`): the profile the deployment's scheduler runs, byte for byte.
+2. Rewrites it for the box (`box_profile`): the local executor; `work` = `/mnt/disks/nf` (an existing disk, below); `queue_size` 1 (`-q`); machines reduced to their `time` (the local executor refuses a task asking for more memory than the host has: r2's `static` asks 30 GB); sources' machines dropped, `procs` / `threads` at most the box's CPUs; every `options.<step>.mem` and `$DUCKDB_MEM` at most the DuckDB cap, every `threads` and `$DUCKDB_THREADS` at most the CPUs; `$DT_MEM` the steps' share of the budget (what `{mem}` sizes from); `$DT_DATA_MOUNT=/mnt/disks`; `$GCP_PROJECT` the executor's project (the steps' `secrets exec`); `$DT_LIVENESS_PID` empty (each step logs its own liveness line, as a Batch task does). `-x ENV` drops a secret binding the account can't read; `-S STEP` leaves a step out. Refused: a data store that isn't `gs://`, and a step left on that submits Batch jobs (`options.static-names.profile` / `compact_cmd`, `options.interval-store.profile`, `options.vm-pack.batch`, `access-jobs`): the box's job accounts have no Batch.
+3. The budget: `-B` (default `scan.slice`'s `memory.max`, 8 GiB) less 1.5 GiB for the head (Nextflow's JVM at `-Xmx768m`, the head's Python, the bucket's gcsfuse) is `$DT_MEM` (6.5 GiB); 60 % of that is the DuckDB cap (3 GB; `-m` overrides).
+4. Writes the box profile and `box.json` (the budgets) to the head's disk (`/var/lib/disky/work/_disks/<tenant>-nf/profiles/<job>.{yml,box.json}`) and submits the head (`head_spec`) as local job `<tenant>-box-<YYYYMMDD-HHMMSS>`: entrypoint `dt-cloud scan head /mnt/disks/nf/profiles/<job>.yml`; the data bucket as a gcsfuse volume at `/mnt/disks/<bucket>` (nf-google's mount point and options); the existing disk `<tenant>-nf` at `/mnt/disks/nf` (Nextflow's launch and work dir: its `-resume` cache and the run's reports stay on the box); the head's own secrets (the D1 token, the Slack bot) when its profile records the run; `$DT_RUN_ID` = the job id, `$DT_TRIGGER=manual`, `$DT_TRIGGER_BY` (`-b`), `$DT_RUN_MACHINE` (`-l`, default `vm-pilot`: not a priced type, the box's cost is fixed), `$DT_RUN_REGION` (`-r`); 6 h limit. `-s SCAN -g GEN` resumes a box scan (its Nextflow session, from the disk's cache). `-n` prints the box profile, the spec and the DAG, and writes nothing.
+
+Kept from Batch: the run record and every step's phases on /scans, the alerts and the run thread (`nominal`), every data-store output at its key (through the gcsfuse mount: `listing/<scan>/`, the index, the snapshots, `access/`), the interval store's and the static name index's one-machine appends (each appends every scan after its generation's newest: scan-id order), the R2 publish, `index-sync`, the digest, `vm-pack`. Not kept: Nextflow's reports go to the box's disk (`runs/<scan>/` there), not `<work>/runs/<scan>/` on GCS (the scan-runs profile's `nf-dag` output isn't measured); the run has no Batch jobs, so `finish` prices nothing; the base config's 30 s poll leaves up to 30 s between tasks.
+
+What r2's VM account can't do (its grants in r2's `infra/gcp/__main__.py`): read `oa-r2-cf-pages-token`, the digest's Pages token (so `-x CF_PAGES_TOKEN`, else the digest's `secrets exec` fails; without it the plot's `wrangler pages deploy` runs on the D1 token and likely fails, and the digest step with it: a soft step, which the next Batch scan converges, unless r2 grants that secret), and anything of Batch (`gcp-cost`'s compute half, `run-cost`: `-S` both, or they fail softly).
+
+### Measuring a run
+
+`dt-cloud scan box report JOB`: per traced task, its wall time and peak RSS (Nextflow's trace) and the maxima of the head container's cgroup samples while it ran (`anon`, `current`, the slice's `current`); then the container run's `memory.peak`, max `anon`, OOM kills and CPU seconds. Written beside the run's trace (`runs/<scan>/usage.{json,tsv}` on the head's disk). `dt-cloud local-job status JOB` prints the run's summary.
+
+Expected, from r2's Batch traces (2026-11-28T0716, T0838; Batch's own machines):
+
+| task | wall | peak RSS | at the box's budget (8 GiB slice, DuckDB ≤ 3 GB) |
+|---|---|---|---|
+| `list_source (r2://marin-na)` | 7m17s–7m24s | 3.1 GB | fits (4 procs × 4 threads on 4 vCPUs) |
+| the other three sources | 14–24 s | 0.35–1.4 GB | fits |
+| `pre` (`access-r2`, DuckDB 2 GB) | 1m30s | 2.6 GB | fits |
+| `index` (path-index, DuckDB 12 GB) | 51–54 s | 3.6 GB | fits at 3 GB, slower |
+| `index_rows`, `publish_r2` | 13–18 s | ≤ 0.46 GB | fits |
+| `interval_store` (DuckDB 12 GB) | 2m05s–2m10s | 2.8 GB (PSS 2.6 GiB, DuckDB 1.3 GiB) | fits |
+| `static_names` (DuckDB 12 GB) | 9m–14m28s | 6.3–12.6 GB | **at risk**: the append's catalog refold reached 12.1 GiB RSS; at 3 GB DuckDB must spill, and any part not bounded by `-M` is an OOM kill in the slice. It also mirrors the 14.1 GiB generation to `/tmp` (the container's layer on the data disk) |
+| `post` (digest, warm-up, probe, retire, age store, `vm-pack`, …) | 13m24s–13m57s | 2.5–2.7 GB | fits (22–25 % CPU: mostly waiting) |
+
+One at a time that's ~45–75 min, plus the first image pull. Every task shares the slice with the head's ~1–1.5 GiB and gcsfuse; `memory.peak` will read near 8 GiB for any task moving more bytes than that through the page cache (the listings, the 14 GiB mirror), so `anon` and the trace's RSS are the numbers to read.
+
+### Running it
+
+On the box (root; `/etc/disky/job.env`), with the deployment's scheduled scans and canaries held for the run:
+
+```bash
+sudo bash -c 'set -a; . /etc/disky/job.env; set +a
+  dt-cloud scan box submit -a oa-r2-usage-vm@oa-internal-450019.iam.gserviceaccount.com \
+    -i <r2 scan image, by digest> -b <who> -r us-west1 -x CF_PAGES_TOKEN -S gcp-cost -S run-cost \
+    /app/job/profiles/r2.yml'
+sudo bash -c 'set -a; . /etc/disky/job.env; set +a; dt-cloud local-job status <job>; dt-cloud local-job logs -n 60 <job>'
+sudo bash -c 'set -a; . /etc/disky/job.env; set +a; dt-cloud scan box report <job>'   # after it ends
+```
+
+Abort: `dt-cloud local-job cancel <job>` (or `systemctl stop disky-job-<job>`): the head gets its TERM, has 60 s to finish its run record, and the job's mount, network and metadata server go with it.
 
 ## Runbook (the box's infra)
 
@@ -293,7 +349,7 @@ The box's checkout is `cloud`'s, so `vm-pack build` names the store's class colu
 
 ## Order
 
-1. `JobBackend` + `local`, the slices (code: built, see "JobBackend (step 1)"), one r2 scan end to end on the box (`vmd` not yet serving): its wall time and peak memory per step at the budget.
+1. `JobBackend` + `local`, the slices (code: built, see "JobBackend (step 1)"), one r2 scan end to end on the box (`vmd` not yet serving): its wall time and peak memory per step at the budget. The scan's code is built ("A scan on the box"); the run is pending, by the root session with r2's crons and canaries held.
 2. `vmd` on the box with r2 + hf packs (full rewrite per scan, as today); the Worker wiring on r2's dev stack; parity on live requests.
 3. Incremental pack updates.
 4. r2 prod serves from the box for sessions pinned `vm` (`?be=vm`), beside `idx`; then hf. Bake; compare answers and latency per request kind on live traffic. Retiring indexing is a later call, not this pilot's.
@@ -321,3 +377,4 @@ The box's checkout is `cloud`'s, so `vm-pack build` names the store's class colu
 [`site/src/backend.ts`]: ../site/src/backend.ts
 [`cloud/src/dt_cloud/job_metadata.py`]: ../cloud/src/dt_cloud/job_metadata.py
 [`cloud/src/dt_cloud/job_usage.py`]: ../cloud/src/dt_cloud/job_usage.py
+[`cloud/src/dt_cloud/scan_box.py`]: ../cloud/src/dt_cloud/scan_box.py

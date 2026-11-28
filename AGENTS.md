@@ -218,6 +218,13 @@ dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N] [-C K=COL,…]  # VM m
                           # `vm-pack pull -o STORE -d DIR`: the serving side's (the VM pilot's pack sync): the pointer's pack
                           # to `DIR/current.fsb` (sha256-checked, renamed into place) + `DIR/current.json`; `state` pulled |
                           # current (no-op) | none (nothing published)
+dt-cloud scan box submit -a ACCOUNT -i IMAGE PROFILE  # A deployment's scan on the VM pilot's box (`scan_box.py`, specs/vm-pilot.md
+                          # "A scan on the box"): PROFILE (its path in the digest-pinned IMAGE) rewritten for Nextflow's local
+                          # executor (`box_profile`: one task at a time `-q`, DuckDB memory / threads capped at the budget `-B`,
+                          # default `scan.slice`'s memory.max), the head one local job as ACCOUNT (the data bucket a gcsfuse volume,
+                          # the existing disk `<tenant>-nf` its Nextflow cache and reports), recorded on /scans as `manual` (`-b` who).
+                          # `-x ENV` drops a secret binding the account can't read, `-S STEP` a step; `-s SCAN -g GEN` resumes; `-n`
+                          # prints the profile, spec and DAG. `scan box report JOB`: per task, wall time, trace RSS and the cgroup's samples
 dt-cloud local-job status|logs|cancel [JOB]  # The local job backend's jobs on this host (`$DISKY_LOCAL_JOBS`): states, each run's
                           # wall time / `memory.peak` / OOM kills, output, a cancel (TERM, 60 s; then the job's gcsfuse mounts,
                           # network and metadata server go). A local job's containers authenticate through a metadata server of

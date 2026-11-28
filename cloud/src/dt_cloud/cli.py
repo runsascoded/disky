@@ -4270,6 +4270,10 @@ from .scan_retire import retire_cmd as _scan_retire  # noqa: E402
 
 _scan.add_command(_scan_retire)
 
+from .scan_box import cli as _scan_box  # noqa: E402
+
+_scan.add_command(_scan_box)
+
 from .job_backend import cli as _local_job  # noqa: E402
 
 main.add_command(_local_job)
