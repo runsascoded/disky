@@ -140,6 +140,8 @@ def _union(parts: list[str], empty: str) -> str:
 
 #: At least this many floor crossers are counted on worker processes (`base_counts_parallel`); fewer, here.
 PARALLEL_MIN = 200_000
+#: `base_counts_parallel`'s shares: at least this many crossers each (and at most 8 per process).
+SHARE_ROWS_MIN = 10_000
 #: Decoded groups each worker keeps (`CachedGroupFile.cap_groups`): its share is sorted, so neighbors share groups and a few
 #: suffice; the default (`static_drill.GROUP_CACHE`, 2048) on 48 workers took a highmem-48 past its RAM (cw, 2026-11-07).
 WORKER_GROUPS = 16
@@ -245,10 +247,13 @@ def base_counts_parallel(con, tier: sd.Tier, kind: str, src: str, into: str, n: 
     from concurrent.futures import ProcessPoolExecutor, as_completed
     from multiprocessing import get_context
 
-    from .heartbeat import Progress
+    from .heartbeat import Progress, set_stage
 
-    parts = max(1, min(jobs * 8, n // 10_000))
+    parts = max(1, min(jobs * 8, n // SHARE_ROWS_MIN))
     cut = work / "cands"
+    # every crosser sorted (9 min of cw's 2026-11-27 fold, 2.0B): `(c, dir)` ranges cut at sampled keys cost as much in a
+    # synthetic trial (60M rows: their comparisons 6.5 s, the whole sorted cut 6.1 s)
+    set_stage(f"base counts {kind}: {n:,} floor crossers sorted into {parts} shares")
     con.execute(f"""COPY (SELECT c, dir, ((row_number() OVER (ORDER BY c, dir) - 1) * {parts} // {n})::INTEGER AS part FROM {src})
         TO {q(str(cut))} (FORMAT parquet, PARTITION_BY (part))""")
     shares = sorted((int(d.name.split("=", 1)[1]), sorted(str(f) for f in d.glob("*.parquet"))) for d in cut.glob("part=*"))
