@@ -125,7 +125,7 @@ printf '%s\n' "$REGISTRIES" | jq -R 'split(",") | map(select(length > 0)) | {cre
   | put_text /root/.docker/config.json 0600 || true
 systemctl enable -q docker
 if [ "$docker_changed" = 1 ]; then systemctl restart docker; else systemctl start docker; fi
-iptables -C DOCKER-USER -d 169.254.169.254/32 -j REJECT  # the drop-in's rule is in place, or this run stops here
+iptables -C DOCKER-USER -d 169.254.169.254/32 -p tcp ! --dport 53 -j REJECT --reject-with tcp-reset  # the drop-in's rule is in place, or this run stops here
 
 # 6. vmd + fsb, built once per bench/full-scan tree in job/Dockerfile's Rust image (cargo's registry cached on the disk).
 TREE=$(git -C "$SRC" rev-parse "$SHA:bench/full-scan")
