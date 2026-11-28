@@ -1579,7 +1579,8 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
     then `compaction.json`, `successor.json`, `interval-store/CURRENT.json`), then with `--r2` on R2 (its pointer last);
     predecessors past the grace leave GCS. Holds the compaction lease (the scratch bucket's `interval-store/compacting.lease.json`)
     throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. `-N`: a candidate (no
-    lease, no pointer; `promote` points at it). Prints a JSON summary."""
+    pointer; `promote` points at it), its lease marked `candidate`: appends go on, another compaction is still refused.
+    Prints a JSON summary."""
     from . import interval_compact as ic
 
     if (b := gs_bucket(bucket)) is None:
@@ -1587,7 +1588,7 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
     try:
         with tm.watch(mem, f"compact {gen}"):
             doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp),
-                                    lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX) if promote else None, policy=policy, force=force,
+                                    lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX), policy=policy, force=force,
                                     r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
                                     promote=promote, rec=from_env("compact"), carry=OwnerCarry() if owner_carry else None)
     except ar.Busy as e:
@@ -1748,7 +1749,7 @@ def deferral_cmd(profile: str | None, scan_id: str) -> None:
     doc = ar.deferral(have, runner.published(layouts, have[-1]), scan_id)
     scratch = gs_bucket(cfg.p.scratch)
     client = storage.Client(project=cfg.p.project)
-    held = ar.compaction_holds(ar.gcs_compaction_lease_file(scratch, PREFIX, client), runner.p.gen, runner.now()) if scratch else None
+    held = ar.compaction_holds(ar.gcs_compaction_lease_file(scratch, PREFIX, client), runner.p.gen, runner.now(), appends=True) if scratch else None
     blob = client.bucket(scratch).blob(DEFER_MARKER) if scratch else None
     marked = json.loads(blob.download_as_bytes()).get("stuck") if blob is not None and blob.exists() else None
     episode = ar.deferral_episode(doc["stuck"] if held else [], marked)
