@@ -251,7 +251,7 @@ Checked on the bench VM (2026-11-14, Docker 29 + BuildKit, this branch's tree wi
 
 ### 7.1 `site/functions/_lib/vmAdapter.ts`
 
-Pure functions, unit-tested, called by no route yet:
+Pure functions, unit-tested; the routes call them through `vmServe.ts` (a session pinned `vm`, beside the index reader: specs/vm-pilot.md "Serving beside the indexes (step 4)"):
 - `vmRequest(view)`: a parsed `/api/subtree` or `/api/diff` request (scan(s), path, `QueryAst`, owner scope, classes, staged regions, `w`, `h`, `minArea`, `atten`) → the `/v1/view` body. `share_log2 = ⌈log2(w · h / minArea)⌉`, `atten_log2 = log2(atten)` (an integer; a non-power-of-2 `atten` is refused).
 - `subtreeBody(answer, ctx)`: the `/v1/view` answer → `/api/subtree`'s JSON (`tree` with the deployment's `ROOT_LABEL` at the root, `nodes`, `threshold`, `tier: "vm"`, `index: "vm:<gen>/<manifest>"`).
 - `diffRows(answer)`: → `/api/diff`'s `rows` (`DiffRow`: path relative to the folder, depth, kind, status from the two sides, `expanded` where it has children) and its four totals.

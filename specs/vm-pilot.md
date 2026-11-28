@@ -1,6 +1,6 @@
 # VM pilot: r2 + hf served and scanned from one small always-on VM
 
-Status: draft (2026-11-26, the cw session, from Ryan's ask: "get this working for r2+hf, on one small/cheap VM, where we'd nonetheless build out all the mechanisms"). For the root session to own (`cloud`, r2, hf). Builds on [vm-mode.md] (`vmd`, packs, tenants, the cell rule, parity: built and measured), [serverless-tiers.md] (the Worker ↔ VM hand-off, §5) and [full-scan-serving-bench.md]. Ryan's go on the box's infra (2026-11-27, high priority): one e2-standard-4 + a 50 GB pd-balanced disk in `oa-internal-450019`, labelled `app=disky`, `deployment=shared`, `component=vm-pilot`; a Cloudflare Tunnel; per-tenant HMAC secrets for `vmd`; a service account for the box. Per-deployment isolation (Ryan, 2026-11-27): the box's account holds nothing of a tenant's but `iam.serviceAccountTokenCreator` on its job account; a job runs as its spec's account, as on Batch. VM mode bakes beside prod (each session pinned `idx` or `vm`). The IaC and the box's bootstrap are built, not applied: see "Runbook".
+Status: draft (2026-11-26, the cw session, from Ryan's ask: "get this working for r2+hf, on one small/cheap VM, where we'd nonetheless build out all the mechanisms"). For the root session to own (`cloud`, r2, hf). Builds on [vm-mode.md] (`vmd`, packs, tenants, the cell rule, parity: built and measured), [serverless-tiers.md] (the Worker ↔ VM hand-off, §5) and [full-scan-serving-bench.md]. Ryan's go on the box's infra (2026-11-27, high priority): one e2-standard-4 + a 50 GB pd-balanced disk in `oa-internal-450019`, labelled `app=disky`, `deployment=shared`, `component=vm-pilot`; a Cloudflare Tunnel; per-tenant HMAC secrets for `vmd`; a service account for the box. Per-deployment isolation (Ryan, 2026-11-27): the box's account holds nothing of a tenant's but `iam.serviceAccountTokenCreator` on its job account; a job runs as its spec's account, as on Batch. VM mode bakes beside prod (each session pinned `idx` or `vm`). The IaC and the box's bootstrap are built, not applied: see "Runbook". The site's half of step 4 (each session pinned `idx` or `vm`) is built, off on every deployment until it sets the config: see "Serving beside the indexes (step 4)".
 
 ## Why
 
@@ -30,7 +30,7 @@ The pilot proves the shape on the two smallest deployments, where nothing has to
 1. **A job backend interface.** Today `batch.submit_job` is the one GCP seam for most jobs; the static-names runners, Nextflow's executor and the site's REST submits bypass it. Define `JobBackend` (`submit(spec) → id`, `status(id)`, `logs(id)`, `cancel(id)`) with three implementations: GCP Batch (today's), `local` (a process in `scan.slice`, state on disk, logs to Cloud Logging or the store), Kubernetes Job (later, cw's CoreWeave nodes). The scan profile names its backend; every step's job goes through it.
 2. **Bounded scan steps.** Each step the pilot runs takes its memory from the slice budget: listing (already streaming), `import -e stream` / `path-index` (DuckDB `-M`), the interval-store append (`-M`, `-B` sub-ranges). Measure each at the budget on r2 and hf; fix any that doesn't fit by spilling, not by more memory.
 3. **Incremental pack updates.** Today `vm-pack build` rewrites the whole pack, loading every version row (117 GB peak on gcs). Instead the interval-store append's output (the scan's opened versions and close records) is folded into the tenant's pack: a delta file `vmd` maps beside the base pack, compacted into a new base on the interval store's own compaction. Memory then scales with a scan's changes, not with history.
-4. **Serving wiring, beside today's** ([serverless-tiers.md] §5, [vm-mode.md] §7): `vmAdapter.ts` called by `/api/subtree`, `/api/diff`, `/api/series`, search; the Worker reaches `vmd` through a Cloudflare Tunnel (HMAC per tenant, already built); `vmd`'s `/v1/status` copied to the store so the Worker knows the box's state. Both backends serve prod side by side (Ryan, 2026-11-27): each session is pinned to one, `idx` (today's indexes) or `vm` (`vmd`), and a URL parameter (`?be=vm` / `?be=idx`) overrides and re-pins it. The pin is a cookie the middleware reads; responses say which backend answered (`Server-Timing` and a small badge), and the pin passes through links the page builds. The default pin stays `idx` while VM mode bakes; an admin setting moves a share of new sessions to `vm`. When the box is down or loading, a `vm` session is answered by `idx` and says so (no silent partial answer).
+4. **Serving wiring, beside today's** ([serverless-tiers.md] §5, [vm-mode.md] §7): `vmAdapter.ts` called by `/api/subtree`, `/api/diff`, `/api/series`, search; the Worker reaches `vmd` through a Cloudflare Tunnel (HMAC per tenant, already built); `vmd`'s `/v1/status` copied to the store so the Worker knows the box's state. Both backends serve prod side by side (Ryan, 2026-11-27): each session is pinned to one, `idx` (today's indexes) or `vm` (`vmd`), and a URL parameter (`?be=vm` / `?be=idx`) overrides and re-pins it. The pin is a cookie the middleware reads; responses say which backend answered (`Server-Timing` and a small badge), and the pin passes through links the page builds. The default pin stays `idx` while VM mode bakes; an admin setting moves a share of new sessions to `vm`. When the box is down or loading, a `vm` session is answered by `idx` and says so (no silent partial answer). Built 2026-11-28 (the share is a var, `VM_SHARE`, not yet an `/admin` setting): "Serving beside the indexes (step 4)".
 5. **Retiring per-scan indexing is out of the pilot** (Ryan, 2026-11-27): prod keeps indexing and serving as today while VM mode bakes beside it. Turning off static-names and the served sorts for a tenant (the site's `FILTER_STATIC*` flags replaced by `vmd`) comes only after a long bake, as its own call; then the last built generation stays frozen, dated, as the `idx` fallback.
 6. **Cost per step on /scans**, from the same budget: the box's cost is fixed, so a step's share is its CPU-seconds × the box's $/CPU-s; Batch steps keep their billed cost (see the cw session's per-step cost proposal).
 
@@ -87,6 +87,90 @@ Still on raw Batch (known gaps):
 - **Logs.** A local job's output is its `log` file, not Cloud Logging, so `dt-cloud job logs` (Batch only) doesn't see it and nothing ships it off the box. Options: the store (copy `log` beside the scan's records at the end), or Docker's `gcplogs` driver (the spec's "logs to Cloud Logging"), which ties the box to GCP.
 - **Identity.** Resolved (2026-11-27): impersonation of the spec's `serviceAccount`. Open: a token is good for an hour by default, and hf's listing step runs for hours; either the org policy extends the job accounts' token lifetime (to 12 h), or a refresher (a per-job metadata endpoint serving fresh tokens) replaces the one-shot token.
 - **Restart semantics.** A lost job fails rather than resumes; the scan steps already resume from their outputs on a resubmit.
+
+## Serving beside the indexes (step 4)
+
+Built 2026-11-28 (`[cloud]`): the site answers a session from `vmd` or from today's indexes, by the session's pin. Off on every deployment until its config names a `vmd` (below); with it off, no response changes. Code: [`site/functions/_lib/vmServe.ts`] (config, pin, `vmd` client, fallback, caching), its hooks in `api/subtree.ts` and `api/diff.ts`, the cookie in `_middleware.ts`; the page's side in [`site/src/backend.ts`] and `BackendBadge.tsx`. `vmAdapter.ts` (specs/vm-mode.md §7) builds the requests and bodies.
+
+### Config
+
+| key | kind | what |
+|---|---|---|
+| `VMD_URL` | var | `vmd`'s base URL, through the box's tunnel: `https://vmd-pilot.oa.dev` |
+| `VM_TENANT` | var | the deployment's tenant on it (its `x-disky-tenant`): `oa-r2`, `hf` |
+| `VM_KEY` | secret | the tenant's HMAC key: Secret Manager's `vm-pilot-vmd-key-<tenant>`, which `vmd` reads as `VMD_KEY_<TENANT>` |
+| `VM_SHARE` | var, optional | the share (0–1) of new browser sessions pinned `vm`; unset: none |
+
+Any of the first three unset: VM mode is off. No response carries a `be` timing entry (so the page shows no badge), and a `?be=vm` is ignored with a note (`x-disky-be-note: VM mode is off on this deployment …`; the page logs it once to the console).
+
+### The pin
+
+- **Cookie** `disky_be` = `vm` | `idx`: `Path=/`, 30 days, `SameSite=Lax`, `Secure` on https. Not `HttpOnly`: the page reads it, and it grants nothing (any viewer may pick either backend).
+- **Per request** (`pinOf`): `?be=vm|idx`, else the cookie, else `idx`.
+- **Written by the middleware** (`pinCookie`): a `?be=` other than the cookie's re-pins, on any response. A page view (an HTML `GET`) with neither gets a pin, `vm` with probability `VM_SHARE`, else `idx`. An API request with neither (an agent's token, `curl`) is `idx` and assigned nothing, so a client without a cookie jar never flips between backends. With VM mode off, a page view clears a leftover cookie.
+- **Links** (`src/backend.ts`): a `vm` pin rides in the page's own URL (`be=vm`, added at load before the router reads the URL), so the links the page builds from it keep it: a drill (use-prms keeps the parameters it doesn't own), the prod/dev toggle (`g d`), a copied or shared link (which then pins its opener `vm` too). An `idx` pin is the default and rides nowhere. A peer deployment's link drops `be` (`hosts.ts` `LOCAL_PARAMS`): its VM mode is its own tenant. The page also adds `be=vm` to each same-origin `/api/` request (as `ps` rides, `pathStoreParam.ts`), so the browser's copy of one backend's answer (`private, max-age=300`) is never read for the other's.
+
+### What answers
+
+Per request, after the gate, the scan checks and the restriction checks, so a `vm` answer is gated exactly as an `idx` one:
+
+| request | a `vm` session's answer |
+|---|---|
+| `/api/subtree`: the map, a drill, `depth=`, `cl=` (classes) | `vmd` |
+| `/api/diff`: `dm=max`, `summary=1`, `depth=`, `cl=`; `dm=delta` where `DIFF_DESCENT` is off (it reads as `max` there) | `vmd` (rows cut to `top` as the index reader's: `capDiffRows`) |
+| a union or group root (r2.oa.dev's main map is the union of `primary` and `meta`) | each member as its own request: the primary's from `vmd` under the composite's one byte floor (`cell.floor_bytes`), a store without a tenant (`meta`) from the indexes |
+| `/api/diff` `dm=delta` under `DIFF_DESCENT = "1"` (r2.oa.dev's default diff) | `idx`: `vmd` draws by max(before, after), the descent by change |
+| `q=` on either | `idx`: `vmd`'s answer has no match lists (`matched`, `matchCount`) yet (specs/vm-mode.md §7.2) |
+| `lens=`, `o=`, `by=` | `idx`: `vmd` doesn't fold the live ledger yet (§2.1) |
+| a path-restricted link | `idx`: never sent to `vmd` (§4.3) |
+| `/api/series`, `/api/name-summary` | `idx`: `vmd` has neither yet |
+
+A `vm` subtree's nodes carry no `mtime`, `last_read`, `owners`, `class_bytes` or `provenance` (§7.2), and its answer's note says so: the map's tree color is unaffected, the written / read / owner colors have nothing to draw. A `vm` body is `vmAdapter`'s (`tier: "vm"`, `index: "vm:<gen>/<manifest>"`) plus `vm: {tenant, pins, ms}`.
+
+**Fallback.** A `vm` session's request goes to the indexes, saying why, when `vmd`: is unreachable or its status unsigned (the reason cached per isolate for 10 s, so a down box costs one 3 s timeout per isolate per window, not one per request); has no pack for the tenant, or is loading its first one; holds no scan as new as the request's; answers anything but `200` (a `400` for a class its pack doesn't hold, a `503` mid-swap, a `504` past the 6 s deadline; the fetch itself is given up at 8 s); or signs its answer with another key. A `409 pins` (a new pack swapped in since the status was read) is asked once more at the pins `vmd` names. Never a partial answer: `vmd` answers whole or not at all.
+
+### What a response says
+
+- `Server-Timing: be;desc="vm"` / `"idx"` / `"idx-fallback"` (a `vm` session answered by the indexes), on every `/api/subtree`, `/api/diff`, `/api/series` and `/api/name-summary` response while VM mode is on. A union or group root says its members' composite: any fallback makes it `idx-fallback`, else any `vm` part makes it `vm`; a store with no tenant is `idx` and named in the note, not a fallback.
+- `x-disky-be-note`: why it fell back, or what a `vm` answer leaves out (ASCII, at most 300 characters).
+- Timing entries on a `vm` answer: `vm-status` (the status read: ~0 when cached), `vmd` (the round trip), `vmd-pass` / `vmd-total` (`vmd`'s own timing), beside the usual `auth`, `pre`, `match`, `total`.
+- **The badge** (`BackendBadge`, in the top bar beside the avatar): `vm` (blue), `idx` (grey) or `idx*` (red: a fallback), for the newest map or diff answer; its tooltip names the session's pin, each request kind's latest backend with its note, and a link re-pinning the session to the other backend. No badge until an answer names a backend, so none with VM mode off.
+
+### Caching
+
+A `vm` answer is kept (colo + KV, as any answer) under the index reader's key for the same request plus `&be=vm&vv=<VM_RESPONSE_V>&vp=<gen>/<manifest>` (`vmKey`): an `idx` session never computes that key, so it never reads a `vm` answer, and a new pack's pins never hit an old pack's entry. An answer is stored under the pins it came back with. No index reader's body or key changed, so neither `CACHE_V` nor the static filter's `RESPONSE_V` moved; `VM_RESPONSE_V` (1) versions the `vm` bodies alone.
+
+### Tests
+
+`functions/_lib/vmServe.test.ts` (the pin, the cookie, the share, the stamps and composites, which kinds go to `vmd`; the client against a fake `vmd`: status caching, a down box, a newer scan, the `409` retry, unsigned replies, a member read's floor; the diff body), `functions/api/vmServing.test.ts` (the routes over two fixture scans and a fake `vmd`, `_lib/testVmd.ts`: a `vm` session's map and diff from `vmd`, an `idx` session never served a `vm` entry from the shared cache, a fallback with its reason, VM mode off, a union root's composite), `src/backend.test.ts` (the page's pin, the URL and `/api/` carrying, the badge's state).
+
+### Turning it on: r2's dev stack (dev.r2.oa.dev)
+
+The `vmd` key is the tenant's: `oa-r2`'s is Secret Manager's `vm-pilot-vmd-key-oa-r2` (project `oa-internal-450019`). The secret goes first: a Pages secret reaches the next deployment, and the vars' commit is that deployment.
+
+1. The secret, on the Pages project's **preview** environment only (the dev stack), piped so the value is never printed or written to disk (in `wt/r2`, with its Cloudflare token):
+
+   ```bash
+   gcloud secrets versions access latest --secret vm-pilot-vmd-key-oa-r2 --project oa-internal-450019 \
+     | wrangler pages secret put VM_KEY --project-name oa-r2-usage --env preview
+   ```
+2. The vars, in `site/wrangler.toml`'s `[env.preview.vars]` on `r2` (a `[r2]` commit; `VM_SHARE` stays unset, so only `?be=vm` pins a session `vm`):
+
+   ```toml
+   VMD_URL = "https://vmd-pilot.oa.dev"
+   VM_TENANT = "oa-r2"
+   ```
+3. Merge `cloud` into `r2` and push `r2`: CI, then the dev deploy. Prod is unchanged (no `[vars]` entry, no production secret).
+4. Check, signed in on dev:
+   - `https://dev.r2.oa.dev/` (a new session): badge `idx`; DevTools' Server-Timing on `/api/subtree`: `be;desc="idx"`.
+   - `https://dev.r2.oa.dev/?be=vm`: the URL keeps `be=vm`, badge `vm`; `/api/subtree?…&be=vm` carries `be;desc="vm"`, `vm-status`, `vmd`, `vmd-total`, and its note names `meta` (no tenant). Drill into a bucket: still `vm`, `tier: "vm"` in the body.
+   - On that `vm` session: the over-time chart (`/api/series`) shows `idx-fallback` (`size over time: vmd has no series yet`) in the badge's tooltip; a diff (`dm=delta` by default, under `DIFF_DESCENT`) `idx*`, and with `&dm=max` `vm`; a `q=` search `idx*`.
+   - `https://dev.r2.oa.dev/?be=idx`: re-pinned, badge `idx`.
+   - With the box down (or `VMD_URL` pointed elsewhere), a `vm` session's map answers `idx*` with `vmd unreachable: …` in the tip.
+
+hf likewise (tenant `hf`, secret `vm-pilot-vmd-key-hf`, project `oa-hf-usage`, dev.hf.oa.dev): its pack holds classes 1, 5 and 6, and a `cl=` scope reaches `vmd` with hf's own ids. Prod, for either, later: the same two vars in `[vars]` and `wrangler pages secret put VM_KEY --project-name <project>` without `--env`; `VM_SHARE` only after a bake.
+
+Not built (open): `VM_SHARE` as an `/admin` setting (a D1 row the middleware reads) rather than a var; the status object copied to the store (step 4's first form; the Worker reads `/v1/status` itself, cached per isolate); `vmd` answering search with match lists, owner scopes with the live ledger's regions (§2.1), a Δ cell rule for `dm=delta`, series and the name summary; per-node `mtime` / owners in the pack (§7.2).
 
 ## Runbook (the box's infra)
 
@@ -226,3 +310,5 @@ The box's checkout is `cloud`'s, so `vm-pack build` names the store's class colu
 [`infra/cf/shared/`]: ../infra/cf/shared
 [`deploy/vm-pilot/`]: ../deploy/vm-pilot
 [`cloud/src/dt_cloud/vm_pack.py`]: ../cloud/src/dt_cloud/vm_pack.py
+[`site/functions/_lib/vmServe.ts`]: ../site/functions/_lib/vmServe.ts
+[`site/src/backend.ts`]: ../site/src/backend.ts
