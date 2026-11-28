@@ -35,6 +35,19 @@ fn fixtures() -> Vec<PathBuf> {
     v
 }
 
+/// Whether the fixtures are cloud's (class columns `c2`..`c4`), what the pins are of. A deployment branch's fixtures
+/// carry its own class columns (hf: `private_bytes`, `git_bytes`); there the tests say so and pass.
+fn cloud_fixtures(fx: &[PathBuf]) -> bool {
+    let p = fx[0].join("served/path.parquet");
+    let b = ParquetRecordBatchReaderBuilder::try_new(File::open(&p).unwrap()).unwrap();
+    let names: Vec<String> = b.schema().fields().iter().map(|f| f.name().clone()).collect();
+    let cloud = GCS_NAMES.iter().all(|(c, _)| names.iter().any(|n| n == c));
+    if !cloud {
+        eprintln!("{}: not cloud's fixtures (columns {names:?}); the pinned packs are cloud's", p.display());
+    }
+    cloud
+}
+
 /// A fresh scratch dir under cargo's per-target tmp.
 fn scratch(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -107,9 +120,13 @@ fn slim_pack(gen: &Path, named: Option<&str>, out: &Path) -> String {
 
 #[test]
 fn fixture_slim_packs() {
+    let fx = fixtures();
+    if !cloud_fixtures(&fx) {
+        return;
+    }
     let tmp = scratch("fixture-slim-packs");
     let mut got: BTreeMap<String, String> = BTreeMap::new();
-    for g in fixtures() {
+    for g in fx {
         let n = g.file_name().unwrap().to_string_lossy().into_owned();
         let plain = slim_pack(&g, None, &tmp.join(format!("{n}.fsb")));
         assert_eq!(slim_pack(&g, Some("2=c2,3=c3,4=c4"), &tmp.join(format!("{n}-named.fsb"))), plain, "{n}: its class columns named");
@@ -129,8 +146,11 @@ fn fixture_slim_packs() {
 /// A store in gcs's names without its `-C`: the columns have no class ids, and the load says so (it never drops them).
 #[test]
 fn gcs_names_need_their_classes_named() {
-    let tmp = scratch("gcs-unnamed");
     let fx = fixtures();
+    if !cloud_fixtures(&fx) {
+        return;
+    }
+    let tmp = scratch("gcs-unnamed");
     renamed_copy(&fx[0], &tmp.join("g"), &GCS_NAMES);
     let e = load(&store::open(&tmp.join("g")).unwrap(), None).err().unwrap().to_string();
     assert_eq!(
