@@ -23,8 +23,8 @@ CF = INFRA / "cf" / "shared"
 PROJECT = "oa-internal-450019"
 EMAIL = f"disky-vm-pilot@{PROJECT}.iam.gserviceaccount.com"
 MEMBER = f"serviceAccount:{EMAIL}"
-R2_JOB = f"oa-r2-usage-job@{PROJECT}.iam.gserviceaccount.com"
-HF_JOB = f"hf-usage-job@{PROJECT}.iam.gserviceaccount.com"
+R2_JOB = f"oa-r2-usage-vm@{PROJECT}.iam.gserviceaccount.com"
+HF_JOB = f"hf-usage-vm@{PROJECT}.iam.gserviceaccount.com"
 OWN = ["vm-pilot-tunnel-token", "vm-pilot-vmd-key-oa-r2", "vm-pilot-vmd-key-hf"]
 
 
@@ -146,8 +146,8 @@ def test_gcp_box(monkeypatch):
                               "AWS_SECRET_ACCESS_KEY": "oa-r2-index-secret-access-key"}},
             {"name": "hf", "job_account": HF_JOB, "vmd_key_secret": "vm-pilot-vmd-key-hf", "store": "r2://oa-hf-usage-index",
              "pack_env": {"AWS_DEFAULT_REGION": "auto"},
-             "pack_secrets": {"AWS_ACCESS_KEY_ID": "hf-usage-r2-access-key-id",
-                              "AWS_SECRET_ACCESS_KEY": "hf-usage-r2-secret-access-key",
+             "pack_secrets": {"AWS_ACCESS_KEY_ID": "hf-usage-vm-r2-access-key-id",
+                              "AWS_SECRET_ACCESS_KEY": "hf-usage-vm-r2-secret-access-key",
                               "DISKY_R2_ENDPOINT_URL": "hf-usage-r2-endpoint"}},
         ]
 

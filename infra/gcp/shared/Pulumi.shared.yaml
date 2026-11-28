@@ -26,8 +26,9 @@ config:
     registries: [us-west1-docker.pkg.dev, us-central1-docker.pkg.dev]
     tenants:
       - name: oa-r2
-        # o/r2 `job/r2.json` `job_account`: holds r2's scan secrets, its data bucket and its images
-        jobAccount: oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com
+        # r2's narrow VM account (o/r2 ce94a6fe1, r2's own stack): only what the box runs for r2 (the pack pull and a scan's
+        # runtime secrets: R2 source/index keys, the site grant, D1, the Slack bot), never its search token or Pages edit
+        jobAccount: oa-r2-usage-vm@oa-internal-450019.iam.gserviceaccount.com
         vmdKeySecret: vm-pilot-vmd-key-oa-r2
         # `dt-cloud vm-pack pull`: the store `vm-pack build` publishes to, beside the interval store the site reads; its
         # credentials read as the job account
@@ -40,8 +41,9 @@ config:
             AWS_ACCESS_KEY_ID: oa-r2-index-access-key-id
             AWS_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
       - name: hf
-        # o/hf `job/profiles/hf.yml` `executor.service_account`
-        jobAccount: hf-usage-job@oa-internal-450019.iam.gserviceaccount.com
+        # hf's narrow VM account (o/hf b2e7d159d, hf's own stack): a read-only R2 key on oa-hf-usage-index for the pack pull,
+        # nothing else (hf's scans stay on Batch; never its LFS write token)
+        jobAccount: hf-usage-vm@oa-internal-450019.iam.gserviceaccount.com
         vmdKeySecret: vm-pilot-vmd-key-hf
         pack:
           store: r2://oa-hf-usage-index
@@ -49,7 +51,7 @@ config:
             AWS_DEFAULT_REGION: auto
           secrets:
             DISKY_R2_ENDPOINT_URL: hf-usage-r2-endpoint
-            AWS_ACCESS_KEY_ID: hf-usage-r2-access-key-id
-            AWS_SECRET_ACCESS_KEY: hf-usage-r2-secret-access-key
+            AWS_ACCESS_KEY_ID: hf-usage-vm-r2-access-key-id
+            AWS_SECRET_ACCESS_KEY: hf-usage-vm-r2-secret-access-key
 secretsprovider: gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
 encryptedkey: CiQAqKOWSPPfZ9uoy1UsrC9QWiqfLnYwzKS8+OJJv1LuqnYE9B4SSQAw+4V0i8JpINdtjfy6thUhJkwAUhTg9tDoZMh2u9hrtiVaYhLxoBH97J069T4/GT6qqEdPdwk2JlVVXCF0G6e9EfGubzyhFs0=
