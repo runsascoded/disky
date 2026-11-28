@@ -1301,6 +1301,24 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 .tooltip-content.pinned { border-color: var(--ink-3); }
 .tooltip-content .search-off-tip p { margin: 0 0 4px; }
 .tooltip-content .search-off-tip p:last-child { margin-bottom: 0; }
+// Which backend answered the map (`BackendBadge`, VM mode beside the indexes): a small pill in the top bar.
+.be-badge {
+  flex: none;
+  font: 600 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 3px 6px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  color: var(--ink-3);
+  cursor: default;
+  &.be-vm { color: var(--s1); border-color: var(--s1); }
+  &.be-idx-fallback { color: var(--danger); border-color: var(--danger); }
+}
+.tooltip-content .be-tip {
+  max-width: 340px;
+  p { margin: 0 0 4px; }
+  ul { margin: 0 0 6px; padding-left: 16px; }
+  li { margin: 2px 0; }
+}
 .tt-ref.pinnable { cursor: pointer; }
 .tooltip-content .copy-hint { display: block; color: var(--ink-3); font-size: 11px; margin-top: 3px; }
 .tooltip-content code.elide-full {

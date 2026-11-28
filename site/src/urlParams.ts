@@ -63,6 +63,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['none', 'objects', 'bytes', 'byteRate'],
     pages: ['/staged', '/runs'],
   },
+  be: {
+    label: 'Backend',
+    description: 'Pins this session to a backend where VM mode is on: `vm` answers the map from `vmd` (an in-memory server over every scan), `idx` from the indexes. It re-pins the session (a cookie), stays in the URL while pinned `vm` so the links the page builds keep it, and rides on the page\'s `/api/` requests. The top bar\'s badge says which backend answered. Ignored where VM mode is off. When absent, the session keeps its pin (new sessions: `idx`, unless the deployment moves a share to `vm`).',
+    examples: ['vm', 'idx'],
+  },
   before: {
     hidden: true,
     label: 'Fixture compare from',
