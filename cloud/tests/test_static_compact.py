@@ -164,12 +164,13 @@ def test_incremental_measure_is_the_rebuilds(world, tmp_path, store, gen):
 
 def test_the_floor_crossers_counted_on_worker_processes_measure_the_same(world, tmp_path, monkeypatch):
     """`base_counts_parallel` (crossers cut in sorted shares, counted on spawned processes against the tier's own files) writes
-    the measurement the in-process count does, md5 for md5."""
+    the measurement the in-process count does, md5 for md5, in as many shares as the processes take (`SHARE_ROWS_MIN` 1)."""
     root = world["a_store"]
     rec = json.loads((root / "g.c001" / ar.COMPACTION).read_text())
     base = root / rec["from"]
     tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
     docs = {}
+    monkeypatch.setattr(sme, "SHARE_ROWS_MIN", 1)
     for name, least, local in (("here", 10**9, False), ("procs", 1, False), ("copied", 1, True)):
         monkeypatch.setattr(sme, "PARALLEL_MIN", least)
         # `copied`: the base tier as if on another filesystem (the fold's mount), so the workers count a work-disk copy
