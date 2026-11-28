@@ -1,6 +1,7 @@
 # The Ops Agent on the VM pilot's box: the journal (every unit's output: vmd, the tunnel, the pack sync, the local job
-# backend's `disky-job-*` supervisors, this bootstrap) to Cloud Logging. No metrics: the box's account holds
-# `logging.logWriter` only.
+# backend's `disky-job-*` supervisors, this bootstrap) to Cloud Logging, and the host's metrics (memory, CPU, disk) to
+# Cloud Monitoring once a minute: what the slices' budgets are sized by (specs/vm-pilot.md "The box"). The box's
+# account holds `logging.logWriter` and `monitoring.metricWriter`.
 logging:
   receivers:
     journald:
@@ -10,7 +11,11 @@ logging:
       default_pipeline:
         receivers: [journald]
 metrics:
+  receivers:
+    hostmetrics:
+      type: hostmetrics
+      collection_interval: 60s
   service:
     pipelines:
       default_pipeline:
-        receivers: []
+        receivers: [hostmetrics]

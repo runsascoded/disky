@@ -75,7 +75,7 @@ def test_gcp_box(monkeypatch):
             "disky:gcp:VmBox": ["vm-pilot"],
             "disky:gcp:JobAccount": ["vm-pilot"],
             "gcp:serviceaccount/account:Account": ["vm-pilot"],
-            "gcp:projects/iAMMember:IAMMember": ["vm-pilot-logging.logWriter"],
+            "gcp:projects/iAMMember:IAMMember": ["vm-pilot-logging.logWriter", "vm-pilot-monitoring.metricWriter"],
             "disky:gcp:Secrets": ["vm-pilot-secrets"],
             "gcp:secretmanager/secret:Secret": sorted(OWN),
             "gcp:secretmanager/secretIamMember:SecretIamMember": sorted(f"{s}-accessor" for s in OWN),
@@ -91,6 +91,8 @@ def test_gcp_box(monkeypatch):
         r = mocks.resources
         assert r[("gcp:projects/iAMMember:IAMMember", "vm-pilot-logging.logWriter")] == {
             "project": PROJECT, "role": "roles/logging.logWriter", "member": MEMBER}
+        assert r[("gcp:projects/iAMMember:IAMMember", "vm-pilot-monitoring.metricWriter")] == {
+            "project": PROJECT, "role": "roles/monitoring.metricWriter", "member": MEMBER}
         # Per-deployment isolation: `secretAccessor` on the box's own three secrets only, and of each tenant's, only
         # the right to mint its job account's tokens.
         grants = [v for (t, _), v in r.items() if t == "gcp:secretmanager/secretIamMember:SecretIamMember"]

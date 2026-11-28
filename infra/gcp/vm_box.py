@@ -89,7 +89,9 @@ class VmBox(ComponentResource):
             account_id=box.account_id,
             display_name=f"disky {name}",
             description=f"The {name} VM: serves vmd and runs its tenants' scans ({', '.join(t.name for t in box.tenants)})",
-            roles=["roles/logging.logWriter"],
+            # logs and the Ops Agent's metrics (host memory / CPU: what the pilot sizes the slices by; the agent exports its
+            # own self-metrics regardless, which without this fail every few seconds)
+            roles=["roles/logging.logWriter", "roles/monitoring.metricWriter"],
             acts_as_self=False,
             adopt=adopt,
             opts=child,
