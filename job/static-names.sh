@@ -64,14 +64,14 @@ MACHINE=${MACHINE:-n2-highmem-16}
 SSD=${SSD:-750}
 
 # The tasks' Batch `environment`: $1 (JSON; `{}` when empty) with the resolved profile and, when set, `$DISKY_LABELS`,
-# `$SCAN_RUN_ID`, `$SCAN_ID` added to its variables.
+# `$SCAN_RUN_ID`, `$SCAN_ID`, `$DT_TASK_LOG_VIEW` (the deployment's task-log view) added to its variables.
 task_env() {
   PROFILE_JSON=$PROFILE_JSON BASE=${1:-'{}'} python3 - <<'PY'
 import json, os
 d = json.loads(os.environ["BASE"])
 v = d.setdefault("variables", {})
 v.setdefault("STATIC_NAMES_PROFILE", json.dumps(json.loads(os.environ["PROFILE_JSON"]), separators=(",", ":")))
-for key in ("DISKY_LABELS", "SCAN_RUN_ID", "SCAN_ID"):
+for key in ("DISKY_LABELS", "SCAN_RUN_ID", "SCAN_ID", "DT_TASK_LOG_VIEW"):
     if os.environ.get(key):
         v[key] = os.environ[key]
 print(json.dumps(d))
