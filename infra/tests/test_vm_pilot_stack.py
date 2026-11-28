@@ -131,7 +131,8 @@ def test_gcp_box(monkeypatch):
             "enable-oslogin": "TRUE",
             "block-project-ssh-keys": "TRUE",
             "disky-repo": "https://github.com/Open-Athena/disky.git",
-            "disky-ref": "cloud",
+            # the checkout the box runs: whatever the committed config pins (`vmPilot.ref`)
+            "disky-ref": yaml.safe_load((INFRA / "gcp/shared/Pulumi.shared.yaml").read_text())["config"]["disky-shared-gcp:vmPilot"]["ref"],
             "disky-tunnel-secret": "vm-pilot-tunnel-token",
             "disky-registries": "us-central1-docker.pkg.dev,us-west1-docker.pkg.dev",
             "disky-scan-memory-max": "8G",
