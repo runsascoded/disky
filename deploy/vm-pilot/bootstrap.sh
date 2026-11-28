@@ -19,6 +19,9 @@ CLOUDFLARED_VERSION=2026.11.0
 CLOUDFLARED_SHA256=5305dbaf62984e92e7daa29cdd6a35a4797edc23385d4c5b8422ff97eb96a19b
 UV_VERSION=0.13.8
 UV_SHA256=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
+# The local job backend's gcsfuse volumes (a scan's data bucket, mounted on the host as the job's account)
+GCSFUSE_VERSION=3.13.1
+GCSFUSE_SHA256=e0b1b07f8f71fa7955a76eee77ff5d5ea37e9ba3fb77fab7b56aa416eeb3305f
 # What job/Dockerfile's `fsb-build` stage builds on
 RUST_IMAGE=rust:1.91-slim-bookworm
 PYTHON=3.12
@@ -69,10 +72,10 @@ grep -q " $DATA " /etc/fstab || echo "LABEL=disky-data $DATA ext4 discard,defaul
 mountpoint -q "$DATA" || mount "$DATA"
 mkdir -p "$DATA"/{bin,packs,jobs,work,cargo,uv,venv,build} "$ETC" "$LIB"
 
-# 2. Packages: Docker (the local job backend's engine), git, jq; cloudflared and uv pinned and checksummed; the Ops Agent
-# ships the journal (every unit's output) to Cloud Logging.
+# 2. Packages: Docker (the local job backend's engine), git, jq, fuse (gcsfuse's); cloudflared, uv and gcsfuse pinned and
+# checksummed; the Ops Agent ships the journal (every unit's output) to Cloud Logging.
 export DEBIAN_FRONTEND=noninteractive
-PKGS=(docker.io git jq ca-certificates)
+PKGS=(docker.io git jq ca-certificates fuse)
 if ! dpkg -s "${PKGS[@]}" >/dev/null 2>&1; then
   apt-get update -q
   apt-get install -y -q "${PKGS[@]}"
@@ -89,6 +92,13 @@ if [ "$(uv --version 2>/dev/null | awk '{print $2}')" != "$UV_VERSION" ]; then
   fetch "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz" "$UV_SHA256" /tmp/uv.tgz
   tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx
   rm -f /tmp/uv.tgz
+fi
+if [ "$(gcsfuse --version 2>/dev/null | awk '{print $3}')" != "$GCSFUSE_VERSION" ]; then
+  log "installing gcsfuse $GCSFUSE_VERSION"
+  fetch "https://github.com/GoogleCloudPlatform/gcsfuse/releases/download/v$GCSFUSE_VERSION/gcsfuse_${GCSFUSE_VERSION}_amd64.deb" \
+    "$GCSFUSE_SHA256" /tmp/gcsfuse.deb
+  dpkg -i /tmp/gcsfuse.deb
+  rm -f /tmp/gcsfuse.deb
 fi
 if ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
   log "installing the Ops Agent"
