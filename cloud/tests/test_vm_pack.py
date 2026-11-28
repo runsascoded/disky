@@ -61,14 +61,17 @@ def test_build_mirrors_the_newest_manifest_and_publishes(tmp_path, fsb):
     assert V.build(str(root), tmp_path / "w", fsb) == {**doc, "skipped": True}
 
 
-@pytest.mark.parametrize("cols, arg", [
-    ({2: "nearline_bytes", 3: "coldline_bytes", 4: "archive_bytes"}, "2=nearline_bytes,3=coldline_bytes,4=archive_bytes"),
-    ({6: "git_bytes", 5: "private_bytes"}, "5=private_bytes,6=git_bytes"),
-    ({2: "c2", 3: "c3", 4: "c4"}, "2=c2,3=c3,4=c4"),
-    ({}, ""),
-], ids=["gcs", "hf", "default", "none"])
-def test_build_names_the_stores_class_columns(tmp_path, monkeypatch, cols, arg):
-    """`fsb pack-slim -C`: the deployment's `interval_store.CLASS_COLS`, by class id (specs/vm-mode.md §6.1)."""
+@pytest.mark.parametrize("cols, given, arg", [
+    ({2: "nearline_bytes", 3: "coldline_bytes", 4: "archive_bytes"}, None, "2=nearline_bytes,3=coldline_bytes,4=archive_bytes"),
+    ({6: "git_bytes", 5: "private_bytes"}, None, "5=private_bytes,6=git_bytes"),
+    ({2: "c2", 3: "c3", 4: "c4"}, None, "2=c2,3=c3,4=c4"),
+    ({}, None, ""),
+    ({2: "c2", 3: "c3", 4: "c4"}, "5=private_bytes,6=git_bytes", "5=private_bytes,6=git_bytes"),
+    ({2: "c2", 3: "c3", 4: "c4"}, "", ""),
+], ids=["gcs", "hf", "default", "none", "given", "given-none"])
+def test_build_names_the_stores_class_columns(tmp_path, monkeypatch, cols, given, arg):
+    """`fsb pack-slim -C`: the deployment's `interval_store.CLASS_COLS`, by class id, unless `build` is given the
+    store's (`vm-pack build -C`: a shared box's checkout packing another deployment's store; specs/vm-mode.md §6.1)."""
     from dt_cloud import interval_store as ist
     monkeypatch.setattr(ist, "CLASS_COLS", cols)
     p = tmp_path / "fsb"
@@ -81,7 +84,7 @@ print(json.dumps({"bytes": 1, "scans": 3}))
 """)
     p.chmod(p.stat().st_mode | stat.S_IEXEC)
     root = store(tmp_path / "s", {"2026-11-13T1734.json": []})
-    V.build(str(root), tmp_path / "w", str(p))
+    V.build(str(root), tmp_path / "w", str(p), classes=given)
     w = tmp_path / "w"
     assert json.loads((w / "pack.fsb.argv").read_text()) == ["pack-slim", str(w / "gen" / GEN), "-o", str(w / "pack.fsb"), "-C", arg]
 

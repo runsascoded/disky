@@ -98,9 +98,9 @@ def class_cols() -> str:
     return ",".join(f"{k}={c}" for k, c in sorted(ist.CLASS_COLS.items()))
 
 
-def pack_cmd(fsb: str, gen_dir: Path, out: Path) -> list[str]:
-    """The `fsb pack-slim` command for a mirrored generation."""
-    return [fsb, "pack-slim", str(gen_dir), "-o", str(out), "-C", class_cols()]
+def pack_cmd(fsb: str, gen_dir: Path, out: Path, classes: str | None = None) -> list[str]:
+    """The `fsb pack-slim` command for a mirrored generation (`classes`: `-C`, default `class_cols()`)."""
+    return [fsb, "pack-slim", str(gen_dir), "-o", str(out), "-C", class_cols() if classes is None else classes]
 
 
 def published(store: Store, gen: str, manifest: str | None) -> dict | None:
@@ -112,9 +112,10 @@ def published(store: Store, gen: str, manifest: str | None) -> dict | None:
     return None
 
 
-def build(root: str, work: Path, fsb: str, *, keep: int = 2, force: bool = False) -> dict:
+def build(root: str, work: Path, fsb: str, *, keep: int = 2, force: bool = False, classes: str | None = None) -> dict:
     """Write and publish the pack of `root`'s current generation and newest manifest; the pointer's content (with
-    `"skipped": true` when it already named them)."""
+    `"skipped": true` when it already named them). `classes`: the store's class columns (`fsb -C`), when they aren't
+    this checkout's `CLASS_COLS` (a shared box's checkout packing another deployment's store)."""
     store = Store(store_url(root))
     gen, manifest = newest(store)
     if not force and (cur := published(store, gen, manifest)):
@@ -130,7 +131,7 @@ def build(root: str, work: Path, fsb: str, *, keep: int = 2, force: bool = False
     mirror_s = time.monotonic() - t0
     out = work / "pack.fsb"
     t1 = time.monotonic()
-    r = subprocess.run(pack_cmd(fsb, dest, out), stdout=subprocess.PIPE, text=True, check=True)
+    r = subprocess.run(pack_cmd(fsb, dest, out, classes), stdout=subprocess.PIPE, text=True, check=True)
     info = json.loads(r.stdout.strip().splitlines()[-1])
     pack_s = time.monotonic() - t1
     key = pack_key(gen, manifest)
@@ -385,16 +386,17 @@ def cli() -> None:
 
 
 @cli.command("build")
+@option("-C", "--class-cols", "classes", help="The store's class columns, `K=COLUMN,…` by class id (`fsb pack-slim -C`; empty: none). Default: this checkout's `interval_store.CLASS_COLS`")
 @option("-f", "--fsb", help="The `fsb` binary (default `$FSB`, then PATH)")
 @option("-F", "--force", is_flag=True, help="Write even when the pointer already names this generation and manifest")
 @option("-k", "--keep", type=IntRange(1), default=2, show_default=True, help="Packs to keep under vm-pack/")
 @option("-o", "--store", "root", required=True, help="The store (a dir or a gs:// / s3:// / r2:// URL) holding interval-store/")
 @option("-w", "--work", type=PathType(file_okay=False, path_type=Path), default=Path("work/vm-pack"), show_default=True, help="Local work dir (the mirrored generation and the pack: ~1.3x the pack's size)")
-def build_cmd(fsb: str | None, force: bool, keep: int, root: str, work: Path) -> None:
+def build_cmd(classes: str | None, fsb: str | None, force: bool, keep: int, root: str, work: Path) -> None:
     """Write the slim pack of the store's current interval-store generation and newest manifest, and publish it under
     vm-pack/ (the pack, then `vm-pack/CURRENT.json`). Prints the pointer's JSON."""
     work.mkdir(parents=True, exist_ok=True)
-    print(json.dumps(build(root, work, fsb_path(fsb), keep=keep, force=force)))
+    print(json.dumps(build(root, work, fsb_path(fsb), keep=keep, force=force, classes=classes)))
 
 
 @cli.command("submit")
