@@ -218,6 +218,10 @@ dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N] [-C K=COL,…]  # VM m
                           # `vm-pack pull -o STORE -d DIR`: the serving side's (the VM pilot's pack sync): the pointer's pack
                           # to `DIR/current.fsb` (sha256-checked, renamed into place) + `DIR/current.json`; `state` pulled |
                           # current (no-op) | none (nothing published)
+dt-cloud local-job status|logs|cancel [JOB]  # The local job backend's jobs on this host (`$DISKY_LOCAL_JOBS`): states, each run's
+                          # wall time / `memory.peak` / OOM kills, output, a cancel (TERM, 60 s; then the job's gcsfuse mounts,
+                          # network and metadata server go). A local job's containers authenticate through a metadata server of
+                          # their own (`job_metadata.py`), its tokens minted for the spec's account and refreshed while it runs
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which the image build stamps (`dt-cloud image build` → `job/Dockerfile`
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
