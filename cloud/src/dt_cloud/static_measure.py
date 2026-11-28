@@ -42,7 +42,7 @@ MEASURE_CHUNK_ROWS = 50_000_000
 #: `$DT_MEASURE_VERIFY=N`: N ranges (evenly spaced) of a cut measurement also joined the uncut way, over the whole
 #: tables, and compared row for row (a mismatch raises): the cut checked on real data, at ~one uncut range's cost apiece.
 MEASURE_VERIFY_ENV = "DT_MEASURE_VERIFY"
-#: The sampled `q` values the ranges are cut from
+#: About how many sampled `q` values the ranges are cut from
 RANGE_SAMPLE_ROWS = 100_000
 #: DuckDB's Arrow batch (`to_arrow_table`'s, `to_arrow_reader`'s default) and pyarrow's default row group: `write_sorted`
 #: re-cuts a stream to both, so it writes the file one `pq.write_table` of the whole result writes, byte for byte.
@@ -51,14 +51,17 @@ ROW_GROUP_ROWS = 1024 * 1024
 
 
 def q_ranges(con, tables: list[str], target: int) -> list[tuple[str | None, str | None]]:
-    """`[lo, hi)` ranges of the `q` column over `tables`, of about `target` rows each (cut at sampled values; None: open),
-    or one unbounded range when they hold fewer."""
-    union = " UNION ALL ".join(f"SELECT q FROM {t}" for t in tables)
-    n = con.execute(f"SELECT count(*) FROM ({union})").fetchone()[0]
+    """`[lo, hi)` ranges of the `q` column over `tables` (tables, not views: their `rowid`s), of about `target` rows each
+    (None: open), or one unbounded range when they hold fewer. Cut at sampled values: every n / `RANGE_SAMPLE_ROWS`-th
+    row of each table by `rowid` (a filter every thread applies, reading `q` alone; a seeded reservoir sample ran on
+    one thread, ~5 min over cw's ~10B rows). The cuts only chunk the work: `measure_kind` writes the same bytes at any."""
+    n = sum(con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tables)
     parts = -(-n // target)
     if parts <= 1:
         return [(None, None)]
-    sample = [r[0] for r in con.execute(f"SELECT q FROM ({union}) USING SAMPLE reservoir({RANGE_SAMPLE_ROWS} ROWS) REPEATABLE (1) ORDER BY q").fetchall()]
+    every = max(1, n // RANGE_SAMPLE_ROWS)
+    union = " UNION ALL ".join(f"SELECT q FROM {t} WHERE rowid % {every} = 0" for t in tables)
+    sample = [r[0] for r in con.execute(f"SELECT q FROM ({union}) ORDER BY q").fetchall()]
     cuts = sorted({sample[len(sample) * i // parts] for i in range(1, parts)})
     bounds = [None, *cuts, None]
     return list(zip(bounds[:-1], bounds[1:]))
