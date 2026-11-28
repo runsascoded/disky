@@ -4,3 +4,5 @@ config:
   disky-shared-cf:vmPilot:
     tunnelName: disky-vm-pilot
     hostname: vmd-pilot.oa.dev
+secretsprovider: gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
+encryptedkey: CiQAqKOWSOfPiW7yNWAjaV9cy1R/xJpCTXD06Io/ibdoHkVNfC4SSQAw+4V0sTol/uRKoMgzjVIH/StXrWwdxJmTy7g0G62SJwa6LzJGMoEroG/VAjmIRnNoTJU+w6iOBIbZa0cCwvgaRCLdULynscU=
