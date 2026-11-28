@@ -734,6 +734,8 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         for s, h in prev.items():
             signal.signal(s, h)
     set_stage(f"{backend.engine}: finish")
+    # the run's last tasks can end, and the engine exit, within one `wait`: the finish stage carries the final count
+    set_detail(backend.status(run))
     if stopped:
         rc = 128 + stopped[0]
         backend.cancel(run)

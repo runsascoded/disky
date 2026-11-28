@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
+from dt_cloud import heartbeat
 from dt_cloud import scan_head as H
 from dt_cloud.cli import main
 from dt_cloud.scan_backend import Backend
@@ -688,6 +689,20 @@ class FakeBackend(Backend):
         return run.launch / "fake.dag"
 
 
+def _drive(tmp_path, monkeypatch, fake: FakeBackend) -> tuple[int, list[tuple[str, list[str]]]]:
+    """`scan head` over `fake` on a one-source profile: its exit code and what it recorded."""
+    prof = tmp_path / "p.yml"
+    prof.write_text(f"deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
+                    "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\noptions: {list: {import: true}}\n"
+                    "skip: [static-names, digest, interval-store, warm-cache, probe]\n")
+    monkeypatch.setattr(H, "backend_for", lambda profile, nf_dir: fake)
+    records: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(H, "_record", lambda cmd, args: records.append((cmd.name, args)))
+    env = {**LABELS, "DT_RUN_ID": "run-1", "SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1",
+           "SCAN_RUNS_PROFILE": str(tmp_path / "scan-runs.json"), "DT_SUPERVISE": "1"}
+    return H.head(prof, NF, tmp_path / "launch", env=env), records
+
+
 @pytest.mark.parametrize("rc, term, calls, finish", [
     (0, False, [("finish", 0, None)], ["-r", "run-1", "-x", "0", "-l", "fake=1"]),
     (3, False, [("finish", 3, None)], ["-r", "run-1", "-x", "3", "-e", "fake exit 3", "-l", "fake=1"]),
@@ -697,20 +712,28 @@ class FakeBackend(Backend):
 def test_head_drives_its_backend(tmp_path, monkeypatch, rc, term, calls, finish):
     """specs/orchestrator-abstraction.md §3: the head prepares, stores the preview, starts and waits on its backend; a
     TERM interrupts the run, then cancels what it left; the backend's error, cost and DAG file go on the finish record."""
-    prof = tmp_path / "p.yml"
-    prof.write_text(f"deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
-                    "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\noptions: {list: {import: true}}\n"
-                    "skip: [static-names, digest, interval-store, warm-cache, probe]\n")
     fake = FakeBackend(rc, term)
-    monkeypatch.setattr(H, "backend_for", lambda profile, nf_dir: fake)
-    records: list[tuple[str, list[str]]] = []
-    monkeypatch.setattr(H, "_record", lambda cmd, args: records.append((cmd.name, args)))
-    env = {**LABELS, "DT_RUN_ID": "run-1", "SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1",
-           "SCAN_RUNS_PROFILE": str(tmp_path / "scan-runs.json"), "DT_SUPERVISE": "1"}
-    assert H.head(prof, NF, tmp_path / "launch", env=env) == (143 if term else rc)
+    got, records = _drive(tmp_path, monkeypatch, fake)
+    assert got == (143 if term else rc)
     session = H.session_id("fix", "2026-10-16T1200")
     assert fake.calls == [("prepare", "2026-10-16T1200", session, "list_source"), ("store_preview",), ("start",), *calls]
     assert [(n, a) for n, a in records if n != "start"] == [("finish", finish)]
+
+
+class CountingBackend(FakeBackend):
+    """`FakeBackend` whose status counts the waits: a task ends with each, the last as the run exits."""
+
+    def status(self, run):
+        return f"{self.waits} done"
+
+
+def test_the_finish_stage_counts_the_tasks_that_ended_as_the_run_exited(tmp_path, monkeypatch):
+    """The run's last task ends, and the engine exits, within one `wait`: the liveness line read the status before that
+    wait ("1 done"), so the finish stage reads it again and carries the final count (gcs's 11-28 head: 12 of 13)."""
+    details: list[str | None] = []
+    monkeypatch.setattr(H, "set_detail", lambda d: details.append(d) or heartbeat.set_detail(d))
+    assert _drive(tmp_path, monkeypatch, CountingBackend(0))[0] == 0
+    assert (details, heartbeat.current_stage()[:2]) == (["0 done", "1 done", "2 done"], ("fake: finish", "2 done"))
 
 
 class Tick:
