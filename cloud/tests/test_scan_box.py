@@ -216,6 +216,23 @@ def test_submit_reads_the_images_profile_writes_the_box_one_and_queues_the_head(
         "scan", "head", f"/mnt/disks/nf/profiles/{JOB}.yml"]
 
 
+def test_a_check_is_the_heads_job_running_the_check_instead(tmp_path):
+    """The same spec (mounts, identity, secrets), its container running `CHECK` over the data mount, a secret the head's
+    env doesn't hold, the secrets' project and the box profile."""
+    host = Host()
+    jobs = jb.Local(tmp_path / "jobs", work=tmp_path / "work", host=host, identity=Identity(), spawn="direct")
+    doc = B.submit(jobs, IMAGE, "/app/job/profiles/demo.yml", account=SA, budget=8 * GIB, nproc=4,
+                   drop_secrets=("CF_PAGES_TOKEN",), env={"DT_TRIGGER": "manual"}, check=True, now=NOW)
+    job = "demo-r2-box-check-20261128-120000"
+    spec = json.loads((tmp_path / f"jobs/{job}/spec.json").read_text())
+    c = spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]
+    assert (doc["job"], c["entrypoint"], c["commands"], c["volumes"]) == (
+        job, "python", ["-c", B.CHECK, "/mnt/disks/data-bucket", "R2_ACCESS_KEY_ID=idx-key-id", "proj",
+                        f"/mnt/disks/nf/profiles/{job}.yml"],
+        ["/mnt/disks/data-bucket:/mnt/disks/data-bucket:rw", "/mnt/disks/nf:/mnt/disks/nf:rw"])
+    compile(B.CHECK, "<check>", "exec")  # it parses
+
+
 def test_a_dry_run_writes_and_submits_nothing(tmp_path):
     jobs, host, doc = submit(tmp_path, dry_run=True)
     assert (sorted(doc), doc["dag"], (tmp_path / "work").exists(), (tmp_path / "jobs").exists(), host.spawned) == (

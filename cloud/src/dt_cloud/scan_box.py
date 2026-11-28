@@ -220,15 +220,51 @@ def image_file(jobs: Local, image: str, path: str, account: str) -> str:
                              env={TOKEN_ENV: token})
 
 
-def job_id_for(tenant: str, now: datetime) -> str:
-    return f"{tenant}-box-{now:%Y%m%d-%H%M%S}"
+def job_id_for(tenant: str, now: datetime, check: bool = False) -> str:
+    return f"{tenant}-box-{'check-' if check else ''}{now:%Y%m%d-%H%M%S}"
+
+
+#: A check of the head's setup (`submit(check=True)`), in the head's own container, writing nothing but `scan head -n`'s
+#: launch files: argv `<data mount> <a secret binding> <project> <profile>`. Each step raises on failure (the job fails).
+CHECK = """\
+import json, os, subprocess, sys
+import google.auth, google.auth.transport.requests as r
+data, binding, project, profile = sys.argv[1:5]
+out = {"data": sorted(os.listdir(data))[:5]}
+creds, proj = google.auth.default()
+creds.refresh(r.Request())
+out["auth"] = [proj, getattr(creds, "service_account_email", None), type(creds).__module__]
+name = binding.partition("=")[0]
+subprocess.run(["dt-cloud", "secrets", "exec", "-p", project, "-s", binding, "--", "sh", "-c", f'test -n "${name}"'], check=True)
+out["secret"] = name
+subprocess.run(["dt-cloud", "scan", "head", "-n", profile], check=True)
+out["head"] = "dry run ok"
+print("BOX-CHECK " + json.dumps(out), flush=True)
+"""
+
+
+def check_runnable(spec: dict, profile: dict, project: str, profile_path: str) -> None:
+    """`spec`'s head made a check (`CHECK`): the data bucket's mount listed through gcsfuse, a plain `google.auth` client
+    (no `dt_cloud`) authenticated through the job's metadata server, one of the profile's secrets read by `secrets
+    exec`, and `scan head -n` over the box profile in the image's own code (it renders `scan.nf` and the params into
+    the launch dir; it runs and records nothing)."""
+    # one the head's env doesn't already hold (`secrets exec` keeps a set variable, reading nothing)
+    names = {k: v for k, v in (profile.get("secrets") or {}).items() if k not in HEAD_SECRETS}
+    if not names:
+        raise ValueError("the box profile binds no secrets beside the head's: nothing for the check to read")
+    var = sorted(names)[0]
+    at = f"{DATA_MOUNT}/{urlparse(profile['data']).netloc}"
+    c = spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]
+    c.update(entrypoint="python", commands=["-c", CHECK, at, f"{var}={names[var]}", project, profile_path])
 
 
 def submit(jobs: Local, image: str, profile_in_image: str, *, account: str, budget: int, nproc: int, queue_size: int = 1,
            mem: str | None = None, drop_secrets: tuple[str, ...] = (), skip: tuple[str, ...] = (),
-           env: dict[str, str] | None = None, dry_run: bool = False, now: datetime | None = None) -> dict:
+           env: dict[str, str] | None = None, dry_run: bool = False, check: bool = False,
+           now: datetime | None = None) -> dict:
     """Read the deployment's profile from `image`, rewrite it for the box (`box_profile`), write it (and `box.json`, the
-    run's budgets) to the head's disk, and submit the head (`head_spec`) as a local job. Returns what it did."""
+    run's budgets) to the head's disk, and submit the head (`head_spec`) as a local job. `check`: the head's container
+    runs `CHECK` instead (`check_runnable`). Returns what it did."""
     import yaml
 
     from .scan_dag import build
@@ -246,11 +282,14 @@ def submit(jobs: Local, image: str, profile_in_image: str, *, account: str, budg
     profile = box_profile(raw, task_mem=task_mem, mem=mem or cap, nproc=nproc, queue_size=queue_size,
                           drop_secrets=drop_secrets, skip=skip)
     tenant = (profile.get("labels") or {}).get("deployment") or profile["deployment"]
-    job_id = job_id_for(tenant, now or datetime.now(timezone.utc))
+    job_id = job_id_for(tenant, now or datetime.now(timezone.utc), check)
     disk = f"{tenant}-{NF_DEVICE}"
     in_container = f"{BOX_WORK}/profiles/{job_id}.yml"
-    spec = head_spec(profile, image=image, account=account, project=(raw.get("executor") or {}).get("project") or project,
-                     job_id=job_id, profile_path=in_container, disk=disk, env=env or {})
+    secrets_project = (raw.get("executor") or {}).get("project") or project
+    spec = head_spec(profile, image=image, account=account, project=secrets_project, job_id=job_id,
+                     profile_path=in_container, disk=disk, env=env or {})
+    if check:
+        check_runnable(spec, profile, secrets_project, in_container)
     dag = [n.name for n in build(parse(profile, where="box profile")).nodes]
     host_dir = jobs.kept_root / disk
     doc = {"job": job_id, "image": image, "account": account, "profile": str(host_dir / "profiles" / f"{job_id}.yml"),
@@ -315,6 +354,7 @@ def cli() -> None:
 @option("-a", "--account", required=True, help="The job's service account: the deployment's VM account (the box may mint only its tenants')")
 @option("-b", "--trigger-by", help="Who started the run (`$DT_TRIGGER_BY`, recorded on /scans; the run is `manual`)")
 @option("-B", "--budget", help="The scan budget the steps size to (a size, e.g. 8GiB); default the slice's `memory.max`")
+@option("-c", "--check", is_flag=True, help="Check the head's setup instead (the bucket's mount, a plain google-auth client, a secret, `scan head -n`): runs and records no scan")
 @option("-g", "--gen", help="Resume this generation of scan `-s` (both, or neither: a new scan stamped at start)")
 @option("-i", "--image", required=True, help="The deployment's scan image, pinned by digest (what its scheduler runs)")
 @option("-l", "--machine", default="vm-pilot", show_default=True, help="The run's machine fact on /scans (`$DT_RUN_MACHINE`; not a priced type: the box's cost is fixed)")
@@ -326,13 +366,14 @@ def cli() -> None:
 @option("-S", "--skip", "skip", multiple=True, help="A step to leave out of this run (repeatable), e.g. one needing what the job account lacks")
 @option("-x", "--drop-secret", "drop_secrets", multiple=True, help="An env name whose secret bindings to drop (repeatable): one the job account can't read")
 @argument("profile")
-def submit_cmd(account: str, trigger_by: str | None, budget: str | None, gen: str | None, image: str, machine: str,
-               mem: str | None, dry_run: bool, queue_size: int, region: str | None, scan: str | None, skip: tuple[str, ...],
-               drop_secrets: tuple[str, ...], profile: str) -> None:
+def submit_cmd(account: str, trigger_by: str | None, budget: str | None, check: bool, gen: str | None, image: str,
+               machine: str, mem: str | None, dry_run: bool, queue_size: int, region: str | None, scan: str | None,
+               skip: tuple[str, ...], drop_secrets: tuple[str, ...], profile: str) -> None:
     """Run the scan PROFILE (its path in the image, e.g. /app/job/profiles/r2.yml) describes on this host: its head as
     a local job in `$DISKY_LOCAL_SLICE`, every step in that container, one at a time. Prints the job id, the profile
     written, the head's disk and the DAG; `dt-cloud local-job status|logs|cancel JOB` follow it, `dt-cloud scan box
-    report JOB` reads its per-task usage once it has ended."""
+    report JOB` reads its per-task usage once it has ended. `-c` first: the same job, checking its setup (`BOX-CHECK
+    {…}` in its log) and leaving no scan behind."""
     from .scan_runs import TRIGGER_BY_RE
 
     if bool(scan) != bool(gen):
@@ -340,21 +381,22 @@ def submit_cmd(account: str, trigger_by: str | None, budget: str | None, gen: st
     if trigger_by and not TRIGGER_BY_RE.fullmatch(trigger_by):
         raise ClickException("-b/--trigger-by: an address or handle (`scan_runs.TRIGGER_BY_RE`)")
     jobs = Local.from_env()
-    size = size_bytes(budget) if budget else slice_budget(jobs.slice)
-    if not size:
-        raise ClickException(f"no budget: {jobs.slice} has no memory.max here; pass -B")
     env = {"DT_TRIGGER": "manual", "DT_RUN_MACHINE": machine,
            **({"DT_TRIGGER_BY": trigger_by} if trigger_by else {}), **({"DT_RUN_REGION": region} if region else {}),
            **({"SNAP_ID": scan, "GEN": gen} if scan and gen else {})}
     try:
+        size = size_bytes(budget) if budget else slice_budget(jobs.slice)
+        if not size:
+            raise ValueError(f"no budget: {jobs.slice} has no memory.max here; pass -B")
         doc = submit(jobs, image, profile, account=account, budget=size, nproc=os.cpu_count() or 1, queue_size=queue_size,
-                     mem=mem, drop_secrets=drop_secrets, skip=skip, env=env, dry_run=dry_run)
+                     mem=mem, drop_secrets=drop_secrets, skip=skip, env=env, dry_run=dry_run, check=check)
     except ValueError as e:
         raise ClickException(str(e)) from None
     print(json.dumps(doc, indent=1))
     if not dry_run:
-        print(f"follow: dt-cloud local-job status {doc['job']} · dt-cloud local-job logs {doc['job']} · "
-              f"after: dt-cloud scan box report {doc['job']}", file=sys.stderr)
+        after = "its log's BOX-CHECK line" if check else f"dt-cloud scan box report {doc['job']}"
+        print(f"follow: dt-cloud local-job status {doc['job']} · dt-cloud local-job logs {doc['job']} · after: {after}",
+              file=sys.stderr)
 
 
 @cli.command("report")
