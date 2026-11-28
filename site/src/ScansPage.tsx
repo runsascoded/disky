@@ -548,7 +548,7 @@ export function ScansPage() {
           <StickyTable className="runs sr-runs">
             <thead><tr>
               {retentionOn && <><th className="sr-retention-cell">History</th><th className="sr-retention-loss"><Tooltip content="Maximum object-state changes in either neighboring interval: a heuristic for information loss. Read and owner metadata changes are excluded.">Change score</Tooltip></th></>}
-              <th><Tooltip content="When the run started, in your time zone; hover for its id.">run</Tooltip></th><th>job type</th><th>status</th>
+              <th><Tooltip content="When the run started, in your time zone; hover for its id.">run</Tooltip></th><th><Tooltip content={<>{['scan', 'compact', 'race', 'merge', 'access-ingest'].map(k => <div key={k}><b>{runKindLabel(k)}</b>: {kindTip(k)}</div>)}</>}>job type</Tooltip></th><th>status</th>
               <th className="num"><Tooltip content="Processing time after the queue, with total elapsed time below. Without queue timing, the total is shown.">duration</Tooltip></th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Total recorded size of generated scan files: listings, indexes, snapshots, etc. Open the run for the breakdown. This is not the size of the storage being scanned, bytes transferred, or all retained indexes.">output files</Tooltip></th>
               <th className="num"><Tooltip content="Change in those generated files' recorded sizes, each compared with the newest earlier scan recording the same structure. This is not a change in the storage being scanned or additional storage retained.">output Δ</Tooltip></th>
@@ -577,7 +577,7 @@ export function ScansPage() {
                     <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
                       {r.trigger === 'manual' && <> <Tooltip content={r.trigger_by ? `Started by hand by ${r.trigger_by}, not by the schedule.` : 'Started by hand (a submit or a resume), not by the schedule.'}><span className="dim">manual</span></Tooltip></>}
                     </td>
-                    <td className="nb"><span className={`sr-job-type ${kindClass(r.kind)}`}><KindLabel run={r} /></span>{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream jobs (listing fan-out, etc.)`}><span className="dim"> +{s.downstream}</span></Tooltip>}</td>
+                    <td className="nb"><Tooltip content={kindTip(r.kind)}><span className={`sr-job-type ${kindClass(r.kind)}`}><KindLabel run={r} /></span></Tooltip>{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream jobs (listing fan-out, etc.)`}><span className="dim"> +{s.downstream}</span></Tooltip>}</td>
                     <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} lost={live?.lost} runHref={scanHref} jobs={jobs} />{live && <Live live={live} />}</td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : processing == null ? fmtDur(s.secs) : <>
                       <span>{fmtDur(processing)} processing</span>
@@ -919,6 +919,16 @@ function RunList({ runs, links, title, scanHref }: { runs: ScanRun[]; links: Lin
 }
 
 /** A run's kind, a maintenance run's with its store (`compact · interval-store`). */
+/** What each job type is, for its chip's tooltip and the column header's. */
+const KIND_TIPS: Record<string, string> = {
+  scan: 'A scan: every bucket listed, its index cut and published, then the search index and the run’s other steps.',
+  'access-ingest': 'An hourly access-log ingest: it updates the read-recency aggregates later scans use, and publishes no snapshot.',
+  compact: 'A compaction (fold): the search index’s base and the runs appended since, folded into a new base generation. It holds the index’s lock, so scans skip their search update meanwhile.',
+  race: 'A race of a compaction: the same fold built beside it, on another image or code (from its saved steps), to compare or to finish first. It publishes nothing; a compaction adopts its output only if chosen.',
+  merge: 'A merge of deferred carries: runs of the search index combined at a level the scans deferred.',
+}
+const kindTip = (kind: string): string => KIND_TIPS[kind] ?? `A ${kind} run.`
+
 function KindLabel({ run }: { run: ScanRun }) {
   const st = maintStore(run)
   return <>{runKindLabel(run.kind)}{st && <span className="dim"> · {st}</span>}</>
