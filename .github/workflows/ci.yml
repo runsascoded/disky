@@ -246,12 +246,16 @@ jobs:
         if: steps.passed.outputs.cache-hit != 'true'
         # one xdist worker per core, `slow` included; `loadgroup`: the conftest keeps the tests sharing a
         # module-scoped fixture together in chunks (one build per chunk), the rest go out one by one.
-        # `--timeout`: meant to fail a hung test after 10 min with every thread's stack, instead of holding the job
-        # to its 60; it didn't fire on the one hang since. The hangs: a worker silent in `test_index_parts.py` (cloud
-        # 44309715157, hf 44335651865, gcs 45008585103; its merge pool forked from a threaded process, spawns since
-        # ebbee51a3) and one in `test_static_compact.py` (r2 43906785571, cause unknown). The slowest phase (a
-        # `test_static_compact` fixture's setup) takes ~2 min
-        run: cd cloud && uv run --no-sync pytest ${{ matrix.shard.args }} -v -n auto --dist loadgroup --durations=30 --timeout=600 --timeout-method=thread
+        # `--timeout`: fails a hung test after 10 min with every thread's stack, instead of holding the job to its 60.
+        # It does so by killing the test's xdist worker, and the replacement never ran the rest of that worker's
+        # loadgroup: the job sat at 99% to the cap (cw 46112563369). `--max-worker-restart=0`: a killed worker
+        # ends the run, failed. The hangs: a worker silent in `test_index_parts.py` (cloud 44309715157, hf
+        # 44335651865, gcs 45008585103; its merge pool forked from a threaded process, spawns since ebbee51a3), one
+        # in `test_static_compact.py` (r2 43906785571, cause unknown), and on py3.13 two in spawned pools: cw
+        # 46112563369 (`test_the_floor_crossers_counted_on_worker_processes_measure_the_same`, timed out) and
+        # cloud 46107791063 (`test_tree_mem.py`'s cut workers; the timeout didn't fire). Each passed on a re-run.
+        # The slowest phase (a `test_static_compact` fixture's setup) takes ~2 min
+        run: cd cloud && uv run --no-sync pytest ${{ matrix.shard.args }} -v -n auto --dist loadgroup --durations=30 --timeout=600 --timeout-method=thread --max-worker-restart=0
 
       - name: Record pass
         if: steps.passed.outputs.cache-hit != 'true'
